@@ -110,6 +110,22 @@ skillmem uninstall --purge-db    # ...and deletes the database
 
 Config edits are made atomically with timestamped backups, and corrupt JSON is never overwritten.
 
+## Benchmarks
+
+Retrieval quality on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (Wu et al., ICLR 2025), full oracle set, **hybrid retrieval** (FTS5 BM25 + Snowball stemming + `paraphrase-multilingual-MiniLM-L12-v2` embeddings, RRF fusion), k=5, CPU only:
+
+| Question type | n | hit@5 | MRR |
+|---|---|---|---|
+| **Overall** | **479** | **0.871** | **0.622** |
+| single-session-assistant | 56 | 0.982 | 0.746 |
+| knowledge-update | 72 | 0.944 | 0.676 |
+| single-session-user | 64 | 0.938 | 0.719 |
+| multi-session | 125 | 0.848 | 0.568 |
+| single-session-preference | 30 | 0.833 | 0.465 |
+| temporal-reasoning | 132 | 0.780 | 0.579 |
+
+Median 0.76 s per query on a laptop CPU, no LLM calls, no network. The pipeline is deterministic: repeated runs produce identical numbers. Reproduce with `python bench/longmemeval.py --sample 0 -k 5` (see [bench/README.md](bench/README.md) for the oracle file and reporting rules — we don't publish bare percentages without stating the retrieval mode and embedding model, and we encourage other tools to do the same).
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
