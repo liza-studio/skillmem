@@ -1,5 +1,7 @@
 # skillmem
 
+[![CI](https://github.com/liza-studio/skillmem/actions/workflows/ci.yml/badge.svg)](https://github.com/liza-studio/skillmem/actions/workflows/ci.yml)
+
 **Self-improving skills for Claude Code — your agent learns, recalls, reinforces, and forgets.**
 
 skillmem gives Claude Code a local, persistent skill & memory layer. After every non-trivial task the agent can record *how it was done* as a skill; before the next task it recalls the relevant ones; skills that keep proving useful get stronger, and skills nobody uses fade away — the way human memory works.

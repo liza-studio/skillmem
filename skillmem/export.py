@@ -2,7 +2,8 @@
 
 Vendor-lock defense: if skillmem ever dies, you keep your data as
 ordinary markdown files. The export is round-trip-safe — re-importing the dump
-via the regular migrator yields the same slug/kind/body.
+via ``vault.import_vault`` yields the same slug/kind/title/body plus metadata
+(project/tags/topics/visibility/agent/strength/ttl/freshness).
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ def _safe_filename(slug: str) -> str:
     return name or "untitled"
 
 
-def _frontmatter(item: S.MemoryItem) -> str:
+def _frontmatter(item: S.MemoryItem, *, truncated: bool = False) -> str:
     meta = {
         "name": item.slug,
         "description": item.title,
@@ -50,6 +51,16 @@ def _frontmatter(item: S.MemoryItem) -> str:
         meta["agent"] = item.agent
     if item.ttl_days:
         meta["ttl_days"] = item.ttl_days
+    if item.freshness_until:
+        meta["freshness_until"] = item.freshness_until
+    if item.visibility and item.visibility != "private":
+        meta["visibility"] = item.visibility
+    if item.strength != 1.0:
+        meta["strength"] = item.strength
+    if truncated:
+        # The externalized body file was lost; only the excerpt follows.
+        # Without this marker the dump would look complete while being partial.
+        meta["truncated"] = True
     return yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
 
 
@@ -69,8 +80,10 @@ def export_all(conn, destination: Path) -> int:
         folder = destination / item.kind
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{_safe_filename(item.slug)}.md"
+        truncated = bool(item.body_path) and not (S.docs_dir() / item.body_path).exists()
         body = S.load_body(item)  # full body even for externalized docs
-        content = "---\n" + _frontmatter(item) + "\n---\n\n" + body.strip() + "\n"
+        content = ("---\n" + _frontmatter(item, truncated=truncated)
+                   + "\n---\n\n" + body.strip() + "\n")
         path.write_text(content, encoding="utf-8")
         count += 1
     return count

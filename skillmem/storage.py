@@ -674,6 +674,14 @@ def upsert(
     check_conflicts: bool = False,
     links: Iterable[str] | None = None,
 ) -> MemoryItem:
+    """Insert or update ``item`` by slug; returns the same (mutated) object.
+
+    NOTE: ``item`` is mutated in place — title/body are scrubbed, and when the
+    body is large enough to be externalized to a file, ``item.body`` is
+    replaced with the short excerpt (``item.body_path`` then points at the
+    full text; use ``load_body`` to read it back). Keep your own copy of the
+    original body if you need it after the call.
+    """
     item.title = scrub(item.title)
     item.body = scrub(item.body)
     item.wordcount = _wordcount(item.body)

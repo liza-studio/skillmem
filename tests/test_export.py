@@ -2,9 +2,8 @@
 
 `export_all` dumps every memory as ``<dest>/<kind>/<slug>.md`` with YAML
 frontmatter; re-importing the dump must yield the same slug/kind/title/body
-(the contract stated in export.py's docstring). Metadata that is written to
-the frontmatter but NOT rehydrated by the importer is pinned below as
-KNOWN ISSUE so any change in behavior is a conscious one.
+AND metadata — project/tags/topics/visibility/agent/strength/ttl/freshness
+(the contract stated in export.py's docstring).
 """
 
 from __future__ import annotations
@@ -85,6 +84,14 @@ def test_export_writes_per_kind_tree_with_frontmatter(conn, memhome: Path):
     assert meta["project"] == "liza"
     assert meta["tags"] == ["deploy", "ops"]
     assert meta["topics"] == ["infra"]
+    assert meta["visibility"] == "public"
+    assert meta["strength"] == 1.5
+    assert "truncated" not in meta
+
+    # Defaults are NOT written: private/1.0 items stay clean markdown.
+    meta_ru = yaml.safe_load(ru.read_text(encoding="utf-8").split("---\n")[1])
+    assert "visibility" not in meta_ru
+    assert "strength" not in meta_ru
 
     # Externalized body must be exported in FULL, not just the DB excerpt.
     assert BIG_BODY in big.read_text(encoding="utf-8")
@@ -117,19 +124,22 @@ def test_round_trip_preserves_slug_kind_title_body(conn, memhome: Path, tmp_path
         assert "skill-restart" in S.links_from(conn2, "ref-deploy-en")
         assert "ref-deploy-en" in S.links_from(conn2, "заметка-про-бэкап")
 
-        # KNOWN ISSUE (pinned, do not "fix" silently): the exporter writes
-        # tags/topics/project/agent/ttl to the frontmatter, but the vault
-        # importer does not rehydrate them — tags/topics come back empty,
-        # project is derived from the folder (= kind name), visibility resets
-        # to 'private', and strength resets to 1.0. The documented round-trip
-        # contract (export.py docstring) is slug/kind/body only; the data is
-        # still present in the .md files, so nothing is lost on disk.
+        # Full metadata round-trip: everything the exporter writes to the
+        # frontmatter is rehydrated by the vault importer.
         got_en = S.get(conn2, "ref-deploy-en")
-        assert got_en.tags == []
-        assert got_en.topics == []
-        assert got_en.project == "reference"   # kind folder, not "liza"
-        assert got_en.visibility == "private"  # not "public"
-        assert got_en.strength == 1.0          # not 1.5
+        assert got_en.tags == ["deploy", "ops"]
+        assert got_en.topics == ["infra"]
+        assert got_en.project == "liza"        # frontmatter beats kind folder
+        assert got_en.visibility == "public"
+        assert got_en.strength == 1.5
+
+        # An item without project/tags/etc. comes back with the defaults —
+        # the kind folder of an exported dump is NOT mistaken for a project.
+        got_ru = S.get(conn2, "заметка-про-бэкап")
+        assert got_ru.project is None
+        assert got_ru.tags == []
+        assert got_ru.visibility == "private"
+        assert got_ru.strength == 1.0
     finally:
         conn2.close()
 
@@ -139,11 +149,10 @@ def test_export_with_missing_body_file_warns_but_writes_excerpt(
 ):
     """A vanished body file must not be exported SILENTLY as a full document.
 
-    Actual behavior (pinned): storage.load_body logs a WARNING and falls back
-    to the stored excerpt, so the export completes and the operator sees the
-    warning in the log. KNOWN ISSUE: the exported .md itself carries no
-    explicit truncation marker beyond the excerpt's trailing ellipsis — the
-    only signal is the log line.
+    storage.load_body logs a WARNING and falls back to the stored excerpt, so
+    the export completes and the operator sees the warning in the log; the
+    exported .md itself carries ``truncated: true`` in the frontmatter so the
+    backup does not masquerade as complete.
     """
     saved = S.upsert(conn, S.MemoryItem(slug="doc-lost", kind="document",
                                         title="Doomed doc", body=BIG_BODY))
@@ -159,3 +168,6 @@ def test_export_with_missing_body_file_warns_but_writes_excerpt(
     # Only the excerpt made it out — the full body is genuinely gone.
     assert len(exported) < len(BIG_BODY)
     assert "…" in exported
+    # And the file says so explicitly, not only the log.
+    meta = yaml.safe_load(exported.split("---\n")[1])
+    assert meta.get("truncated") is True

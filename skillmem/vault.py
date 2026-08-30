@@ -2,8 +2,11 @@
 
 Recursively walks a directory tree, imports every .md as a memory of
 ``kind=document`` by default, derives the ``project`` tag from the top-level
-folder name, copies attached images / PDFs to the assets directory, and
-resolves ``[[wikilinks]]`` into ``mem_links``.
+folder name (frontmatter ``project:`` wins when present), copies attached
+images / PDFs to the assets directory, and resolves ``[[wikilinks]]`` into
+``mem_links``. Frontmatter written by export.py (tags/topics/visibility/agent/
+strength/ttl/freshness) is rehydrated, making export -> import a full
+metadata round-trip.
 
 The migrator from ``migrate.py`` handles single .md files with frontmatter
 shaped like Claude Code auto-memory; this module handles arbitrary trees with
@@ -67,6 +70,37 @@ def _parse_md(text: str) -> tuple[dict, str]:
         meta = {}
     # Same surrogate hazard as migrate.parse_file — see migrate.desurrogate.
     return desurrogate(meta), desurrogate(body.strip())
+
+
+def _str_list(value) -> list[str]:
+    """Frontmatter list coercion: Obsidian allows both ``tags: [a, b]`` and ``tags: a``."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(v) for v in value if v is not None]
+    return []
+
+
+def _restore_meta(meta: dict) -> dict:
+    """Rehydrate metadata the exporter (export.py) writes to frontmatter, so an
+    export -> import round-trip is lossless. A plain Obsidian vault without
+    these keys yields an empty dict — the MemoryItem defaults stay in force."""
+    out: dict = {}
+    if meta.get("tags"):
+        out["tags"] = _str_list(meta["tags"])
+    if meta.get("topics"):
+        out["topics"] = _str_list(meta["topics"])
+    if meta.get("visibility"):
+        out["visibility"] = str(meta["visibility"])
+    if meta.get("agent"):
+        out["agent"] = str(meta["agent"])
+    for key, cast in (("strength", float), ("ttl_days", int), ("freshness_until", int)):
+        if meta.get(key) is not None:
+            try:
+                out[key] = cast(meta[key])
+            except (TypeError, ValueError):
+                pass
+    return out
 
 
 def _is_auto_memory(meta: dict) -> bool:
@@ -174,12 +208,22 @@ def _run_import(conn, root, assets_root, kind, project_override,
                 report.skipped += 1
                 continue
             slug = _slug_from_meta_or_path(meta, root, path)
-            project = project_override or _project_from_path(root, path)
+            # Frontmatter project wins over the folder name; an exported dump
+            # (node_type=memory) never falls back to the folder — that folder
+            # is the kind, not a project.
+            project = project_override or (
+                str(meta["project"]) if meta.get("project")
+                else None if _is_auto_memory(meta)
+                else _project_from_path(root, path)
+            )
             title = _title_from(meta, body, slug)
             md = meta.get("metadata") or {}
             item_kind = kind
             if isinstance(md, dict) and md.get("type"):
                 item_kind = str(md["type"])
+            extras = _restore_meta(meta)
+            if isinstance(md, dict) and md.get("originSessionId"):
+                extras["source_session"] = str(md["originSessionId"])
 
             attachments: list[str] = []
             for asset in _collect_attachments(root, path.parent, body):
@@ -192,7 +236,7 @@ def _run_import(conn, root, assets_root, kind, project_override,
                 body=body,
                 project=project,
                 attachments=attachments,
-                visibility="private",
+                **extras,
             )
             existed = conn.execute(
                 "SELECT 1 FROM memory_items WHERE slug = ?", (slug,)
