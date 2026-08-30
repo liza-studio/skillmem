@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Distribution packaging (no code changes): Claude Code plugin
+  (`.claude-plugin/plugin.json` + `hooks/hooks.json` + single-plugin
+  marketplace), MCP Registry manifest (`server.json`,
+  `io.github.liza-studio/skillmem`), and the publishing runbook
+  `docs/PUBLISHING.md` (PyPI → MCP Registry → plugin).
+
 ## 0.9.0 — first public release
 
 Self-improving skills for Claude Code, extracted from an internal agent-memory

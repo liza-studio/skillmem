@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "skillmem hook mcp-guard", "timeout": 10 },
+          { "type": "command", "command": "skillmem inject --types user,feedback --budget 2000", "timeout": 10 },
+          { "type": "command", "command": "skillmem hook session-history", "timeout": 10 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "skillmem hook verify-gate", "timeout": 10 },
+          { "type": "command", "command": "skillmem hook auto-recall", "timeout": 10 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "skillmem hook tool-recall", "timeout": 10 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "skillmem hook session-recap", "timeout": 95 },
+          { "type": "command", "command": "skillmem migrate", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.liza-studio/skillmem",
+  "title": "skillmem",
+  "description": "Self-improving skill memory for coding agents: learn, recall, reinforce, decay. Local, no cloud.",
+  "repository": {
+    "url": "https://github.com/liza-studio/skillmem",
+    "source": "github"
+  },
+  "websiteUrl": "https://skillmem.dev",
+  "version": "0.9.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "skillmem",
+      "version": "0.9.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "description": "Start the stdio MCP server (the `skillmem mcp` subcommand)"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "SKILLMEM_DB",
+          "description": "Path to the SQLite database file (default: the platform data directory)",
+          "isRequired": false,
+          "format": "filepath"
+        }
+      ]
+    }
+  ]
+}

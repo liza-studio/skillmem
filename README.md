@@ -1,5 +1,7 @@
 # skillmem
 
+<!-- mcp-name: io.github.liza-studio/skillmem -->
+
 [![CI](https://github.com/liza-studio/skillmem/actions/workflows/ci.yml/badge.svg)](https://github.com/liza-studio/skillmem/actions/workflows/ci.yml)
 
 **Self-improving skills for Claude Code — your agent learns, recalls, reinforces, and forgets.**
@@ -42,6 +44,17 @@ skillmem doctor                 # health check: DB, schema, semantic status
 ```
 
 `init --claude-code` registers the MCP server in `~/.claude.json` and the hooks in `~/.claude/settings.json` (idempotent, with backups). Use `--hooks minimal` for just the Stop→migrate hook, or `--hooks none` for MCP only.
+
+### Claude Code plugin & MCP Registry (coming soon)
+
+The repo already carries a Claude Code plugin (`.claude-plugin/` + `hooks/hooks.json` — MCP server and all hooks in one install) and an MCP Registry manifest (`server.json`). Both go live once the `skillmem` package is published on PyPI; until then, use the installers above. Once live:
+
+```
+/plugin marketplace add liza-studio/skillmem
+/plugin install skillmem@liza-studio
+```
+
+The plugin requires the skillmem Python package on PATH and replaces `skillmem init --claude-code`'s wiring — use one or the other, not both (see [docs/PUBLISHING.md](docs/PUBLISHING.md)).
 
 ## How it works
 

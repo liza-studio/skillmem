@@ -1,0 +1,18 @@
+{
+  "name": "liza-studio",
+  "owner": {
+    "name": "Liza Studio",
+    "url": "https://github.com/liza-studio"
+  },
+  "plugins": [
+    {
+      "name": "skillmem",
+      "source": "./",
+      "description": "Self-improving skill memory for Claude Code: MCP server (8 tools) + 6 memory hooks. Requires the skillmem Python package on PATH (pip install skillmem).",
+      "version": "0.9.0",
+      "author": {
+        "name": "Liza Studio"
+      }
+    }
+  ]
+}
