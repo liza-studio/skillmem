@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from skillmem.migrate import discover_claude_memory_dirs
 
 
@@ -27,7 +29,10 @@ def test_discover_skips_dead_symlink(tmp_path: Path):
     # A dead symlink where memory should be
     bad = projects / "broken"
     bad.mkdir()
-    os.symlink("/nonexistent/path/12345", bad / "memory")
+    try:
+        os.symlink("/nonexistent/path/12345", bad / "memory")
+    except OSError:
+        pytest.skip("symlinks require elevated privileges on this platform")
     found = discover_claude_memory_dirs(home=tmp_path)
     assert len(found) == 1
     assert "good" in str(found[0])

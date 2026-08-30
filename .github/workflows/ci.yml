@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # Deliberately WITHOUT the [semantic] extra: no 220 MB model download in
+      # the matrix. test_semantic.py skips itself when the embedder is absent.
+      - name: Install (no semantic extra)
+        run: python -m pip install -e ".[test]"
+      - name: Run tests
+        run: python -m pytest -q
+
+  test-semantic:
+    name: test-semantic (ubuntu, py3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/skillmem-models
+          # Bump the suffix when MODEL_NAME in skillmem/embed.py changes.
+          key: fastembed-paraphrase-multilingual-MiniLM-L12-v2-v1
+      - name: Install (with semantic extra)
+        run: python -m pip install -e ".[test,semantic]"
+      - name: Run tests (semantic recall enabled)
+        env:
+          SKILLMEM_MODEL_CACHE: /home/runner/.cache/skillmem-models
+        run: python -m pytest -q

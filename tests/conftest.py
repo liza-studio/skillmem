@@ -30,5 +30,7 @@ def conn(memhome: Path):
 def fakehome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Pretend $HOME = tmp dir so `init`/`uninstall` patch synthetic configs."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Windows: Path.home() resolves via USERPROFILE, not HOME.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path / ".skillmem"))
     return tmp_path
