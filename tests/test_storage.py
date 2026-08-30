@@ -1,4 +1,8 @@
-"""Core storage layer: tx, conflict, TTL, externalize."""
+"""Core storage layer: tx, conflict, TTL, externalize.
+
+Cyrillic fixtures are intentional: bilingual (RU+EN) search is a feature,
+and these tests exercise the Cyrillic stemming/search path.
+"""
 
 from __future__ import annotations
 

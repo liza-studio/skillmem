@@ -6,19 +6,20 @@
 #   curl -sSL https://<your-host>/skillmem/install.sh | bash
 #   curl -sSL https://<your-host>/skillmem/install.sh | bash -s -- --no-claude-code
 #   curl -sSL https://<your-host>/skillmem/install.sh | bash -s -- --no-semantic
+#   bash install.sh --no-schedule --token=<read-only GitHub PAT for upgrades>
 #
 # Offline (no host at all — someone handed you the tarball):
 #   bash install.sh --from=/path/to/skillmem-0.7.0.tar.gz
 #
-# Что делает:
-#   1. ставит python@3.12 + uv (через brew / apt) если их нет
-#   2. скачивает свежий тарбол skillmem
-#   3. разворачивает в ~/.local/share/skillmem/<version>
-#   4. создаёт venv + ставит пакет (с semantic-экстрой; --no-semantic = только BM25)
-#   5. кладёт симлинки в ~/.local/bin
-#   6. запускает `skillmem init --claude-code` (можно отключить флагом)
+# What it does:
+#   1. installs python@3.12 + uv (via brew / apt) if missing
+#   2. downloads the latest skillmem tarball (or uses --from=<file>)
+#   3. unpacks into ~/.local/share/skillmem/current
+#   4. creates a venv + installs the package (with the semantic extra; --no-semantic = BM25 only)
+#   5. drops symlinks into ~/.local/bin
+#   6. runs `skillmem init --claude-code` + `skillmem schedule install` (both skippable)
 #
-# Откат: ~/.local/bin/skillmem uninstall && rm -rf ~/.local/share/skillmem
+# Undo: ~/.local/bin/skillmem uninstall && rm -rf ~/.local/share/skillmem
 
 set -euo pipefail
 
@@ -28,15 +29,19 @@ INSTALL_ROOT="${SKILLMEM_INSTALL_ROOT:-$HOME/.local/share/skillmem}"
 BIN_DIR="${SKILLMEM_BIN_DIR:-$HOME/.local/bin}"
 WITH_CLAUDE_CODE=1
 WITH_SEMANTIC=1
+WITH_SCHEDULE=1
+GH_TOKEN=""
 
 for arg in "$@"; do
     case "$arg" in
         --no-claude-code) WITH_CLAUDE_CODE=0 ;;
         --no-semantic) WITH_SEMANTIC=0 ;;
+        --no-schedule) WITH_SCHEDULE=0 ;;
+        --token=*) GH_TOKEN="${arg#*=}" ;;
         --url=*) PACKAGE_URL="${arg#*=}" ;;
         --from=*) LOCAL_PKG="${arg#*=}" ;;
         --help|-h)
-            sed -n '2,18p' "$0"; exit 0 ;;
+            sed -n '2,21p' "$0"; exit 0 ;;
     esac
 done
 
@@ -188,13 +193,24 @@ if ! printf "%s" "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
     warn "Then reload your shell:  exec \$SHELL -l"
 fi
 
-# --- step 6: init Claude Code ---
+# --- step 6: init Claude Code + token + schedule (parity with install.ps1) ---
 if [[ "$WITH_CLAUDE_CODE" == "1" ]]; then
     say "Configuring Claude Code (use --no-claude-code to skip)"
     "$BIN_DIR/skillmem" init --claude-code || \
         warn "init failed — run \`$BIN_DIR/skillmem init --claude-code\` manually"
 else
     say "Skipped Claude Code setup. Run later: skillmem init --claude-code"
+fi
+
+if [ -n "$GH_TOKEN" ]; then
+    "$BIN_DIR/skillmem" token set "$GH_TOKEN" >/dev/null && \
+        say "GitHub token saved — \`skillmem upgrade\` will see new releases" || \
+        warn "token set failed — run manually: skillmem token set <TOKEN>"
+fi
+
+if [[ "$WITH_SCHEDULE" == "1" ]]; then
+    "$BIN_DIR/skillmem" schedule install || \
+        warn "schedule install failed — run manually: skillmem schedule install"
 fi
 
 # --- done ---
@@ -207,7 +223,7 @@ Try it now:
 
 Open Claude Code (\`claude\`) in any project — the mem_* tools are exposed.
 
-Docs:   $PKG_DIR/OVERVIEW.md
+Docs:   $PKG_DIR/README.md
 Logs:   $INSTALL_ROOT/
 Uninstall:
     skillmem uninstall

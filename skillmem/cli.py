@@ -371,16 +371,16 @@ def _patch_claude_json(
 
 
 def _venv_script(name: str) -> Path:
-    """Console-script рядом с интерпретатором: bin/<name> или Scripts\\<name>.exe."""
+    """Console script next to the interpreter: bin/<name> or Scripts\\<name>.exe."""
     scripts = Path(sys.executable).parent
     return scripts / (f"{name}.exe" if sys.platform == "win32" else name)
 
 
 def _hook_cmd(binary: Path, args: list[str]) -> str:
-    """Команда хука с платформенным квотингом.
+    """Hook command string with platform-appropriate quoting.
 
-    POSIX — shlex.quote; Windows — list2cmdline (одинарные кавычки shlex
-    для cmd.exe не существуют, путь C:\\Users\\First Last\\… ломался бы).
+    POSIX — shlex.quote; Windows — list2cmdline (cmd.exe has no notion of
+    shlex single quotes, so a path like C:\\Users\\First Last\\… would break).
     """
     parts = [str(binary), *args]
     if sys.platform == "win32":
@@ -401,8 +401,8 @@ def _patch_settings_hook(
 ) -> dict[str, Any]:
     """Add a hook into ``~/.claude/settings.json`` if not already present.
 
-    Дедуп — по полной команде (не по пути бинаря): на одно событие может
-    висеть несколько разных skillmem хуков (verify-gate + auto-recall).
+    Dedup is by the full command (not the binary path): one event can carry
+    several distinct skillmem hooks (verify-gate + auto-recall).
     """
     import time as _time
     data: dict[str, Any] = {}
@@ -452,7 +452,7 @@ def _patch_settings_hook(
 @click.option("--hooks", "hooks_mode",
               type=click.Choice(["full", "minimal", "none"]), default="full",
               help="full: recall/recap/guard hooks + migrate; "
-                   "minimal: только Stop→migrate (поведение <=0.7); none: без хуков")
+                   "minimal: only Stop→migrate; none: no hooks")
 @click.pass_context
 def init(
     ctx: click.Context,
@@ -513,15 +513,15 @@ def init(
                 _hook("UserPromptSubmit", ["hook", "auto-recall"]),
                 _hook("PreToolUse", ["hook", "tool-recall"],
                       matcher="Bash|Edit|Write|NotebookEdit"),
-                # recap зовёт `claude -p` — таймаут должен покрыть LLM-вызов
+                # recap invokes `claude -p` — the timeout must cover the LLM call
                 _hook("Stop", ["hook", "session-recap"], timeout=95),
             ]
         report["hooks"] = hook_reports
 
     click.echo(json.dumps(report, ensure_ascii=False, indent=2))
     click.echo("")
-    click.echo("Готово. Открой `claude` в любом проекте — увидишь tools mem_*.")
-    click.echo("Откат: skillmem uninstall")
+    click.echo("Done. Open `claude` in any project — the mem_* tools will be there.")
+    click.echo("Undo: skillmem uninstall")
 
 
 @main.command()
@@ -587,7 +587,7 @@ def uninstall(ctx: click.Context, claude_code: bool, keep_db: bool) -> None:
             except json.JSONDecodeError:
                 report["warnings"].append(f"could not parse {settings_json}")
 
-    # Снять decay/export из планировщика ОС (best-effort).
+    # Remove decay/export from the OS scheduler (best-effort).
     try:
         from .schedule import _backend
         removed = _backend()[1]()
@@ -714,18 +714,18 @@ def _gh_get(url: str, token: str, *, accept: str, timeout: int = 30) -> bytes:
 
 @main.group(name="token")
 def token_group() -> None:
-    """Read-only GitHub token для `skillmem upgrade` (приватные релизы)."""
+    """Read-only GitHub token for `skillmem upgrade` (private releases)."""
 
 
 @token_group.command("set")
 @click.argument("value")
 def token_set(value: str) -> None:
-    """Сохранить токен в файл (chmod 600). Значение нигде не печатается."""
+    """Save the token to a file (chmod 600). The value is never printed."""
     tf = _token_file()
     tf.parent.mkdir(parents=True, exist_ok=True)
     tf.write_text(value.strip() + "\n", encoding="utf-8")
     try:
-        tf.chmod(0o600)  # на Windows no-op, файл и так в профиле юзера
+        tf.chmod(0o600)  # no-op on Windows; the file lives in the user profile anyway
     except Exception:
         pass
     click.echo(f"token saved → {tf}")
@@ -733,17 +733,17 @@ def token_set(value: str) -> None:
 
 @token_group.command("status")
 def token_status() -> None:
-    """Показать, откуда будет взят токен (само значение не печатается)."""
+    """Show where the token will be taken from (the value itself is never printed)."""
     tok, source = _github_token()
     click.echo(f"token: {'present' if tok else 'MISSING'} ({source})")
     if not tok:
-        click.echo("Получить: fine-grained PAT на репо с правом Contents:Read,")
-        click.echo("затем `skillmem token set <TOKEN>` (или env SKILLMEM_GITHUB_TOKEN).")
+        click.echo("Get one: a fine-grained PAT for the repo with Contents:Read,")
+        click.echo("then `skillmem token set <TOKEN>` (or env SKILLMEM_GITHUB_TOKEN).")
 
 
 @token_group.command("clear")
 def token_clear() -> None:
-    """Удалить сохранённый токен-файл."""
+    """Delete the saved token file."""
     tf = _token_file()
     if tf.exists():
         tf.unlink()
@@ -866,7 +866,7 @@ def _upgrade_via_github(check_only: bool, repo: str, token_opt: str | None) -> N
               help="Legacy: self-hosted latest.version URL")
 def upgrade(check_only: bool, repo: str | None, token_opt: str | None,
             install_url: str | None, version_url: str | None) -> None:
-    """Check for and pull the latest release (GitHub Releases, приватный).
+    """Check for and pull the latest release (GitHub Releases).
 
     --check just compares versions; without it, we re-execute the installer
     in-place (current binary is replaced via ``os.execvp``)."""
@@ -877,7 +877,7 @@ def upgrade(check_only: bool, repo: str | None, token_opt: str | None,
     install_url = install_url or _os.environ.get("SKILLMEM_INSTALL_URL", DEFAULT_INSTALL_URL)
     version_url = version_url or _os.environ.get("SKILLMEM_VERSION_URL", DEFAULT_VERSION_URL)
 
-    # Основной канал — GitHub; легаси-URL только если его явно настроили.
+    # GitHub is the primary channel; the legacy URL mode only when explicitly configured.
     if not version_url:
         _upgrade_via_github(
             check_only,
@@ -927,7 +927,7 @@ def upgrade(check_only: bool, repo: str | None, token_opt: str | None,
     import tempfile as _tempfile
 
     if sys.platform == "win32":
-        # Конвенция раздачи: install.ps1 лежит рядом с install.sh.
+        # Distribution convention: install.ps1 sits next to install.sh.
         if install_url.endswith("install.sh"):
             install_url = install_url[: -len("install.sh")] + "install.ps1"
         with _urlreq.urlopen(install_url, timeout=30) as resp:
@@ -1187,19 +1187,6 @@ def skills_dups(ctx: click.Context, threshold: float) -> None:
     click.echo(f"{len(pairs)} candidate pair(s).")
 
 
-@main.command("trace-stats")
-@click.option("--days", default=30, type=int, help="Look-back window.")
-@click.pass_context
-def trace_stats(ctx: click.Context, days: int) -> None:
-    """Recall-trace summary (Phase 4 groundwork)."""
-    conn = _conn(ctx.obj["db_path"])
-    s = S.trace_stats(conn, days=days)
-    click.echo(f"last {s['days']}d: {s['events']} recall events, "
-               f"{s['empty_recalls']} empty, {s['distinct_skills_surfaced']} distinct skills")
-    for slug, n in s["top"]:
-        click.echo(f"  {n:4}x  {slug}")
-
-
 @main.command("reindex-embeddings")
 @click.option("--all", "all_rows", is_flag=True, help="Re-embed every row, not just missing.")
 @click.pass_context
@@ -1213,7 +1200,7 @@ def reindex_embeddings(ctx: click.Context, all_rows: bool) -> None:
     click.echo(f"Embedded {res['updated']} of {res.get('total', 0)} rows.")
 
 
-from .hooks import hook_group  # noqa: E402 — click-группы после определения main
+from .hooks import hook_group  # noqa: E402 — click groups defined after main
 from .schedule import schedule_group  # noqa: E402
 
 main.add_command(hook_group)

@@ -4,6 +4,7 @@ Real incident: two session notes whose `description:` was written as a
 json.dumps() scalar (ensure_ascii=True → escaped surrogate pair for 🔴) made
 `skillmem migrate` fail those files with
 ``UnicodeEncodeError: surrogates not allowed`` — silently losing the records.
+Cyrillic fixtures are intentional: bilingual content is a feature.
 """
 
 from __future__ import annotations

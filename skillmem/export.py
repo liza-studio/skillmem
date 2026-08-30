@@ -1,6 +1,6 @@
 """Dump every memory back to .md with YAML frontmatter.
 
-Vendor-lock defense (LML §11.1): if skillmem ever dies, you keep your data as
+Vendor-lock defense: if skillmem ever dies, you keep your data as
 ordinary markdown files. The export is round-trip-safe — re-importing the dump
 via the regular migrator yields the same slug/kind/body.
 """

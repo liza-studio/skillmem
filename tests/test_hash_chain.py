@@ -1,4 +1,4 @@
-"""SHA256 hash-chain over memory_history (borrowed from NOM §6)."""
+"""SHA256 hash-chain over memory_history (tamper-evident edit history)."""
 
 from __future__ import annotations
 

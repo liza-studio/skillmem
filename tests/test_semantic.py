@@ -2,6 +2,8 @@
 
 Skipped automatically when the embedder is unavailable (no fastembed / no
 model / MEM_SEMANTIC=0) so the base suite still runs offline.
+
+Cyrillic fixtures are intentional: cross-lingual RU<->EN recall is a feature.
 """
 
 import os

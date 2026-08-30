@@ -33,7 +33,7 @@ def _resolve_default_source() -> Path:
     """Auto-resolve the auto-memory dir per machine. No hardcoded paths.
 
     Priority: $SKILLMEM_SOURCE_DIR → first ~/.claude/projects/*/memory →
-    ~/.claude/projects (безопасный фолбэк — не падаем, просто пусто).
+    ~/.claude/projects (safe fallback — never raises, just returns nothing).
     """
     env = os.environ.get("SKILLMEM_SOURCE_DIR")
     if env:

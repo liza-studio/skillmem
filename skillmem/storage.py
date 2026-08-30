@@ -1,7 +1,7 @@
 """SQLite + FTS5 storage layer for skillmem.
 
-Schema is the MVP version from Liza_Mind_Concept §2.4. Pillar #1
-(birth certificate / supersession / death record) is built in:
+Full record provenance (birth certificate / supersession / death record)
+is built in:
 - created_at/updated_at and source_session = birth certificate
 - ttl_days + freshness_until = expiration
 - supersedes_id chain + memory_history table = death record
@@ -43,7 +43,7 @@ _PRIVATE_BLOCK = _re.compile(r"<private>.*?</private>", _re.DOTALL)
 _API_KEY = _re.compile(
     r"\b(sk-[A-Za-z0-9_\-]{20,}|ghp_[A-Za-z0-9]{30,}|AIza[0-9A-Za-z_\-]{30,})\b"
 )
-# Extended secret patterns (Phase 2). High-precision — низкий риск ложных срабатываний.
+# Extended secret patterns. High-precision — low false-positive risk.
 _PEM_KEY = _re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
     _re.DOTALL,
@@ -51,7 +51,7 @@ _PEM_KEY = _re.compile(
 _AWS_KEY = _re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _TG_BOT_TOKEN = _re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_\-]{32,}\b")
 _JWT = _re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b")
-# password=... / "token": "..." / secret: ... — режем только значение, ключ оставляем.
+# password=... / "token": "..." / secret: ... — redact the value, keep the key name.
 _SECRET_ASSIGN = _re.compile(
     r"""(?i)\b(password|passwd|pwd|secret|api[_\-]?key|token|access[_\-]?token)\b"""
     r"""(\s*[:=]\s*)(["']?)([^\s"',;]{6,})(["']?)""",
@@ -567,7 +567,7 @@ def scrub(text: str) -> str:
     text = _AWS_KEY.sub("[aws-key redacted]", text)
     text = _TG_BOT_TOKEN.sub("[tg-token redacted]", text)
     text = _JWT.sub("[jwt redacted]", text)
-    # сохраняем имя ключа и разделитель, маскируем только значение
+    # keep the key name and separator, mask only the value
     text = _SECRET_ASSIGN.sub(r"\1\2\3[secret redacted]\5", text)
     return text
 
@@ -616,15 +616,6 @@ def _body_filename(slug: str) -> str:
     safe = _re.sub(r"[^\w.\-]+", "-", slug, flags=_re.UNICODE).strip("-") or "untitled"
     h = hashlib.sha256(slug.encode("utf-8")).hexdigest()[:8]
     return f"{safe}__{h}.md"
-
-
-def _write_body_file(slug: str, body: str) -> str:
-    """Atomic write: temp file in the same dir, then ``os.replace``."""
-    dest = docs_dir() / _body_filename(slug)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-    tmp.write_text(body, encoding="utf-8")
-    os.replace(tmp, dest)
-    return dest.name  # relative to docs_dir()
 
 
 def _stage_body_file(slug: str, body: str) -> tuple[Path, Path]:
@@ -959,7 +950,7 @@ def soft_delete(conn: sqlite3.Connection, slug: str, reason: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# chain verification (borrowed from NOM §6 tamper-evidence)
+# chain verification (tamper-evident history)
 # --------------------------------------------------------------------------- #
 
 
@@ -1142,19 +1133,6 @@ def _escape_fts_or(tokens: Iterable[str]) -> str:
         safe = stem.replace('"', '""')
         parts.append(f'"{safe}"*')
     return " OR ".join(parts) if parts else '""'
-
-
-SEARCH_BM25 = """
-SELECT m.*, bm25(mem_fts_stem) AS rank
-FROM mem_fts_stem
-JOIN memory_items m ON m.id = mem_fts_stem.rowid
-WHERE mem_fts_stem MATCH ?
-  AND m.deleted_at IS NULL
-  {kind_clause}
-  {project_clause}
-ORDER BY rank
-LIMIT ?
-"""
 
 
 def _snippet_for(body: str, query: str, *, around: int = 90) -> str:
@@ -1372,10 +1350,9 @@ def find_conflicts(
     """Return existing memories whose word content overlaps the new one.
 
     Uses FTS5 BM25 to surface candidates (cheap), then computes asymmetric
-    inclusion overlap ``|A ∩ B| / min(|A|, |B|)`` on the bag of words. This
-    is what LML §5.2 means by "70% перекрытие": if 70% of one doc's words
-    are in the other, treat it as a duplicate — regardless of length.
-    No LLM involved.
+    inclusion overlap ``|A ∩ B| / min(|A|, |B|)`` on the bag of words: if 70%
+    of one doc's words are in the other, treat it as a duplicate — regardless
+    of length. No LLM involved.
     """
     bag = _word_bag(title + "\n" + body)
     if len(bag) < 5:
@@ -1528,7 +1505,7 @@ STRENGTH_BOOST = 0.15
 STRENGTH_CAP = 2.0
 DECAY_FACTOR = 0.85
 DECAY_FLOOR = 0.05
-# Lifecycle thresholds (Hermes-inspired): active -> stale -> archived. Archived
+# Lifecycle thresholds: active -> stale -> archived. Archived
 # skills are excluded from recall but never deleted — restorable one command.
 STALE_AFTER_DAYS = 30
 ARCHIVE_AFTER_DAYS = 90
@@ -1582,8 +1559,8 @@ def decay_stale(
 
 
 def _backup_skills(rows: list[sqlite3.Row], reason: str) -> None:
-    """Append a human-readable JSONL snapshot before archiving (Hermes-style
-    pre-prune backup). Best-effort: a write failure never blocks archiving."""
+    """Append a human-readable JSONL snapshot before archiving (pre-prune
+    backup). Best-effort: a write failure never blocks archiving."""
     if not rows:
         return
     try:
@@ -1715,18 +1692,6 @@ def find_duplicate_skills(
     return pairs
 
 
-RECALL_SQL = """
-SELECT m.*, bm25(mem_fts_stem) AS bm25_rank
-FROM mem_fts_stem
-JOIN memory_items m ON m.id = mem_fts_stem.rowid
-WHERE mem_fts_stem MATCH ?
-  AND m.deleted_at IS NULL
-  AND m.kind = 'skill'
-ORDER BY bm25(mem_fts_stem) * (1.0 + m.strength * 0.3)
-LIMIT ?
-"""
-
-
 def recall_skills(
     conn: sqlite3.Connection,
     query: str,
@@ -1736,10 +1701,9 @@ def recall_skills(
 ) -> list[dict[str, Any]]:
     """Find relevant skills for a task, optionally reinforcing them.
 
-    Hybrid BM25+vector fusion (RRF), then a strength bonus so frequently-useful
-    skills surface higher — same intent as the old ``bm25 * (1+strength*0.3)``
-    ranking, now applied to the fused score. Degrades to BM25-only when no
-    embeddings are present (see hybrid_rank_ids).
+    Hybrid BM25+vector fusion (RRF), then a gentle strength bonus
+    (``SKILL_STRENGTH_COEF``) so frequently-useful skills surface higher.
+    Degrades to BM25-only when no embeddings are present (see hybrid_rank_ids).
     """
     bm = _bm25_ids(conn, query, kind="skill")
     vec = _vector_ids(conn, query, kind="skill")
@@ -1793,64 +1757,3 @@ def recall_skills(
                 d["access_count"] = r["access_count"]
         results.append(d)
     return results
-
-
-def log_recall_trace(
-    conn: sqlite3.Connection,
-    *,
-    subject_id: str | None,
-    agent: str | None,
-    query: str,
-    results: list[dict[str, Any]],
-) -> None:
-    """Record one recall event (Phase 4 groundwork). Best-effort, never raises.
-
-    Stores which skills were surfaced for a query so a future optimizer can see
-    real usage. Lightweight: one INSERT per recall call.
-    """
-    try:
-        recalled = json.dumps(
-            [{"slug": r.get("slug"), "score": r.get("score")} for r in results],
-            ensure_ascii=False,
-        )
-        conn.execute(
-            "INSERT INTO skill_traces (subject_id, agent, query, recalled, created_at) "
-            "VALUES (?,?,?,?,?)",
-            (subject_id, agent, scrub(query[:500]), recalled, _now()),
-        )
-    except sqlite3.Error as exc:
-        log.debug("recall trace write skipped: %s", exc)
-
-
-def trace_stats(conn: sqlite3.Connection, *, days: int = 30) -> dict[str, Any]:
-    """Aggregate recall traces for review: volume + most/least surfaced skills."""
-    since = _now() - days * 86400
-    total = conn.execute(
-        "SELECT COUNT(*) FROM skill_traces WHERE created_at >= ?", (since,)
-    ).fetchone()[0]
-    empty = conn.execute(
-        "SELECT COUNT(*) FROM skill_traces WHERE created_at >= ? AND recalled = '[]'",
-        (since,),
-    ).fetchone()[0]
-    # per-skill surface counts (parse JSON in Python — small volumes)
-    counts: dict[str, int] = {}
-    for (recalled,) in conn.execute(
-        "SELECT recalled FROM skill_traces WHERE created_at >= ?", (since,)
-    ):
-        for item in _parse_json_list_objs(recalled):
-            slug = item.get("slug")
-            if slug:
-                counts[slug] = counts.get(slug, 0) + 1
-    top = sorted(counts.items(), key=lambda kv: -kv[1])[:15]
-    return {"days": days, "events": total, "empty_recalls": empty,
-            "distinct_skills_surfaced": len(counts), "top": top}
-
-
-def _parse_json_list_objs(raw: str | None) -> list[dict[str, Any]]:
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-        return data if isinstance(data, list) else []
-    except (ValueError, TypeError):
-        return []

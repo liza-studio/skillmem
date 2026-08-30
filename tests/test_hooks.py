@@ -1,4 +1,8 @@
-"""`skillmem hook *` — кроссплатформенные Claude Code хуки (порт bash-версий)."""
+"""`skillmem hook *` — cross-platform Claude Code hooks.
+
+Cyrillic fixtures are intentional: bilingual (RU+EN) search is a feature,
+and these tests exercise the Cyrillic code path end to end.
+"""
 
 from __future__ import annotations
 
@@ -35,10 +39,10 @@ def db(memhome: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         title="Деплой только через deploy_gated.sh",
         body="Никаких хотфиксов напрямую на прод. Только гейт."))
     S.upsert(conn, S.MemoryItem(
-        slug="skill-restart-liza", kind="skill",
-        title="Рестарт Лизы без потери ответов",
-        body="Только scripts/restart_liza.sh — дренаж in-flight."))
-    conn.execute("UPDATE memory_items SET strength=0.9 WHERE slug='skill-restart-liza'")
+        slug="skill-restart-bot", kind="skill",
+        title="Рестарт бота без потери ответов",
+        body="Только scripts/restart_bot.sh — дренаж in-flight."))
+    conn.execute("UPDATE memory_items SET strength=0.9 WHERE slug='skill-restart-bot'")
     conn.commit()
     conn.close()
     return path
@@ -46,15 +50,15 @@ def db(memhome: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 def test_auto_recall_injects_feedback_and_skills(db: Path):
     out = _hook(db, "auto-recall", {
-        "prompt": "как правильно задеплоить хотфикс и рестартовать лизу на проде",
+        "prompt": "как правильно задеплоить хотфикс и рестартовать бота на проде",
         "session_id": "sess-hooks-test-1",
     })
     payload = json.loads(out)
     ctx = payload["hookSpecificOutput"]["additionalContext"]
     assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
-    # Fix мёртвого фильтра .rank<-5: feedback-секция снова живая.
+    # The feedback section must be present alongside skills.
     assert "feedback-deploy-rules" in ctx
-    assert "skill-restart-liza" in ctx
+    assert "skill-restart-bot" in ctx
 
 
 def test_auto_recall_silent_on_short_prompt(db: Path):
@@ -65,29 +69,33 @@ def test_auto_recall_silent_on_short_prompt(db: Path):
 def test_tool_recall_dedups_against_auto_recall(db: Path):
     sid = "sess-hooks-dedup"
     _hook(db, "auto-recall", {
-        "prompt": "как задеплоить и рестартовать лизу на проде без потери ответов",
+        "prompt": "как задеплоить и рестартовать бота на проде без потери ответов",
         "session_id": sid,
     })
     out = _hook(db, "tool-recall", {
         "tool_name": "Bash", "session_id": sid,
-        "tool_input": {"command": "bash scripts/restart_liza.sh деплой прод"},
+        "tool_input": {"command": "bash scripts/restart_bot.sh деплой прод"},
     })
-    # Слаги, уже показанные auto-recall'ом в этом же цикле, не повторяются.
-    assert "skill-restart-liza" not in out
+    # Slugs already injected by auto-recall in this cycle are not repeated.
+    assert "skill-restart-bot" not in out
     assert "feedback-deploy-rules" not in out
 
 
 def test_tool_recall_ignores_unknown_tools(db: Path):
     out = _hook(db, "tool-recall", {
         "tool_name": "WebSearch", "session_id": "s3",
-        "tool_input": {"query": "деплой лизы"},
+        "tool_input": {"query": "деплой бота"},
     })
     assert out.strip() == ""
 
 
 def test_verify_gate_triggers_and_stays_silent(db: Path):
+    # RU trigger (default pattern is bilingual RU+EN)
     hot = _hook(db, "verify-gate", {"prompt": "какая последняя версия Claude?"})
-    assert "ГЕЙТ" in hot
+    assert "VERIFY GATE" in hot
+    # EN trigger
+    hot_en = _hook(db, "verify-gate", {"prompt": "what is the latest version of Claude?"})
+    assert "VERIFY GATE" in hot_en
     cold = _hook(db, "verify-gate", {"prompt": "поправь отступы в файле"})
     assert cold.strip() == ""
 
@@ -97,11 +105,11 @@ def test_mcp_guard_reports_missing_servers(db: Path, fakehome: Path):
         json.dumps({"mcpServers": {"skillmem": {}}}), encoding="utf-8")
     (fakehome / ".claude").mkdir(exist_ok=True)
     (fakehome / ".claude" / "mcp-baseline.txt").write_text(
-        "# эталон\nskillmem\nplaywright\nfirecrawl\n", encoding="utf-8")
+        "# baseline\nskillmem\nplaywright\nfirecrawl\n", encoding="utf-8")
     out = _hook(db, "mcp-guard", {})
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
     assert "firecrawl" in ctx and "playwright" in ctx
-    assert "skillmem" not in ctx.split("НЕ ХВАТАЕТ:")[1].splitlines()[0].split() or True
+    assert "skillmem" not in ctx.split("MISSING:")[1].splitlines()[0].split()
 
 
 def test_mcp_guard_silent_when_baseline_matches(db: Path, fakehome: Path):
@@ -150,7 +158,7 @@ def test_session_recap_writes_note(db: Path, tmp_path: Path,
         "session_id": "abcd1234-ffff-0000-1111-222233334444",
         "transcript_path": str(transcript),
     })
-    assert out.strip() == ""  # recap ничего не инжектит, только пишет файл
+    assert out.strip() == ""  # recap injects nothing, it only writes a file
     notes = list((proj / "memory").glob("session-*abcd1234.md"))
     assert len(notes) == 1
     text = notes[0].read_text(encoding="utf-8")

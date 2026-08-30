@@ -1,22 +1,18 @@
 """Cross-platform Claude Code hooks: ``skillmem hook <name>``.
 
-Порт bash-хуков (~/.claude/hooks/*.sh) внутрь пакета, чтобы одна и та же
-логика работала на macOS / Linux / Windows без jq/sed/perl. Каждая команда
-читает JSON хука из stdin и печатает hookSpecificOutput JSON в stdout
-(или ничего — тогда Claude Code просто продолжает).
+The same hook logic runs on macOS / Linux / Windows with no jq/sed/perl
+dependencies. Each command reads the hook JSON from stdin and prints a
+hookSpecificOutput JSON to stdout (or nothing — then Claude Code just
+continues).
 
 Events:
     SessionStart      -> mcp-guard, session-history
     UserPromptSubmit  -> verify-gate, auto-recall
     PreToolUse        -> tool-recall   (Bash|Edit|Write|NotebookEdit)
-    Stop              -> session-recap (потом `skillmem migrate` индексирует)
+    Stop              -> session-recap (then `skillmem migrate` indexes it)
 
-Отличие от bash-версии: recall/search зовутся напрямую через storage
-(без запуска двух дочерних CLI-процессов) — быстрее и не зависит от PATH.
-
-Fix vs bash: фильтр feedback `.rank < -5` был мёртвым с гибридного поиска
-v0.6 (rank стал позицией 1..N, не BM25-скором) — секция feedback молча
-не инжектилась. Здесь rank-порог убран: search() возвращает только матчи.
+recall/search are called directly through the storage layer (no child CLI
+processes) — faster, and independent of PATH.
 """
 
 from __future__ import annotations
@@ -41,7 +37,7 @@ from . import storage as S
 # shared plumbing
 # --------------------------------------------------------------------------- #
 
-# Стоп-слова: высокочастотный шум, тянущий случайные матчи ("claude" — худший).
+# Stopwords: high-frequency noise that drags in random matches ("claude" is the worst).
 _STOPWORDS = re.compile(
     r"\b(claude|code|file|system|user|message|hook|prompt|tool|command)\b",
     re.IGNORECASE,
@@ -53,7 +49,7 @@ HOOK_LOG_KEEP_LINES = 2000
 
 
 def _utf8_stdio() -> None:
-    """Windows-консоль по умолчанию cp1251/cp866 — Claude Code ждёт UTF-8."""
+    """Windows consoles default to cp1251/cp866 — Claude Code expects UTF-8."""
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
@@ -90,7 +86,7 @@ def _hook_log_path() -> Path:
 
 
 def _log_line(*fields: Any) -> None:
-    """TSV hit-rate лог с ротацией (как в bash: >2MB → хвост 2000 строк)."""
+    """TSV hit-rate log with rotation (>2MB → keep the last 2000 lines)."""
     try:
         path = _hook_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,7 +99,7 @@ def _log_line(*fields: Any) -> None:
         with path.open("a", encoding="utf-8") as fh:
             fh.write("\t".join(str(f) for f in (stamp, *fields)) + "\n")
     except Exception:
-        pass  # лог не должен ронять хук
+        pass  # logging must never crash the hook
 
 
 def _dedup_file(session_id: str) -> Path:
@@ -162,7 +158,7 @@ def _recall_sections(
     skills_header: str,
     min_strength: float = 0.0,
 ) -> str:
-    """Общий композер auto-recall / tool-recall: feedback + skills секции."""
+    """Shared composer for auto-recall / tool-recall: feedback + skills sections."""
     try:
         fb = [
             r for r in S.search(conn, query, kind="feedback", limit=fb_limit)
@@ -173,7 +169,7 @@ def _recall_sections(
             if r["slug"] not in seen and r.get("strength", 0.0) >= min_strength
         ]
     except Exception:
-        return ""  # хук никогда не должен падать из-за поиска
+        return ""  # a search failure must never crash the hook
     parts: list[str] = []
     if fb:
         parts.append(fb_header + "\n" + "\n".join(
@@ -194,7 +190,7 @@ def _recall_sections(
 
 @click.group(name="hook")
 def hook_group() -> None:
-    """Claude Code hooks (кроссплатформенные, читают JSON из stdin)."""
+    """Claude Code hooks (cross-platform, read hook JSON from stdin)."""
     _utf8_stdio()
 
 
@@ -205,12 +201,12 @@ def hook_group() -> None:
 @hook_group.command("auto-recall")
 @click.pass_context
 def auto_recall(ctx: click.Context) -> None:
-    """Top feedback+skills по тексту промпта → additionalContext (~1500 chars)."""
+    """Top feedback+skills for the prompt text → additionalContext (~1500 chars)."""
     data = _read_input()
     prompt = str(data.get("prompt") or "")
     session_id = str(data.get("session_id") or "unknown")
 
-    # Начало нового user-prompt цикла → обнулить dedup-леджер.
+    # A new user-prompt cycle starts → reset the dedup ledger.
     try:
         _dedup_file(session_id).write_text("", encoding="utf-8")
     except Exception:
@@ -229,8 +225,8 @@ def auto_recall(ctx: click.Context) -> None:
     context = _recall_sections(
         conn, query, seen=set(),
         skills_limit=2, fb_limit=3, body_chars=400,
-        fb_header="### Релевантные feedback:",
-        skills_header="### Релевантные skills (как делали раньше):",
+        fb_header="### Relevant feedback:",
+        skills_header="### Relevant skills (how this was done before):",
     )
     slugs = _extract_slugs(context)
     _append_seen(session_id, slugs)
@@ -240,7 +236,7 @@ def auto_recall(ctx: click.Context) -> None:
         return
     if len(context) > 1500:
         context = context[:1500] + "…"
-    _emit("UserPromptSubmit", f"📚 Auto-recall из памяти (применяй если релевантно):\n\n{context}")
+    _emit("UserPromptSubmit", f"📚 Auto-recall from memory (apply if relevant):\n\n{context}")
 
 
 # --------------------------------------------------------------------------- #
@@ -250,7 +246,7 @@ def auto_recall(ctx: click.Context) -> None:
 @hook_group.command("tool-recall")
 @click.pass_context
 def tool_recall(ctx: click.Context) -> None:
-    """Скиллы/feedback по инпуту тула (Bash: command, Edit/Write: file_path)."""
+    """Skills/feedback matched on the tool input (Bash: command, Edit/Write: file_path)."""
     data = _read_input()
     tool_name = str(data.get("tool_name") or "")
     session_id = str(data.get("session_id") or "unknown")
@@ -274,8 +270,8 @@ def tool_recall(ctx: click.Context) -> None:
     context = _recall_sections(
         conn, query, seen=seen,
         skills_limit=2, fb_limit=2, body_chars=250,
-        fb_header="### Правила/warnings из feedback:",
-        skills_header="### Похожие задачи (skills):",
+        fb_header="### Rules/warnings from feedback:",
+        skills_header="### Similar past tasks (skills):",
         min_strength=0.3,
     )
     slugs = _extract_slugs(context)
@@ -286,7 +282,7 @@ def tool_recall(ctx: click.Context) -> None:
         return
     if len(context) > 1000:
         context = context[:1000] + "…"
-    _emit("PreToolUse", f"🔧 Tool-recall (контекст для {tool_name}):\n{context}")
+    _emit("PreToolUse", f"🔧 Tool-recall (context for {tool_name}):\n{context}")
 
 
 # --------------------------------------------------------------------------- #
@@ -295,8 +291,8 @@ def tool_recall(ctx: click.Context) -> None:
 
 @hook_group.command("mcp-guard")
 def mcp_guard() -> None:
-    """Сверить mcpServers в ~/.claude.json с эталоном ~/.claude/mcp-baseline.txt."""
-    _read_input()  # не используем, но stdin надо дочитать
+    """Compare mcpServers in ~/.claude.json against ~/.claude/mcp-baseline.txt."""
+    _read_input()  # unused, but stdin must be drained
     conf = Path.home() / ".claude.json"
     base = Path.home() / ".claude" / "mcp-baseline.txt"
     if not conf.exists() or not base.exists():
@@ -313,11 +309,11 @@ def mcp_guard() -> None:
     if not missing:
         return
     _emit("SessionStart", (
-        f"⚠️ MCP-щит: подключено {len(actual)} из {len(expected)} серверов. "
-        f"НЕ ХВАТАЕТ: {' '.join(missing)}\n"
-        "Скажи об этом пользователю в первом же ответе. "
-        "Вернуть: claude mcp add-json <имя> '<json>' -s user\n"
-        f"Эталон: {base}"
+        f"⚠️ MCP guard: {len(actual)} of {len(expected)} expected servers connected. "
+        f"MISSING: {' '.join(missing)}\n"
+        "Tell the user about this in your very first reply. "
+        "Restore with: claude mcp add-json <name> '<json>' -s user\n"
+        f"Baseline: {base}"
     ))
 
 
@@ -326,7 +322,7 @@ def mcp_guard() -> None:
 # --------------------------------------------------------------------------- #
 
 def _memory_dir_for(data: dict[str, Any]) -> Path | None:
-    """Каталог memory/ проекта — от transcript_path (не хардкодим -Users-...)."""
+    """The project's memory/ dir, derived from transcript_path (no hardcoded paths)."""
     tp = data.get("transcript_path")
     if tp:
         p = Path(str(tp)).expanduser()
@@ -338,7 +334,7 @@ def _memory_dir_for(data: dict[str, Any]) -> Path | None:
 
 @hook_group.command("session-history")
 def session_history() -> None:
-    """Top-3 свежих session-*.md из памяти проекта → контекст «откуда пришли»."""
+    """Top-3 freshest session-*.md from project memory → "where we left off" context."""
     data = _read_input()
     memory_dir = _memory_dir_for(data)
     if memory_dir is None:
@@ -350,7 +346,7 @@ def session_history() -> None:
     sections = ""
     for f in files:
         text = f.read_text(encoding="utf-8", errors="replace")
-        # Срезать yaml frontmatter (---...---) и пустые строки.
+        # Strip yaml frontmatter (---...---) and blank lines.
         body = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL)
         body = "\n".join(l for l in body.splitlines() if l.strip())[:600]
         if body:
@@ -359,22 +355,28 @@ def session_history() -> None:
         return
     if len(sections) > 2000:
         sections = sections[:2000] + "…"
-    _emit("SessionStart", f"🧠 Recap последних сессий (контекст откуда пришли):{sections}")
+    _emit("SessionStart", f"🧠 Recap of recent sessions (where we left off):{sections}")
 
 
 # --------------------------------------------------------------------------- #
 # UserPromptSubmit: verify-gate
 # --------------------------------------------------------------------------- #
 
+# Default trigger regex is deliberately bilingual (EN + RU): bilingual search
+# is a product feature, and time-sensitive questions arrive in both languages.
+# Override with SKILLMEM_VERIFY_PATTERN.
 _VERIFY_DEFAULT = (
     "когда выйдет|вышел|вышла|вышло|выйдет|релиз|последняя версия|новая модель|"
-    "Opus 4|Sonnet 4|Haiku 4|Claude 4\\.|сколько стоит|цена API|лимит|сейчас доступн"
+    "Opus 4|Sonnet 4|Haiku 4|Claude 4\\.|сколько стоит|цена API|лимит|сейчас доступн|"
+    "latest version|newest version|new model|latest model|just released|release date|"
+    "when will .{0,20}(release|ship|launch)|how much does|api pricing|api price|"
+    "rate limit|currently available"
 )
 
 
 @hook_group.command("verify-gate")
 def verify_gate() -> None:
-    """Напоминание «сначала WebSearch» на time-sensitive триггеры в промпте."""
+    """Inject a "search first" reminder when the prompt has time-sensitive triggers."""
     data = _read_input()
     prompt = str(data.get("prompt") or "")
     pattern = os.environ.get("SKILLMEM_VERIFY_PATTERN", _VERIFY_DEFAULT)
@@ -384,10 +386,10 @@ def verify_gate() -> None:
     except re.error:
         return
     _emit("UserPromptSubmit", (
-        "⚠️ ГЕЙТ: вопрос содержит time-sensitive триггер (релиз модели / цена / "
-        "лимит / новая модель). Сначала вызови WebSearch/поиск и проверь факт ДО "
-        "любого утверждения. Системный промпт — снимок на момент сборки CLI, "
-        "не ground truth."
+        "⚠️ VERIFY GATE: this prompt contains a time-sensitive trigger (model "
+        "release / price / limit / availability). Call WebSearch (or another "
+        "live source) and verify the fact BEFORE making any claim. The system "
+        "prompt is a snapshot taken when the CLI was built, not ground truth."
     ))
 
 
@@ -395,34 +397,34 @@ def verify_gate() -> None:
 # Stop: session-recap
 # --------------------------------------------------------------------------- #
 
-RECAP_PROMPT = """Выжми из транскрипта сессии разработки структурированную выжимку. Без воды, каждый пункт 1-3 строки. Только маркдаун с заголовками ниже.
+RECAP_PROMPT = """Distill this development-session transcript into a structured recap. No filler, 1-3 lines per bullet. Markdown only, with exactly the headings below. Write the recap in the language predominantly used in the session (mirror the user's language).
 
-## ЧТО РЕШИЛИ
-Ключевые решения с кратким обоснованием.
+## DECISIONS
+Key decisions with a one-line rationale.
 
-## ЧТО СДЕЛАЛИ
-Конкретные изменения: файлы, фичи, фиксы, развёрнутые сервисы.
+## DONE
+Concrete changes: files, features, fixes, services deployed.
 
-## ЧТО НЕДОДЕЛАЛИ
-TODO, открытые вопросы, follow-ups для следующей сессии.
+## UNFINISHED
+TODOs, open questions, follow-ups for the next session.
 
-## НОВЫЕ ПРАВИЛА/ПРЕДПОЧТЕНИЯ
-Паттерны и preferences от пользователя которые всплыли (особенно если новые).
+## NEW RULES/PREFERENCES
+Patterns and user preferences that surfaced (especially new ones).
 
-## КЛЮЧЕВЫЕ СУЩНОСТИ
-Имена файлов, сервисов, агентов, людей, доменов, дат — bullet list.
+## KEY ENTITIES
+File names, services, agents, people, domains, dates — bullet list.
 
-Транскрипт сессии:
+Session transcript:
 ---
 """
 
 RECAP_MODEL = os.environ.get("SKILLMEM_RECAP_MODEL", "claude-haiku-4-5-20251001")
 RECAP_TIMEOUT = int(os.environ.get("SKILLMEM_RECAP_TIMEOUT", "85"))
-RECAP_MAX_TRANSCRIPT = 51_200  # последние 50KB отфильтрованного текста
+RECAP_MAX_TRANSCRIPT = 51_200  # last 50KB of filtered text
 
 
 def _filter_transcript(path: Path) -> str:
-    """Только текст user/assistant; tool_use/tool_result/thinking — мимо."""
+    """Keep only user/assistant text; skip tool_use/tool_result/thinking."""
     out: list[str] = []
     with path.open(encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -446,7 +448,7 @@ def _filter_transcript(path: Path) -> str:
 
 @hook_group.command("session-recap")
 def session_recap() -> None:
-    """Выжимка сессии через `claude -p` → session-note в memory/ проекта."""
+    """Session recap via `claude -p` → session note in the project's memory/."""
     if os.environ.get("SKILLMEM_NO_RECAP") == "1":
         return
     data = _read_input()
@@ -462,7 +464,7 @@ def session_recap() -> None:
             line_count = sum(1 for _ in fh)
     except Exception:
         return
-    if line_count < 20:  # случайно открытая сессия — не выжимаем
+    if line_count < 20:  # an accidentally opened session — nothing to recap
         return
 
     memory_dir = transcript.parent / "memory"

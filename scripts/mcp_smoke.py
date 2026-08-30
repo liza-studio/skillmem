@@ -86,10 +86,12 @@ def main() -> int:
         _send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         tools = _read(proc)
         names = sorted(t["name"] for t in tools["result"]["tools"])
-        expected = ["mem_get", "mem_list", "mem_search", "mem_update", "mem_write"]
+        expected = ["mem_get", "mem_learn", "mem_list", "mem_recall", "mem_reinforce",
+                    "mem_search", "mem_update", "mem_write"]
         assert names == expected, f"got {names}, want {expected}"
         print("OK tools/list:", names)
 
+        # Cyrillic query is intentional: bilingual search is a feature.
         _send(proc, {
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": {"name": "mem_search", "arguments": {"query": "галлюцинации", "limit": 2}},

@@ -1,4 +1,4 @@
-"""`skillmem upgrade` через приватные GitHub Releases + `skillmem token`."""
+"""`skillmem upgrade` via private GitHub Releases + `skillmem token`."""
 
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ def test_token_set_status_clear(memhome: Path, monkeypatch: pytest.MonkeyPatch):
 
     res = _run(["token", "status"])
     assert "present" in res.output
-    assert "github_pat_TEST123" not in res.output  # значение не утекает в вывод
+    assert "github_pat_TEST123" not in res.output  # the value never leaks into output
 
     res = _run(["token", "clear"])
     assert res.exit_code == 0

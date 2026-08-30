@@ -1,68 +1,117 @@
 # skillmem
 
-Memory layer for a team of AI agents. SQLite + FTS5 + MCP. Local-first, no API costs.
+**Self-improving skills for Claude Code — your agent learns, recalls, reinforces, and forgets.**
 
+skillmem gives Claude Code a local, persistent skill & memory layer. After every non-trivial task the agent can record *how it was done* as a skill; before the next task it recalls the relevant ones; skills that keep proving useful get stronger, and skills nobody uses fade away — the way human memory works.
 
-## Install (dev)
+- **$0 per write and per read** — no LLM calls, no cloud, no API keys. Plain SQLite on your disk.
+- **Bilingual hybrid search, fully local** — FTS5 BM25 + Snowball stemming (EN/RU) + a multilingual ONNX embedding model. A Russian query finds an English skill and vice versa, all on CPU, offline.
+- **Ebbinghaus strength model** — `reinforce` bumps a skill's strength, scheduled decay fades unused ones, lifecycle sweeps move dead skills to a backed-up archive (never deleted).
+- **Tamper-evident history** — every edit is appended to a SHA256 hash-chain; `skillmem verify` detects any after-the-fact tampering.
+- **Deep Claude Code integration** — 6 hooks + 8 MCP tools installed with one command.
+- **Cross-platform** — macOS (launchd), Windows (schtasks), Linux (cron).
+- **No vendor lock** — `export-all` dumps everything to plain markdown with YAML frontmatter; re-importing the dump yields the same records.
+
+## Why
+
+Agents repeat their mistakes because each session starts from zero. Existing "memory" tools store facts; skillmem stores *procedures* — trigger, steps, outcome, lessons — and ranks them by how often they actually helped. The write path costs nothing, so the agent can afford to learn from every task.
+
+## Quickstart
+
+macOS / Linux:
 
 ```bash
-uv pip install -e .
-skillmem doctor
+bash install.sh                 # installs python + uv if needed, venv, symlinks
 ```
 
-## CLI
-
-```bash
-skillmem init                    # create DB
-skillmem migrate                 # import ~/.claude/projects/-Users-macrazrab/memory/*.md
-skillmem search "галлюцинации"
-skillmem cat feedback-no-hallucinations [--history] [--links]
-skillmem ls --kind feedback
-skillmem write --slug new-rule --title "..." --body-file body.md --kind feedback \
-               --ttl-days 30                 # add TTL → search marks as [stale] after
-skillmem write --slug ... --no-check-conflicts # bypass duplicate detection
-skillmem rm <slug> --reason "..."              # (updates go through `write` + reason or MCP mem_update)
-skillmem verify [--strict]                     # SHA256 hash-chain over memory_history (tamper-evidence)
-skillmem inject --types user,feedback --budget 1500    # SessionStart briefing
-skillmem export-all /tmp/skillmem-dump       # round-trip-safe .md dump
-skillmem import-vault ~/Obsidian/DC_GROUP    # bulk import (kind=document)
-skillmem doctor                              # stats + schema version
-```
-
-### Pillars implemented in MVP
-
-- **Birth/expiration/death record** — every row has `created_at`, optional
-  `freshness_until` (via `--ttl-days`), and old versions land in
-  `memory_history` on update.
-- **Conflict detection** — `mem_write` refuses near-dupes (Jaccard-style
-  inclusion overlap > 0.7). Bypass with `--no-check-conflicts`.
-- **Vendor-lock defense** — `export-all` dumps every memory back to .md with
-  YAML frontmatter, lossless round-trip with `import-vault`.
-
-## MCP
-
-Run as MCP stdio server (auto-installed as `skillmem-mcp` entry point). Add to `~/.claude.json`:
-
-```json
-{
-  "mcpServers": {
-    "skillmem": {
-      "command": "~/dev/skillmem/.venv/bin/skillmem-mcp"
-    }
-  }
-}
-```
-
-Tools exposed: `mem_search`, `mem_get`, `mem_write`, `mem_update`, `mem_list`.
-
-## Windows
-
-Одна строка в Windows Terminal (PowerShell):
+Windows (PowerShell):
 
 ```powershell
-irm https://<your-host>/skillmem/install.ps1 | iex
+powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-Ставит Python 3.12 (winget) при отсутствии, разворачивает в
-`%LOCALAPPDATA%\skillmem\current`, подключает MCP + хуки к Claude Code и
-заводит decay/export в Task Scheduler. Откат: `skillmem uninstall`.
+Or from a checkout:
+
+```bash
+uv venv && uv pip install -e '.[semantic]'
+skillmem init --claude-code     # wires MCP server + hooks into Claude Code
+skillmem doctor                 # health check: DB, schema, semantic status
+```
+
+`init --claude-code` registers the MCP server in `~/.claude.json` and the hooks in `~/.claude/settings.json` (idempotent, with backups). Use `--hooks minimal` for just the Stop→migrate hook, or `--hooks none` for MCP only.
+
+## How it works
+
+```
+ learn ──▶ recall ──▶ reinforce ──▶ decay
+   │          │            │           │
+   │          │            │           └─ daily job: unused skills lose strength;
+   │          │            │              fully faded ones are archived (backed up)
+   │          │            └─ strength +0.15 when a skill proves useful
+   │          └─ hybrid BM25 + vector search, strength-weighted ranking
+   └─ after a hard task: trigger / steps / outcome / lessons
+```
+
+1. **learn** — after a task that took real debugging, the agent calls `mem_learn` with a slug, trigger, steps, outcome, and lessons.
+2. **recall** — before the next task, `mem_recall` (or the automatic hooks) surfaces the most relevant skills, fusing lexical and semantic signals via Reciprocal Rank Fusion.
+3. **reinforce** — when a recalled skill helped, `mem_reinforce` bumps its strength, so proven skills rank higher next time.
+4. **decay** — a scheduled `skillmem decay` run applies Ebbinghaus-style forgetting; skills untouched for months drift to `stale`, then to an `archived` state (excluded from recall, restorable with one command, snapshotted to JSONL first).
+
+## MCP tools
+
+| Tool | What it does |
+| --- | --- |
+| `mem_search` | Hybrid full-text search (FTS5 BM25 + optional vector recall) over all memories |
+| `mem_get` | Fetch one memory by slug, with history and wikilinks |
+| `mem_list` | List memories by kind/project, most recent first |
+| `mem_write` | Insert a new memory; refuses silent overwrites and near-duplicates |
+| `mem_update` | Update an existing memory; old version is kept in the hash-chained history |
+| `mem_learn` | Record an after-action skill (trigger / steps / outcome / lessons) |
+| `mem_recall` | Find relevant skills for a task, strength-weighted; auto-reinforces |
+| `mem_reinforce` | Explicitly bump a skill's strength after it proved useful |
+
+## Hooks
+
+| Event | Hook | What it injects |
+| --- | --- | --- |
+| SessionStart | `mcp-guard` | Warns when configured MCP servers are missing vs a baseline |
+| SessionStart | `inject` | Compact title-only briefing of your `user`/`feedback` memories |
+| SessionStart | `session-history` | Recaps of the last 3 sessions in this project |
+| UserPromptSubmit | `verify-gate` | "Search before you claim" reminder on time-sensitive prompts (bilingual EN/RU triggers) |
+| UserPromptSubmit | `auto-recall` | Relevant feedback + skills matched against the prompt |
+| PreToolUse | `tool-recall` | Skills/warnings matched against the Bash command or edited file path |
+| Stop | `session-recap` | Distills the session into a markdown note via `claude -p` (recap language mirrors the session) |
+| Stop | `migrate` | Indexes new session notes into the database |
+
+All hooks are best-effort: a broken database or missing model never blocks Claude Code.
+
+## CLI highlights
+
+```bash
+skillmem learn skill-x -t "..." --trigger "..." --steps "..." --outcome success
+skillmem recall "deploy the bot to prod"
+skillmem skills                  # list skills with strength bars
+skillmem decay --days 14         # manual decay + lifecycle sweep
+skillmem search "hash chain" --kind feedback
+skillmem verify --strict         # check the tamper-evidence chain
+skillmem export-all ./vault      # markdown round-trip, no lock-in
+skillmem import-vault ~/Obsidian/Notes
+skillmem schedule install        # decay daily 04:15, export weekly Sun 04:30
+```
+
+## Uninstall
+
+```bash
+skillmem uninstall               # removes MCP entry, hooks, scheduled jobs; keeps the DB
+skillmem uninstall --purge-db    # ...and deletes the database
+```
+
+Config edits are made atomically with timestamped backups, and corrupt JSON is never overwritten.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).
+
+---
+
+Built by **Liza Studio**.

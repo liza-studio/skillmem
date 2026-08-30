@@ -21,8 +21,8 @@ from functools import lru_cache
 log = logging.getLogger("skillmem.embed")
 
 # 384-dim multilingual model, ~220 MB, mean-pooled. Chosen over e5-large
-# (1024-dim/2.24 GB) for server weight; passed a 4/4 cross-lingual hit@1 bench
-# (RU query -> EN doc) on 2026-06-09. See Liza_Mem_Semantic_Hermes_TZ.
+# (1024-dim/2.24 GB) for footprint; validated on an internal cross-lingual
+# retrieval bench (RU query -> EN doc) before adoption.
 MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DIM = 384
 

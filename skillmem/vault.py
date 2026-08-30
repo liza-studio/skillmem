@@ -1,4 +1,4 @@
-"""Obsidian vault importer (LML §10.1 day 3).
+"""Obsidian vault importer.
 
 Recursively walks a directory tree, imports every .md as a memory of
 ``kind=document`` by default, derives the ``project`` tag from the top-level

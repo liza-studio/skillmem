@@ -46,7 +46,7 @@ def test_init_idempotent(fakehome: Path):
     assert len(cfg["mcpServers"]) == 1
     settings2 = json.loads((fakehome / ".claude" / "settings.json").read_text())
     assert settings1["hooks"] == settings2["hooks"]
-    # full-режим: Stop = migrate + session-recap, ровно два
+    # full mode: Stop = migrate + session-recap, exactly two
     hook_count = sum(len(grp["hooks"]) for grp in settings2["hooks"]["Stop"])
     assert hook_count == 2
 
@@ -84,7 +84,7 @@ def test_init_refuses_corrupted_existing_config(fakehome: Path):
     assert code == 0
     # Output begins with the warn line, then the JSON report. Slice from first '{'.
     json_start = out.find("{\n")
-    report = json.loads(out[json_start:].split("\n\nГотово")[0])
+    report = json.loads(out[json_start:].split("\n\nDone")[0])
     assert report["claude_json"]["changed"] is False
     # Original corrupt content preserved
     assert bad.read_text().startswith("{this is not")

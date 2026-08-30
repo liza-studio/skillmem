@@ -1,7 +1,7 @@
-"""Windows-специфика: exe-суффиксы, квотинг команд хуков, schtasks-план.
+"""Windows specifics: exe suffixes, hook command quoting, schtasks plan.
 
-Прогоняется на любой ОС через monkeypatch sys.platform — реальный Windows
-для CI недоступен, поэтому фиксируем хотя бы платформенное ветвление.
+Runs on any OS via monkeypatching sys.platform — a real Windows box is not
+available in CI, so at least the platform branching is pinned down.
 """
 
 from __future__ import annotations
@@ -25,15 +25,15 @@ def test_venv_script_windows(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_hook_cmd_posix_quotes_spaces():
-    cmd = C._hook_cmd(Path("/opt/liza mem/bin/skillmem"), ["hook", "auto-recall"])
-    assert cmd == "'/opt/liza mem/bin/skillmem' hook auto-recall"
+    cmd = C._hook_cmd(Path("/opt/skill mem/bin/skillmem"), ["hook", "auto-recall"])
+    assert cmd == "'/opt/skill mem/bin/skillmem' hook auto-recall"
 
 
 def test_hook_cmd_windows_uses_double_quotes(monkeypatch: pytest.MonkeyPatch):
-    """cmd.exe не понимает одинарные кавычки shlex — нужен list2cmdline."""
+    """cmd.exe does not understand shlex single quotes — list2cmdline is required."""
     monkeypatch.setattr(C.sys, "platform", "win32")
-    cmd = C._hook_cmd(Path(r"C:\Users\First Last\liza\skillmem.exe"), ["migrate"])
-    assert cmd == r'"C:\Users\First Last\liza\skillmem.exe" migrate'
+    cmd = C._hook_cmd(Path(r"C:\Users\First Last\tools\skillmem.exe"), ["migrate"])
+    assert cmd == r'"C:\Users\First Last\tools\skillmem.exe" migrate'
     assert "'" not in cmd
 
 
@@ -44,7 +44,7 @@ def test_schedule_backend_selection(monkeypatch: pytest.MonkeyPatch):
     assert SCHED._backend()[0] is SCHED._launchd_install
     monkeypatch.setattr(SCHED.sys, "platform", "linux")
     assert SCHED._backend()[0] is SCHED._cron_install
-    # неизвестная платформа деградирует в cron, а не падает
+    # an unknown platform degrades to cron instead of crashing
     monkeypatch.setattr(SCHED.sys, "platform", "freebsd14")
     assert SCHED._backend()[0] is SCHED._cron_install
 
@@ -63,7 +63,7 @@ def test_win_tr_quotes_paths_with_spaces():
 
 
 def test_launchd_plist_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """На маке install пишет валидные plist'ы с нашими джобами."""
+    """On macOS, install writes valid plists carrying our jobs."""
     if sys.platform != "darwin":
         pytest.skip("launchd only on macOS")
     import plistlib

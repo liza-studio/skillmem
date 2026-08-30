@@ -1,9 +1,34 @@
 [project]
 name = "skillmem"
-version = "0.8.1"
-description = "Shared memory layer for a team of AI agents — SQLite + FTS5 + MCP"
-authors = [{ name = "mrpetrukovich" }]
+version = "0.9.0"
+description = "Self-improving skills for Claude Code — your agent learns, recalls, reinforces, and forgets. SQLite + FTS5 + local embeddings + MCP."
+authors = [{ name = "Liza Studio" }]
+license = "Apache-2.0"
+readme = "README.md"
 requires-python = ">=3.11"
+keywords = [
+    "claude-code",
+    "mcp",
+    "agent-memory",
+    "skills",
+    "self-improving",
+    "sqlite",
+    "fts5",
+    "embeddings",
+    "hooks",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "click>=8.1.7",
     "mcp>=1.0.0",
@@ -13,6 +38,10 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "snowballstemmer>=2.2",
 ]
+
+[project.urls]
+Homepage = "https://skillmem.dev"
+Repository = "https://github.com/liza-studio/skillmem"
 
 [project.scripts]
 skillmem = "skillmem.cli:main"

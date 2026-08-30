@@ -1,11 +1,14 @@
-"""MCP stdio server exposing skillmem as 9 tools.
+"""MCP stdio server exposing skillmem as 8 tools.
 
 Tools:
-    mem_search  — full-text BM25 search over memory_items via FTS5
-    mem_get     — fetch a memory by slug (with history + links)
-    mem_write   — insert a new memory
-    mem_update  — update an existing memory (requires reason)
-    mem_list    — list memories by kind/project, most-recent first
+    mem_search    — hybrid full-text search (FTS5 BM25 + optional vector recall)
+    mem_get       — fetch a memory by slug (with history + links)
+    mem_write     — insert a new memory (refuses silent overwrites)
+    mem_update    — update an existing memory (requires reason)
+    mem_list      — list memories by kind/project, most-recent first
+    mem_learn     — record an after-action skill (trigger/steps/outcome/lessons)
+    mem_recall    — find relevant skills for a task, strength-weighted
+    mem_reinforce — bump a skill's strength after it proved useful
 
 Designed to be wired into ~/.claude.json under mcpServers.
 """
@@ -272,8 +275,8 @@ TOOLS: list[Tool] = [
         name="mem_search",
         description=(
             "Full-text search across skillmem memory. Uses FTS5 BM25 over titles "
-            "+ bodies + tags + topics. Russian queries get coarse stemming "
-            "automatically. Returns top-N results with rank and snippet."
+            "+ bodies + tags + topics with English and Russian Snowball stemming. "
+            "Returns top-N results with rank and snippet."
         ),
         inputSchema={
             "type": "object",
@@ -324,7 +327,7 @@ TOOLS: list[Tool] = [
         description=(
             "Insert a new memory. Slug must be unique. To overwrite an existing "
             "slug, use mem_update with a reason — mem_write deliberately refuses "
-            "silent overwrites to protect Pillar #1 provenance."
+            "silent overwrites to preserve record provenance."
         ),
         inputSchema={
             "type": "object",
@@ -348,8 +351,8 @@ TOOLS: list[Tool] = [
         name="mem_update",
         description=(
             "Update an existing memory. Old body is preserved in memory_history "
-            "with the supplied reason — this is the death-record half of "
-            "Pillar #1 (birth/expiration/death)."
+            "with the supplied reason — every record keeps a full "
+            "birth/expiration/death trail."
         ),
         inputSchema={
             "type": "object",

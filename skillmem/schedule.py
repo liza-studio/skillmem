@@ -1,16 +1,16 @@
 """Scheduled maintenance: ``skillmem schedule install|remove|status``.
 
-Ставит два регулярных задания без ручной возни с launchd/schtasks/cron:
-  - decay:  ежедневно 04:15 — `skillmem decay --days 14` (Ebbinghaus + lifecycle)
-  - export: еженедельно вс 04:30 — `skillmem export-all <data>/backups/vault`
+Sets up two recurring jobs without manual launchd/schtasks/cron plumbing:
+  - decay:  daily 04:15 — `skillmem decay --days 14` (Ebbinghaus + lifecycle)
+  - export: weekly Sun 04:30 — `skillmem export-all <data>/backups/vault`
 
-Бэкенды по платформе:
+Per-platform backends:
   darwin -> launchd user agents (~/Library/LaunchAgents/com.skillmem.*.plist)
   win32  -> schtasks /Create /SC ... (tasks SkillMem\\Decay, SkillMem\\Export)
-  linux  -> crontab -l | crontab - (маркер "# skillmem:" на строках)
+  linux  -> crontab -l | crontab - (lines marked with "# skillmem:")
 
-Оффсайт-бэкапы (ssh и т.п.) — сознательно вне пакета: это личная
-инфраструктура, не продукт.
+Offsite backups (ssh etc.) are deliberately out of scope: that is personal
+infrastructure, not the product.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from . import storage as S
 
 DECAY_TIME = (4, 15)
 EXPORT_TIME = (4, 30)
-EXPORT_WEEKDAY = 0  # воскресенье (launchd: 0=Sunday; cron: 0=Sunday; schtasks: SUN)
+EXPORT_WEEKDAY = 0  # Sunday (launchd: 0=Sunday; cron: 0=Sunday; schtasks: SUN)
 
 _LAUNCHD_LABELS = {"decay": "com.skillmem.decay", "export": "com.skillmem.export"}
 _WIN_TASKS = {"decay": r"SkillMem\Decay", "export": r"SkillMem\Export"}
@@ -34,7 +34,7 @@ _CRON_MARK = "# skillmem:"
 
 
 def _skillmem_bin() -> Path:
-    """Бинарь skillmem рядом с текущим интерпретатором (venv-safe)."""
+    """The skillmem binary next to the current interpreter (venv-safe)."""
     exe = "skillmem.exe" if sys.platform == "win32" else "skillmem"
     return Path(sys.executable).parent / exe
 
@@ -116,7 +116,7 @@ def _launchd_status() -> list[str]:
 # --------------------------------------------------------------------------- #
 
 def _win_tr(argv: list[str]) -> str:
-    """Команда для /TR: пути с пробелами — во внутренних кавычках."""
+    """Command string for /TR: paths with spaces go in inner quotes."""
     quoted = [f'"{a}"' if " " in a else a for a in argv]
     return " ".join(quoted)
 
@@ -227,20 +227,20 @@ def _backend():
 
 @click.group(name="schedule")
 def schedule_group() -> None:
-    """Регулярные задания: decay (ежедневно 04:15) + export (вс 04:30)."""
+    """Recurring jobs: decay (daily 04:15) + export (Sun 04:30)."""
 
 
 @schedule_group.command("install")
 def schedule_install() -> None:
-    """Поставить/обновить задания под текущую ОС."""
+    """Install/refresh the jobs for the current OS."""
     for line in _backend()[0]():
         click.echo(f"  + {line}")
-    click.echo("Готово. Проверка: skillmem schedule status")
+    click.echo("Done. Check with: skillmem schedule status")
 
 
 @schedule_group.command("remove")
 def schedule_remove() -> None:
-    """Снять задания skillmem."""
+    """Remove skillmem's scheduled jobs."""
     removed = _backend()[1]()
     for line in removed:
         click.echo(f"  - {line}")
@@ -250,6 +250,6 @@ def schedule_remove() -> None:
 
 @schedule_group.command("status")
 def schedule_status() -> None:
-    """Показать состояние заданий."""
+    """Show job status."""
     for line in _backend()[2]():
         click.echo(f"  {line}")
