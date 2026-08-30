@@ -6,7 +6,7 @@
 
 Бэкенды по платформе:
   darwin -> launchd user agents (~/Library/LaunchAgents/com.skillmem.*.plist)
-  win32  -> schtasks /Create /SC ... (задачи SkillMem\Decay, SkillMem\\Export)
+  win32  -> schtasks /Create /SC ... (tasks SkillMem\\Decay, SkillMem\\Export)
   linux  -> crontab -l | crontab - (маркер "# skillmem:" на строках)
 
 Оффсайт-бэкапы (ssh и т.п.) — сознательно вне пакета: это личная
