@@ -1,0 +1,37 @@
+[project]
+name = "skillmem"
+version = "0.8.1"
+description = "Shared memory layer for a team of AI agents — SQLite + FTS5 + MCP"
+authors = [{ name = "mrpetrukovich" }]
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1.7",
+    "mcp>=1.0.0",
+    "pyyaml>=6.0.1",
+    "platformdirs>=4.2.0",
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "snowballstemmer>=2.2",
+]
+
+[project.scripts]
+skillmem = "skillmem.cli:main"
+skillmem-mcp = "skillmem.mcp_server:run"
+skillmem-server = "skillmem.server:run"
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+# Semantic recall (local ONNX embeddings, no external API). Optional so the
+# base install stays light; recall degrades to BM25 when absent.
+semantic = ["fastembed>=0.8", "numpy>=1.26"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["skillmem"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

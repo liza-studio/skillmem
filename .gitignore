@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+*.db
+*.db-wal
+*.db-shm
+
+# Third-party benchmark data (15MB, LongMemEval) — fetch it, do not vendor it.
+bench/longmemeval_oracle.json
