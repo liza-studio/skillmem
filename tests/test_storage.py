@@ -93,3 +93,23 @@ def test_externalize_long_body(conn, memhome):
     assert len(got.body) < len(long_body)         # excerpt only in DB
     assert S.load_body(got) == long_body          # full text from disk
     assert (S.docs_dir() / got.body_path).exists()
+
+
+def test_v8_drops_porter_index(conn):
+    """Legacy mem_fts (porter) and its triggers must be gone after migration."""
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
+    )}
+    assert "mem_fts" not in names
+    assert not {"memory_items_ai", "memory_items_ad", "memory_items_au"} & names
+    assert "mem_fts_stem" in names  # the live index stays
+
+
+def test_sweep_lifecycle_safe_inside_tx(conn):
+    """sweep/restore must not commit a caller's open transaction early."""
+    from skillmem.storage import tx, sweep_lifecycle, restore_skill, MemoryItem, upsert
+    upsert(conn, MemoryItem(slug="tx-skill", kind="skill", title="t", body="b"))
+    with tx(conn):
+        sweep_lifecycle(conn)
+        restore_skill(conn, "tx-skill")
+        assert conn.in_transaction, "helper committed the outer transaction"

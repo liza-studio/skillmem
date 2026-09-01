@@ -1,13 +1,15 @@
 """Windows specifics: exe suffixes, hook command quoting, schtasks plan.
 
-Runs on any OS via monkeypatching sys.platform — a real Windows box is not
-available in CI, so at least the platform branching is pinned down.
+Runs on any OS via monkeypatching sys.platform — both branches (win32 and
+posix) are pinned down explicitly so the suite is host-independent: on a
+real Windows runner the "posix" tests monkeypatch the platform the same way
+the "windows" tests do on a Mac/Linux host.
 """
 
 from __future__ import annotations
 
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -15,7 +17,8 @@ from skillmem import cli as C
 from skillmem import schedule as SCHED
 
 
-def test_venv_script_posix():
+def test_venv_script_posix(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(C.sys, "platform", "linux")
     assert C._venv_script("skillmem-mcp").name == "skillmem-mcp"
 
 
@@ -24,8 +27,12 @@ def test_venv_script_windows(monkeypatch: pytest.MonkeyPatch):
     assert C._venv_script("skillmem-mcp").name == "skillmem-mcp.exe"
 
 
-def test_hook_cmd_posix_quotes_spaces():
-    cmd = C._hook_cmd(Path("/opt/skill mem/bin/skillmem"), ["hook", "auto-recall"])
+def test_hook_cmd_posix_quotes_spaces(monkeypatch: pytest.MonkeyPatch):
+    # PurePosixPath: a plain Path() on a Windows host becomes WindowsPath and
+    # rewrites the separators to backslashes before _hook_cmd ever sees them.
+    monkeypatch.setattr(C.sys, "platform", "linux")
+    cmd = C._hook_cmd(PurePosixPath("/opt/skill mem/bin/skillmem"),
+                      ["hook", "auto-recall"])
     assert cmd == "'/opt/skill mem/bin/skillmem' hook auto-recall"
 
 
@@ -42,9 +49,16 @@ def test_schedule_backend_selection(monkeypatch: pytest.MonkeyPatch):
     assert SCHED._backend()[0] is SCHED._schtasks_install
     monkeypatch.setattr(SCHED.sys, "platform", "darwin")
     assert SCHED._backend()[0] is SCHED._launchd_install
+    # linux without a user systemd instance but with crontab -> cron
+    monkeypatch.setattr(SCHED, "_systemd_available", lambda: False)
+    monkeypatch.setattr(SCHED.shutil, "which", lambda name: "/usr/bin/crontab")
     monkeypatch.setattr(SCHED.sys, "platform", "linux")
     assert SCHED._backend()[0] is SCHED._cron_install
-    # an unknown platform degrades to cron instead of crashing
+    # linux with a working `systemctl --user` -> systemd timers
+    monkeypatch.setattr(SCHED, "_systemd_available", lambda: True)
+    assert SCHED._backend()[0] is SCHED._systemd_install
+    # an unknown platform degrades to the linux detection instead of crashing
+    monkeypatch.setattr(SCHED, "_systemd_available", lambda: False)
     monkeypatch.setattr(SCHED.sys, "platform", "freebsd14")
     assert SCHED._backend()[0] is SCHED._cron_install
 

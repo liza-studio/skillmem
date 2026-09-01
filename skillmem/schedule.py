@@ -7,7 +7,9 @@ Sets up two recurring jobs without manual launchd/schtasks/cron plumbing:
 Per-platform backends:
   darwin -> launchd user agents (~/Library/LaunchAgents/com.skillmem.*.plist)
   win32  -> schtasks /Create /SC ... (tasks SkillMem\\Decay, SkillMem\\Export)
-  linux  -> crontab -l | crontab - (lines marked with "# skillmem:")
+  linux  -> systemd user timers (~/.config/systemd/user/skillmem-*.{service,timer})
+            when `systemctl --user` works; otherwise crontab -l | crontab -
+            (lines marked with "# skillmem:"); neither -> explicit error
 
 Offsite backups (ssh etc.) are deliberately out of scope: that is personal
 infrastructure, not the product.
@@ -15,7 +17,10 @@ infrastructure, not the product.
 
 from __future__ import annotations
 
+import os
 import plistlib
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +36,7 @@ EXPORT_WEEKDAY = 0  # Sunday (launchd: 0=Sunday; cron: 0=Sunday; schtasks: SUN)
 _LAUNCHD_LABELS = {"decay": "com.skillmem.decay", "export": "com.skillmem.export"}
 _WIN_TASKS = {"decay": r"SkillMem\Decay", "export": r"SkillMem\Export"}
 _CRON_MARK = "# skillmem:"
+_SYSTEMD_UNITS = {"decay": "skillmem-decay", "export": "skillmem-export"}
 
 
 def _skillmem_bin() -> Path:
@@ -167,13 +173,26 @@ def _schtasks_status() -> list[str]:
 # --------------------------------------------------------------------------- #
 
 def _cron_read() -> list[str]:
-    proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    try:
+        proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    except FileNotFoundError:
+        # No crontab binary at all (containers, systemd-only minimal distros):
+        # an empty crontab, not a traceback. Install still fails loudly via
+        # _cron_write / backend selection.
+        return []
     return proc.stdout.splitlines() if proc.returncode == 0 else []
 
 
 def _cron_write(lines: list[str]) -> None:
     text = "\n".join(lines) + ("\n" if lines else "")
-    proc = subprocess.run(["crontab", "-"], input=text, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            ["crontab", "-"], input=text, capture_output=True, text=True
+        )
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            "crontab binary not found — install cron, or use systemd user timers"
+        ) from exc
     if proc.returncode != 0:
         raise click.ClickException(f"crontab write failed: {proc.stderr.strip()}")
 
@@ -210,19 +229,157 @@ def _cron_status() -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# linux: systemd user timers (default on modern distros)
+# --------------------------------------------------------------------------- #
+
+def _systemd_unit_dir() -> Path:
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return base / "systemd" / "user"
+
+
+def _systemd_available() -> bool:
+    """True when a per-user systemd instance is actually reachable."""
+    if not shutil.which("systemctl"):
+        return False
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "show-environment"], capture_output=True
+        )
+    except OSError:
+        return False
+    return proc.returncode == 0
+
+
+def _systemd_run(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["systemctl", "--user", *args], capture_output=True, text=True
+    )
+
+
+def _systemd_unit_texts(name: str, argv: list[str]) -> tuple[str, str]:
+    """(service_text, timer_text) for one job."""
+    descr = {
+        "decay": "skillmem decay (daily memory maintenance)",
+        "export": "skillmem export (weekly vault backup)",
+    }[name]
+    log = _log_dir() / f"{name}.log"
+    service = (
+        "[Unit]\n"
+        f"Description={descr}\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={shlex.join(argv)}\n"
+        f"StandardOutput=append:{log}\n"
+        f"StandardError=append:{log}\n"
+    )
+    if name == "export":
+        on_calendar = f"Sun *-*-* {EXPORT_TIME[0]:02d}:{EXPORT_TIME[1]:02d}:00"
+    else:
+        on_calendar = f"*-*-* {DECAY_TIME[0]:02d}:{DECAY_TIME[1]:02d}:00"
+    timer = (
+        "[Unit]\n"
+        f"Description=Timer for {descr}\n"
+        "\n"
+        "[Timer]\n"
+        f"OnCalendar={on_calendar}\n"
+        "Persistent=true\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+    return service, timer
+
+
+def _systemd_install() -> list[str]:
+    unit_dir = _systemd_unit_dir()
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    done = []
+    for name, argv in _jobs().items():
+        unit = _SYSTEMD_UNITS[name]
+        service, timer = _systemd_unit_texts(name, argv)
+        (unit_dir / f"{unit}.service").write_text(service, encoding="utf-8")
+        (unit_dir / f"{unit}.timer").write_text(timer, encoding="utf-8")
+    proc = _systemd_run("daemon-reload")
+    if proc.returncode != 0:
+        raise click.ClickException(
+            f"systemctl --user daemon-reload failed: {proc.stderr.strip()}"
+        )
+    for name in _jobs():
+        unit = _SYSTEMD_UNITS[name]
+        proc = _systemd_run("enable", "--now", f"{unit}.timer")
+        if proc.returncode != 0:
+            raise click.ClickException(
+                f"could not enable {unit}.timer: {proc.stderr.strip()}"
+            )
+        done.append(f"{unit}.timer -> {unit_dir / (unit + '.timer')}")
+    return done
+
+
+def _systemd_remove() -> list[str]:
+    unit_dir = _systemd_unit_dir()
+    done = []
+    reload_needed = False
+    for unit in _SYSTEMD_UNITS.values():
+        _systemd_run("disable", "--now", f"{unit}.timer")  # best-effort
+        removed_any = False
+        for suffix in (".timer", ".service"):
+            path = unit_dir / f"{unit}{suffix}"
+            if path.exists():
+                path.unlink()
+                removed_any = True
+        if removed_any:
+            reload_needed = True
+            done.append(f"removed {unit}")
+    if reload_needed:
+        _systemd_run("daemon-reload")
+    return done
+
+
+def _systemd_status() -> list[str]:
+    unit_dir = _systemd_unit_dir()
+    out = []
+    for unit in _SYSTEMD_UNITS.values():
+        present = (unit_dir / f"{unit}.timer").exists()
+        active = _systemd_run("is-active", f"{unit}.timer").returncode == 0
+        out.append(
+            f"{unit}.timer: unit={'yes' if present else 'no'} "
+            f"active={'yes' if active else 'no'}"
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # click group
 # --------------------------------------------------------------------------- #
 
 _BACKENDS = {
     "darwin": (_launchd_install, _launchd_remove, _launchd_status),
     "win32": (_schtasks_install, _schtasks_remove, _schtasks_status),
-    "linux": (_cron_install, _cron_remove, _cron_status),
 }
 
 
+def _linux_backend():
+    """systemd user timers when reachable, else cron, else a clear error."""
+    if _systemd_available():
+        return (_systemd_install, _systemd_remove, _systemd_status)
+    if shutil.which("crontab"):
+        return (_cron_install, _cron_remove, _cron_status)
+    raise click.ClickException(
+        "no scheduler available: neither `systemctl --user` responds nor a "
+        "`crontab` binary exists. Install cron (or run under a systemd user "
+        "session), or run the jobs manually:\n"
+        "  skillmem decay --days 14        (daily)\n"
+        "  skillmem export-all <dir>       (weekly)"
+    )
+
+
 def _backend():
-    key = sys.platform if sys.platform in _BACKENDS else "linux"
-    return _BACKENDS[key]
+    if sys.platform in _BACKENDS:
+        return _BACKENDS[sys.platform]
+    # linux and anything else POSIX-ish: pick by what actually works
+    return _linux_backend()
 
 
 @click.group(name="schedule")

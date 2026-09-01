@@ -94,7 +94,13 @@ def _restore_meta(meta: dict) -> dict:
         out["visibility"] = str(meta["visibility"])
     if meta.get("agent"):
         out["agent"] = str(meta["agent"])
-    for key, cast in (("strength", float), ("ttl_days", int), ("freshness_until", int)):
+    for key, cast in (
+        ("strength", float), ("ttl_days", int), ("freshness_until", int),
+        # created_at: keep the record's original birth date on re-import so a
+        # dump→restore does not make every memory look freshly created.
+        # (updated_at is deliberately NOT restored: the import IS an update.)
+        ("created_at", int),
+    ):
         if meta.get(key) is not None:
             try:
                 out[key] = cast(meta[key])

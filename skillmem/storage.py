@@ -175,29 +175,6 @@ CREATE INDEX IF NOT EXISTS idx_memory_project  ON memory_items(project);
 CREATE INDEX IF NOT EXISTS idx_memory_updated  ON memory_items(updated_at);
 CREATE INDEX IF NOT EXISTS idx_memory_hash     ON memory_items(content_hash);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(
-    title, body, tags, topics, slug UNINDEXED,
-    content='memory_items', content_rowid='id',
-    tokenize='porter unicode61 remove_diacritics 2'
-);
-
-CREATE TRIGGER IF NOT EXISTS memory_items_ai AFTER INSERT ON memory_items BEGIN
-    INSERT INTO mem_fts(rowid, title, body, tags, topics, slug)
-    VALUES (new.id, new.title, new.body, new.tags, new.topics, new.slug);
-END;
-
-CREATE TRIGGER IF NOT EXISTS memory_items_ad AFTER DELETE ON memory_items BEGIN
-    INSERT INTO mem_fts(mem_fts, rowid, title, body, tags, topics, slug)
-    VALUES('delete', old.id, old.title, old.body, old.tags, old.topics, old.slug);
-END;
-
-CREATE TRIGGER IF NOT EXISTS memory_items_au AFTER UPDATE ON memory_items BEGIN
-    INSERT INTO mem_fts(mem_fts, rowid, title, body, tags, topics, slug)
-    VALUES('delete', old.id, old.title, old.body, old.tags, old.topics, old.slug);
-    INSERT INTO mem_fts(rowid, title, body, tags, topics, slug)
-    VALUES (new.id, new.title, new.body, new.tags, new.topics, new.slug);
-END;
-
 CREATE TABLE IF NOT EXISTS mem_links (
     from_slug TEXT NOT NULL,
     to_slug   TEXT NOT NULL,
@@ -240,7 +217,7 @@ CREATE INDEX IF NOT EXISTS idx_traces_created ON skill_traces(created_at);
 """
 
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -352,6 +329,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # model download. Recall falls back to BM25 for rows without an embedding.
     if "embedding" not in cols:
         conn.execute("ALTER TABLE memory_items ADD COLUMN embedding BLOB")
+
+    # --- v8: drop the legacy porter FTS index ---
+    # mem_fts was superseded by mem_fts_stem (Snowball) and had no readers
+    # left, yet its three triggers doubled the FTS work on every write.
+    conn.executescript(
+        """
+        DROP TRIGGER IF EXISTS memory_items_ai;
+        DROP TRIGGER IF EXISTS memory_items_ad;
+        DROP TRIGGER IF EXISTS memory_items_au;
+        DROP TABLE IF EXISTS mem_fts;
+        """
+    )
 
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
@@ -927,7 +916,7 @@ def reindex_embeddings(
             "UPDATE memory_items SET embedding = ? WHERE id = ?", (blob, row["id"])
         )
         updated += 1
-    conn.commit()
+    # Autocommit connection — see sweep_lifecycle for why there is no commit().
     return {"updated": updated, "total": len(rows)}
 
 
@@ -1325,6 +1314,9 @@ def search(
     out: list[dict[str, Any]] = []
     for pos, row in enumerate(rows, start=1):
         d = dict(row)
+        # Raw float32 blob: garbage in CLI --format json and a serialization
+        # 500 in the HTTP layer. Nothing downstream reads it from a hit.
+        d.pop("embedding", None)
         d["tags"] = _parse_json_list(d.get("tags"))
         d["topics"] = _parse_json_list(d.get("topics"))
         d["attachments"] = _parse_json_list(d.get("attachments"))
@@ -1489,7 +1481,7 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
         WHERE deleted_at IS NULL GROUP BY kind ORDER BY n DESC
         """
     ).fetchall()
-    fts_count = conn.execute("SELECT COUNT(*) AS n FROM mem_fts").fetchone()["n"]
+    fts_count = conn.execute("SELECT COUNT(*) AS n FROM mem_fts_stem").fetchone()["n"]
     skill_rows = conn.execute(
         "SELECT COUNT(*) AS n FROM memory_items WHERE kind = 'skill' AND deleted_at IS NULL"
     ).fetchone()
@@ -1508,6 +1500,18 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # skill learning: reinforce, decay, recall
 # --------------------------------------------------------------------------- #
+
+def skill_body(trigger: str, steps: str, outcome: str, lessons: str | None = None) -> str:
+    """Canonical body for a learned skill — single source for CLI/MCP/HTTP."""
+    parts = [
+        f"**trigger:** {trigger}",
+        f"**steps:** {steps}",
+        f"**outcome:** {outcome}",
+    ]
+    if lessons:
+        parts.append(f"**lessons:** {lessons}")
+    return "\n".join(parts)
+
 
 STRENGTH_BOOST = 0.15
 STRENGTH_CAP = 2.0
@@ -1625,7 +1629,9 @@ def sweep_lifecycle(
         conn.execute(
             "UPDATE memory_items SET lifecycle = 'stale' WHERE id = ?", (r["id"],)
         )
-    conn.commit()
+    # No commit: the connection is autocommit (isolation_level=None), so the
+    # UPDATEs above are already durable. An explicit commit() here would close
+    # a caller's open `with tx()` block early and break SAVEPOINT nesting.
     return {"staled": staled, "archived": archived}
 
 
@@ -1651,7 +1657,7 @@ def restore_skill(conn: sqlite3.Connection, slug: str) -> bool:
         "strength = MAX(strength, ?), last_accessed_at = ? WHERE id = ?",
         (0.5, _now(), row["id"]),
     )
-    conn.commit()
+    # Autocommit connection — see sweep_lifecycle for why there is no commit().
     return True
 
 

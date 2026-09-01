@@ -31,7 +31,8 @@ classifiers = [
 ]
 dependencies = [
     "click>=8.1.7",
-    "mcp>=1.0.0",
+    # mcp 2.x removed the low-level Server.list_tools/call_tool decorators we use
+    "mcp>=1.0.0,<2",
     "pyyaml>=6.0.1",
     "platformdirs>=4.2.0",
     "fastapi>=0.111",

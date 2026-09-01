@@ -171,3 +171,19 @@ def test_session_recap_respects_optout(db: Path, tmp_path: Path):
                 {"session_id": "x", "transcript_path": str(tmp_path / "no.jsonl")},
                 env={"SKILLMEM_NO_RECAP": "1"})
     assert out.strip() == ""
+
+
+def test_state_dir_respects_xdg_state_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    from skillmem import hooks as H
+    monkeypatch.setattr(H.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    assert H._state_dir() == tmp_path / "xdg-state" / "skillmem"
+    # fallback without the env var: ~/.local/state/skillmem.
+    # Path.home() reads USERPROFILE on a real Windows host, so set both —
+    # mocking sys.platform alone does not change home-dir resolution.
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert H._state_dir() == tmp_path / ".local" / "state" / "skillmem"

@@ -203,3 +203,29 @@ def test_search_filters_private_of_others(client):
     r = client.post("/search", headers=auth("bob"), json={"query": "unique-marker-xyz"})
     assert r.json()["count"] == 0
     assert "unique-marker-xyz" not in r.text
+
+
+def test_search_200_with_embedding_present(client, memhome):
+    """A row with a stored embedding must not break HTTP JSON serialization."""
+    import sqlite3
+    write(client, "boss", "emb-http", visibility="public", body="deploy nginx steps")
+    db = sqlite3.connect(memhome / "memory.db")
+    db.execute(
+        "UPDATE memory_items SET embedding = ? WHERE slug = 'emb-http'",
+        (b"\x00" * 1536,),
+    )
+    db.commit(); db.close()
+    r = client.post("/search", headers=auth("boss"), json={"query": "deploy nginx"})
+    assert r.status_code == 200, r.text
+    hits = r.json()["results"]
+    assert any(h["slug"] == "emb-http" for h in hits)
+    assert all("embedding" not in h for h in hits)
+
+
+def test_reinforce_gated_by_visibility(client):
+    """No strength bumps (or existence probes) on records the agent can't see."""
+    write(client, "carol", "carol-private-skill", visibility="private", kind="skill")
+    r = client.post("/reinforce/carol-private-skill", headers=auth("bob"))
+    assert r.status_code == 404
+    r = client.post("/reinforce/carol-private-skill", headers=auth("carol"))
+    assert r.status_code == 200

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,15 +82,25 @@ def test_upgrade_verifies_sha_and_execs_installer(
     assert "checksum verified" in res.output
     assert calls, "installer was not exec'd"
     argv = calls[0]
-    assert argv[0] == "bash" and argv[1].endswith("install.sh")
-    assert any(a.startswith("--from=") and a.endswith(".tar.gz") for a in argv)
+    if sys.platform == "win32":
+        # On a real Windows host the code takes its powershell branch.
+        assert argv[0] == "powershell"
+        assert any(str(a).endswith("install.ps1") for a in argv)
+        i = argv.index("-From")
+        assert str(argv[i + 1]).endswith(".tar.gz")
+    else:
+        assert argv[0] == "bash" and argv[1].endswith("install.sh")
+        assert any(a.startswith("--from=") and a.endswith(".tar.gz") for a in argv)
 
 
 def test_upgrade_aborts_on_sha_mismatch(no_legacy, monkeypatch: pytest.MonkeyPatch):
     meta, blobs = _fake_release("v9.9.9", {
         "skillmem-9.9.9.tar.gz": b"tampered-bytes",
         "skillmem-9.9.9.tar.gz.sha256": b"deadbeef  skillmem-9.9.9.tar.gz\n",
+        # Both installers: on Windows the code requires install.ps1 and would
+        # abort on "missing assets" before ever reaching the SHA check.
         "install.sh": b"#!/bin/bash\n",
+        "install.ps1": b"# ps\n",
     })
 
     def fake_get(url, token, **kw):

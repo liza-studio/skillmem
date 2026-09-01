@@ -171,3 +171,35 @@ def test_export_with_missing_body_file_warns_but_writes_excerpt(
     # And the file says so explicitly, not only the log.
     meta = yaml.safe_load(exported.split("---\n")[1])
     assert meta.get("truncated") is True
+
+
+def test_export_no_filename_collision(tmp_path, conn):
+    """Slugs that sanitise identically must land in distinct files."""
+    S.upsert(conn, S.MemoryItem(slug="a/b", title="one", body="body one"))
+    S.upsert(conn, S.MemoryItem(slug="a-b", title="two", body="body two"))
+    n = export_all(conn, tmp_path / "dump")
+    files = list((tmp_path / "dump").rglob("*.md"))
+    assert n == 2
+    assert len(files) == 2, "sanitised filenames collided; one record was overwritten"
+
+
+def test_search_hits_carry_no_embedding_blob(conn):
+    """The raw float32 blob must never leak into search hits (CLI json / HTTP)."""
+    S.upsert(conn, S.MemoryItem(slug="emb-row", title="deploy nginx", body="steps"))
+    conn.execute(
+        "UPDATE memory_items SET embedding = ? WHERE slug = 'emb-row'",
+        (b"\x00" * 1536,),
+    )
+    hits = S.search(conn, "deploy nginx")
+    assert hits, "row should be found via BM25"
+    assert "embedding" not in hits[0]
+
+
+def test_roundtrip_preserves_created_at(tmp_path, conn):
+    S.upsert(conn, S.MemoryItem(slug="old-note", title="old", body="b", created_at=1_600_000_000))
+    export_all(conn, tmp_path / "d")
+    conn2 = S.connect(tmp_path / "second.db")
+    S.init_schema(conn2)
+    import_vault(conn2, tmp_path / "d", skip_auto_memories=False)
+    restored = S.get(conn2, "old-note")
+    assert restored.created_at == 1_600_000_000
