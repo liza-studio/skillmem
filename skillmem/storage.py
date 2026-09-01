@@ -1325,6 +1325,9 @@ def search(
     out: list[dict[str, Any]] = []
     for pos, row in enumerate(rows, start=1):
         d = dict(row)
+        # Raw float32 blob: garbage in CLI --format json and a serialization
+        # 500 in the HTTP layer. Nothing downstream reads it from a hit.
+        d.pop("embedding", None)
         d["tags"] = _parse_json_list(d.get("tags"))
         d["topics"] = _parse_json_list(d.get("topics"))
         d["attachments"] = _parse_json_list(d.get("attachments"))

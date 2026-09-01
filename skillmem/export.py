@@ -23,8 +23,20 @@ _SAFE_FN = re.compile(r"[^\w.\-]+", re.UNICODE)
 
 
 def _safe_filename(slug: str) -> str:
+    """Filesystem-safe name; collision-proof when sanitising was lossy.
+
+    Two slugs may sanitise to the same string ("a/b" and "a-b" both become
+    "a-b") — the second file would silently overwrite the first in the dump.
+    When sanitising changed the slug, append a short slug-hash so distinct
+    records always land in distinct files; clean slugs keep pretty names.
+    """
+    import hashlib as _hashlib
     name = _SAFE_FN.sub("-", slug).strip("-")
-    return name or "untitled"
+    if not name:
+        name = "untitled"
+    if name != slug:
+        name += "__" + _hashlib.sha256(slug.encode("utf-8")).hexdigest()[:8]
+    return name
 
 
 def _frontmatter(item: S.MemoryItem, *, truncated: bool = False) -> str:
