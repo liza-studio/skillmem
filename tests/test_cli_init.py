@@ -105,3 +105,12 @@ def test_uninstall_restores_clean_config(fakehome: Path):
     for grp in settings.get("hooks", {}).get("Stop", []):
         for h in grp.get("hooks", []):
             assert "skillmem" not in h.get("command", "")
+
+
+def test_mcp_subcommand_exists():
+    """Registry clients launch `uvx skillmem mcp` — the subcommand must exist."""
+    from click.testing import CliRunner
+    from skillmem.cli import main as cli_main
+    r = CliRunner().invoke(cli_main, ["mcp", "--help"])
+    assert r.exit_code == 0
+    assert "MCP" in r.output or "stdio" in r.output

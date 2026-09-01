@@ -1159,6 +1159,13 @@ def reinforce(ctx: click.Context, slug: str) -> None:
     )
 
 
+@main.command("mcp")
+def mcp_cmd() -> None:
+    """Run the MCP stdio server (registry clients launch `uvx skillmem mcp`)."""
+    from .mcp_server import run as _mcp_run
+    _mcp_run()
+
+
 @main.command("skills-lifecycle")
 @click.pass_context
 def skills_lifecycle(ctx: click.Context) -> None:
