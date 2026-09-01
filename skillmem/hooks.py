@@ -77,6 +77,9 @@ def _state_dir() -> Path:
     if sys.platform == "win32":
         from platformdirs import user_state_dir
         return Path(user_state_dir(S.APP_NAME))
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg:
+        return Path(xdg).expanduser() / "skillmem"
     return Path.home() / ".local" / "state" / "skillmem"
 
 

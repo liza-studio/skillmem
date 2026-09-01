@@ -51,6 +51,18 @@ warn() { printf "\033[1;33m⚠\033[0m %s\n" "$*" >&2; }
 fail() { printf "\033[1;31m✗\033[0m %s\n" "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Run a package-manager command as root: directly when already root
+# (e.g. minimal containers without sudo), via sudo otherwise.
+run_root() {
+    if [ "$(id -u)" = "0" ]; then
+        "$@"
+    elif have sudo; then
+        sudo "$@"
+    else
+        fail "need root to run: $* — re-run as root or install sudo"
+    fi
+}
+
 # --- detect OS ---
 case "$(uname -s)" in
     Darwin) OS="mac" ;;
@@ -80,8 +92,24 @@ ensure_python() {
         if have apt-get; then
             sudo apt-get update -qq
             sudo apt-get install -y python3.12 python3.12-venv
+        elif have dnf; then
+            run_root dnf install -y python3.12 || run_root dnf install -y python3
+        elif have yum; then
+            run_root yum install -y python3.12 || run_root yum install -y python3
+        elif have pacman; then
+            run_root pacman -Sy --noconfirm python
+        elif have zypper; then
+            run_root zypper --non-interactive install python312 || \
+                run_root zypper --non-interactive install python3
+        elif have apk; then
+            run_root apk add --no-cache python3
         else
-            fail "No apt-get found and python3.12 missing. Install manually."
+            fail "no supported package manager found (apt-get/dnf/yum/pacman/zypper/apk) and python3.12 is missing. Install python3 (>=3.11) and uv manually, then re-run."
+        fi
+        if ! have python3.12; then
+            # Arch/Alpine etc. ship a single `python3` that may not be 3.12 —
+            # uv will download a managed CPython 3.12 at venv creation.
+            warn "distro packages did not provide a python3.12 binary — uv will fetch CPython 3.12"
         fi
     fi
 }
@@ -155,7 +183,9 @@ say "Unpacked to $PKG_DIR"
 # --- step 4: create venv + install ---
 say "Creating venv + installing package"
 cd "$PKG_DIR"
-uv venv --python python3.12 --quiet
+# "3.12" (not "python3.12"): uv resolves a system 3.12 if present, otherwise
+# downloads a managed CPython 3.12 (covers Arch/Alpine with a single `python3`).
+uv venv --python 3.12 --quiet
 # shellcheck source=/dev/null
 if [[ "$WITH_SEMANTIC" == "1" ]]; then
     say "Including semantic recall (fastembed, ~200 MB; --no-semantic to skip)"

@@ -49,9 +49,16 @@ def test_schedule_backend_selection(monkeypatch: pytest.MonkeyPatch):
     assert SCHED._backend()[0] is SCHED._schtasks_install
     monkeypatch.setattr(SCHED.sys, "platform", "darwin")
     assert SCHED._backend()[0] is SCHED._launchd_install
+    # linux without a user systemd instance but with crontab -> cron
+    monkeypatch.setattr(SCHED, "_systemd_available", lambda: False)
+    monkeypatch.setattr(SCHED.shutil, "which", lambda name: "/usr/bin/crontab")
     monkeypatch.setattr(SCHED.sys, "platform", "linux")
     assert SCHED._backend()[0] is SCHED._cron_install
-    # an unknown platform degrades to cron instead of crashing
+    # linux with a working `systemctl --user` -> systemd timers
+    monkeypatch.setattr(SCHED, "_systemd_available", lambda: True)
+    assert SCHED._backend()[0] is SCHED._systemd_install
+    # an unknown platform degrades to the linux detection instead of crashing
+    monkeypatch.setattr(SCHED, "_systemd_available", lambda: False)
     monkeypatch.setattr(SCHED.sys, "platform", "freebsd14")
     assert SCHED._backend()[0] is SCHED._cron_install
 

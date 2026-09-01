@@ -11,7 +11,7 @@ skillmem gives Claude Code a local, persistent skill & memory layer. After every
 - **Ebbinghaus strength model** — `reinforce` bumps a skill's strength, scheduled decay fades unused ones, lifecycle sweeps move dead skills to a backed-up archive (never deleted).
 - **Tamper-evident history** — every edit is appended to a SHA256 hash-chain; `skillmem verify` detects any after-the-fact tampering.
 - **Deep Claude Code integration** — 6 hooks + 8 MCP tools installed with one command.
-- **Cross-platform** — macOS (launchd), Windows (schtasks), Linux (cron).
+- **Cross-platform** — macOS (launchd), Windows (schtasks), Linux (systemd user timers, cron fallback).
 - **No vendor lock** — `export-all` dumps everything to plain markdown with YAML frontmatter; re-importing the dump yields the same records.
 
 ## Why
