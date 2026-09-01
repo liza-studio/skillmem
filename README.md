@@ -56,6 +56,23 @@ The repo already carries a Claude Code plugin (`.claude-plugin/` + `hooks/hooks.
 
 The plugin requires the skillmem Python package on PATH and replaces `skillmem init --claude-code`'s wiring — use one or the other, not both (see [docs/PUBLISHING.md](docs/PUBLISHING.md)).
 
+### Claude Desktop (chat app)
+
+The MCP server also works in the Claude Desktop chat app — add to
+`claude_desktop_config.json` (Settings → Developer → Edit Config):
+
+```json
+{
+  "mcpServers": {
+    "skillmem": { "command": "skillmem-mcp" }
+  }
+}
+```
+
+You get all 8 `mem_*` tools on demand (search, learn, recall, reinforce…).
+The automatic hooks (auto-recall on every prompt, session recap) are a
+Claude Code mechanism and do not run in the chat app.
+
 ## How it works
 
 ```
