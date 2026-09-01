@@ -205,21 +205,14 @@ def _tool_learn(args: dict[str, Any]) -> list[TextContent]:
         if not args.get(r):
             return _err(f"{r} is required")
 
-    body_parts = [
-        f"**trigger:** {args['trigger']}",
-        f"**steps:** {args['steps']}",
-        f"**outcome:** {args['outcome']}",
-    ]
-    if args.get("lessons"):
-        body_parts.append(f"**lessons:** {args['lessons']}")
-
     conn = _shared_conn()
     S.init_schema(conn)
     item = S.MemoryItem(
         slug=args["slug"],
         kind="skill",
         title=args["title"],
-        body="\n".join(body_parts),
+        body=S.skill_body(args["trigger"], args["steps"], args["outcome"],
+                          args.get("lessons")),
         project=args.get("project"),
         agent=_MCP_AGENT,
         tags=list(args.get("tags") or []),

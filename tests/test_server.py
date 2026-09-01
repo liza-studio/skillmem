@@ -220,3 +220,12 @@ def test_search_200_with_embedding_present(client, memhome):
     hits = r.json()["results"]
     assert any(h["slug"] == "emb-http" for h in hits)
     assert all("embedding" not in h for h in hits)
+
+
+def test_reinforce_gated_by_visibility(client):
+    """No strength bumps (or existence probes) on records the agent can't see."""
+    write(client, "carol", "carol-private-skill", visibility="private", kind="skill")
+    r = client.post("/reinforce/carol-private-skill", headers=auth("bob"))
+    assert r.status_code == 404
+    r = client.post("/reinforce/carol-private-skill", headers=auth("carol"))
+    assert r.status_code == 200

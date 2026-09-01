@@ -343,17 +343,11 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
 
     @app.post("/learn")
     def learn(req: LearnRequest, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
-        body_parts = [
-            f"**trigger:** {req.trigger}",
-            f"**steps:** {req.steps}",
-            f"**outcome:** {req.outcome}",
-        ]
-        if req.lessons:
-            body_parts.append(f"**lessons:** {req.lessons}")
         conn = get_conn()
         item = S.MemoryItem(
             slug=req.slug, kind="skill", title=req.title,
-            body="\n".join(body_parts), project=req.project,
+            body=S.skill_body(req.trigger, req.steps, req.outcome, req.lessons),
+            project=req.project,
             tags=list(req.tags), topics=list(req.topics),
             visibility=req.visibility, agent=agent.name,
             ttl_days=req.ttl_days,
@@ -387,6 +381,12 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
     @app.post("/reinforce/{slug}")
     def reinforce(slug: str, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
         conn = get_conn()
+        # Visibility gate: without it any agent could bump strength of skills
+        # it cannot see — a write side-channel into someone else's memory, and
+        # a slug-existence oracle (200 vs 404). Same 404 for both cases.
+        item = S.get(conn, slug)
+        if not item or not _visible_to(item, agent):
+            raise HTTPException(status_code=404, detail="not found")
         result = S.reinforce(conn, slug)
         if not result:
             raise HTTPException(status_code=404, detail="not found")

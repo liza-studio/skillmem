@@ -24,7 +24,11 @@ def _conn(db_path: Path | None):
     return conn
 
 
+from . import __version__
+
+
 @click.group(help="skillmem CLI (skillmem)")
+@click.version_option(__version__, prog_name="skillmem")
 @click.option(
     "--db",
     "db_path",
@@ -1046,18 +1050,11 @@ def learn(
 ) -> None:
     """Record an after-action skill from task experience."""
     conn = _conn(ctx.obj["db_path"])
-    body_parts = [
-        f"**trigger:** {trigger}",
-        f"**steps:** {steps}",
-        f"**outcome:** {outcome}",
-    ]
-    if lessons:
-        body_parts.append(f"**lessons:** {lessons}")
     item = S.MemoryItem(
         slug=slug,
         kind="skill",
         title=title,
-        body="\n".join(body_parts),
+        body=S.skill_body(trigger, steps, outcome, lessons),
         project=project,
         tags=[t.strip() for t in tags.split(",")] if tags else [],
         visibility="public",
@@ -1144,6 +1141,22 @@ def decay(ctx: click.Context, days: int) -> None:
         click.echo(f"Marked stale: {', '.join(sweep['staled'])}")
     if sweep["archived"]:
         click.echo(f"Archived (backed up): {', '.join(sweep['archived'])}")
+
+
+@main.command()
+@click.argument("slug")
+@click.pass_context
+def reinforce(ctx: click.Context, slug: str) -> None:
+    """Explicitly reinforce a skill after it proved useful (mirrors mem_reinforce)."""
+    conn = _conn(ctx.obj["db_path"])
+    result = S.reinforce(conn, slug)
+    if not result:
+        click.echo(f"not found: {slug}", err=True)
+        sys.exit(1)
+    click.echo(
+        f"Reinforced: {result['slug']} strength={result['strength']:.2f} "
+        f"access={result['access_count']}"
+    )
 
 
 @main.command("skills-lifecycle")

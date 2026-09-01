@@ -193,3 +193,13 @@ def test_search_hits_carry_no_embedding_blob(conn):
     hits = S.search(conn, "deploy nginx")
     assert hits, "row should be found via BM25"
     assert "embedding" not in hits[0]
+
+
+def test_roundtrip_preserves_created_at(tmp_path, conn):
+    S.upsert(conn, S.MemoryItem(slug="old-note", title="old", body="b", created_at=1_600_000_000))
+    export_all(conn, tmp_path / "d")
+    conn2 = S.connect(tmp_path / "second.db")
+    S.init_schema(conn2)
+    import_vault(conn2, tmp_path / "d", skip_auto_memories=False)
+    restored = S.get(conn2, "old-note")
+    assert restored.created_at == 1_600_000_000
