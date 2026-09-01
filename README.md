@@ -36,6 +36,7 @@ Or from a checkout:
 
 ```bash
 uv venv && uv pip install -e '.[semantic]'
+source .venv/bin/activate       # or prefix the commands below with `uv run`
 skillmem init --claude-code     # wires MCP server + hooks into Claude Code
 skillmem doctor                 # health check: DB, schema, semantic status
 ```
