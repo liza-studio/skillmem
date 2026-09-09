@@ -16,7 +16,8 @@ skillmem gives Claude Code and the Codex CLI a local, persistent skill & memory 
 - **Tamper-evident history** — every edit is appended to a SHA256 hash-chain; `skillmem verify` detects any after-the-fact tampering.
 - **Deep Claude Code integration** — 6 hooks + 8 MCP tools installed with one command.
 - **One memory, several agents** — Claude Code and Codex share a single database, and every
-  record carries the agent that wrote it, so authorship stays readable when they learn side by side.
+  record carries the agent that wrote it, taken from the MCP handshake, so authorship stays
+  readable when they learn side by side.
 - **Cross-platform** — macOS (launchd), Windows (schtasks), Linux (systemd user timers, cron fallback).
 - **No vendor lock** — `export-all` dumps everything to plain markdown with YAML frontmatter; re-importing the dump yields the same records.
 
@@ -59,7 +60,9 @@ skillmem init --codex
 ```
 
 Appends an `[mcp_servers.skillmem]` table to `~/.codex/config.toml` and marks the entry with
-`SKILLMEM_AGENT=codex`, so skills written from Codex are attributable in a shared database.
+`SKILLMEM_AGENT=codex`. The tag is belt-and-braces: with no tag set, the server takes the
+author's name from the agent's own MCP handshake, so attribution is right in a shared
+database whichever way skillmem was installed.
 The file is appended to, never rewritten: your own settings and comments stay where you put
 them, the result is parsed before it is written, and invalid TOML is refused rather than
 overwritten. `skillmem uninstall` removes the table again and leaves the rest of the file intact.
@@ -68,9 +71,17 @@ Codex reads `AGENTS.md` for project rules; if you keep yours in `CLAUDE.md`, poi
 with `project_doc_fallback_filenames = ["CLAUDE.md"]` in the same config file — then both agents
 follow one set of rules and one memory.
 
-### Claude Code plugin & MCP Registry (coming soon)
+### As a plugin
 
-The repo already carries a Claude Code plugin (`.claude-plugin/` + `hooks/hooks.json` — MCP server and all hooks in one install) and an MCP Registry manifest (`server.json`). Both go live once the `skillmem` package is published on PyPI; until then, use the installers above. Once live:
+The repo is also a plugin, in two flavours, both pointing at the same `skillmem-mcp` binary:
+
+- **Agent Plugins** (`plugin.json` + `mcp.json` at the repo root) — what the Codex CLI installs from a
+  marketplace. `mcp.json` needs both its `$schema` and `"type": "stdio"`, and the command must be a bare
+  executable name rather than an absolute path — Codex's parser ignores the file otherwise, with no error.
+  `codex mcp list` listing the server is the check that it parsed.
+- **Claude Code** (`.claude-plugin/` + `hooks/hooks.json`) — MCP server *and* all six hooks in one install.
+
+Either way the package itself must be on PATH (`pip install skillmem`); the plugin wires the server, not the runtime. An MCP Registry manifest (`server.json`) is in the repo as well:
 
 ```
 /plugin marketplace add liza-studio/skillmem
