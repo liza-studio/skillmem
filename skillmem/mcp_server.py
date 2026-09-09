@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -132,7 +133,22 @@ def _tool_list(args: dict[str, Any]) -> list[TextContent]:
     return _ok({"count": len(summary), "items": summary})
 
 
-_MCP_AGENT = os.environ.get("SKILLMEM_AGENT", "claude-code")
+# Authorship. An explicit SKILLMEM_AGENT always wins; otherwise the MCP client
+# names itself during initialize, which is how a plugin installed into any agent
+# gets correct attribution with no configuration. "claude-code" stays the
+# fallback so databases written before clientInfo was read keep one agent name.
+_ENV_AGENT = os.environ.get("SKILLMEM_AGENT")
+_client_agent: str | None = None
+
+
+def _normalize_agent(name: str) -> str:
+    """clientInfo.name is free-form text; store a short, stable slug."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    return slug[:40] or "unknown"
+
+
+def _agent() -> str:
+    return _ENV_AGENT or _client_agent or "claude-code"
 
 
 def _tool_write(args: dict[str, Any]) -> list[TextContent]:
@@ -150,7 +166,7 @@ def _tool_write(args: dict[str, Any]) -> list[TextContent]:
         body=args["body"],
         project=args.get("project"),
         # Agent identity is set server-side — clients can't forge authorship.
-        agent=_MCP_AGENT,
+        agent=_agent(),
         tags=list(args.get("tags") or []),
         topics=list(args.get("topics") or []),
         ttl_days=args.get("ttl_days"),
@@ -185,7 +201,7 @@ def _tool_update(args: dict[str, Any]) -> list[TextContent]:
         existing.kind = args["kind"]
     if args.get("project") is not None:
         existing.project = args["project"]
-    existing.agent = _MCP_AGENT
+    existing.agent = _agent()
     if args.get("tags") is not None:
         existing.tags = list(args["tags"])
     if args.get("topics") is not None:
@@ -214,7 +230,7 @@ def _tool_learn(args: dict[str, Any]) -> list[TextContent]:
         body=S.skill_body(args["trigger"], args["steps"], args["outcome"],
                           args.get("lessons")),
         project=args.get("project"),
-        agent=_MCP_AGENT,
+        agent=_agent(),
         tags=list(args.get("tags") or []),
         topics=list(args.get("topics") or []),
         visibility=args.get("visibility") or "public",
@@ -443,6 +459,24 @@ TOOL_HANDLERS = {
 # --------------------------------------------------------------------------- #
 
 
+def _remember_client(server: Server) -> None:
+    """Learn the client's name from the initialize handshake, once per process.
+
+    Best-effort on purpose: a client that sends no clientInfo, or an MCP
+    version that exposes it differently, must not break a tool call.
+    """
+    global _client_agent
+    if _client_agent is not None:
+        return
+    try:
+        info = server.request_context.session.client_params.clientInfo
+    except Exception:
+        return
+    name = getattr(info, "name", None)
+    if name:
+        _client_agent = _normalize_agent(name)
+
+
 def _build_server() -> Server:
     server: Server = Server(SERVER_NAME)
 
@@ -452,6 +486,7 @@ def _build_server() -> Server:
 
     @server.call_tool()
     async def _call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        _remember_client(server)
         handler = TOOL_HANDLERS.get(name)
         if handler is None:
             return _err(f"unknown tool: {name}")

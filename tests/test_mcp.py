@@ -110,7 +110,7 @@ def test_client_agent_argument_cannot_forge_authorship(mcp):
         "agent": "intruder",  # client-supplied — must be ignored
     })
     item = S.get(mcp._shared_conn(), "authored")
-    assert item.agent == mcp._MCP_AGENT
+    assert item.agent == mcp._agent()
     assert item.agent != "intruder"
 
 
@@ -121,7 +121,7 @@ def test_agent_identity_comes_from_env(memhome, monkeypatch):
     mod = importlib.reload(mcp_server)
     mod._CONN = None
     try:
-        assert mod._MCP_AGENT == "engineer-bot"
+        assert mod._agent() == "engineer-bot"
         mod.TOOL_HANDLERS["mem_write"]({
             "slug": "env-authored", "title": "env identity",
             "body": "written under an env-provided identity",
@@ -134,6 +134,52 @@ def test_agent_identity_comes_from_env(memhome, monkeypatch):
         monkeypatch.delenv("SKILLMEM_AGENT")
         restored = importlib.reload(mcp_server)
         restored._CONN = None
+
+
+def test_agent_falls_back_to_client_name(mcp, monkeypatch):
+    """With no SKILLMEM_AGENT set, the MCP client's own name is the author.
+
+    That is what makes a plugin work in any agent without configuration:
+    Codex is recorded as codex, not as claude-code.
+    """
+    monkeypatch.setattr(mcp, "_ENV_AGENT", None)
+    monkeypatch.setattr(mcp, "_client_agent", "codex")
+    mcp.TOOL_HANDLERS["mem_write"]({
+        "slug": "client-authored", "title": "client identity",
+        "body": "written by whichever agent connected",
+    })
+    assert S.get(mcp._shared_conn(), "client-authored").agent == "codex"
+
+
+def test_env_agent_beats_client_name(mcp, monkeypatch):
+    """An explicit SKILLMEM_AGENT always wins over what the client claims."""
+    monkeypatch.setattr(mcp, "_ENV_AGENT", "engineer-bot")
+    monkeypatch.setattr(mcp, "_client_agent", "codex")
+    mcp.TOOL_HANDLERS["mem_write"]({
+        "slug": "env-wins", "title": "env priority",
+        "body": "env identity must outrank the handshake",
+    })
+    assert S.get(mcp._shared_conn(), "env-wins").agent == "engineer-bot"
+
+
+def test_agent_defaults_when_client_is_silent(mcp, monkeypatch):
+    """No env, no clientInfo — the historical default keeps databases uniform."""
+    monkeypatch.setattr(mcp, "_ENV_AGENT", None)
+    monkeypatch.setattr(mcp, "_client_agent", None)
+    mcp.TOOL_HANDLERS["mem_write"]({
+        "slug": "silent-client", "title": "no identity offered",
+        "body": "falls back to the pre-clientInfo default",
+    })
+    assert S.get(mcp._shared_conn(), "silent-client").agent == "claude-code"
+
+
+def test_normalize_agent_slugifies_free_form_names(mcp):
+    """clientInfo.name is arbitrary text from another vendor — never trust its shape."""
+    assert mcp._normalize_agent("Codex CLI") == "codex-cli"
+    assert mcp._normalize_agent("  Claude Code  ") == "claude-code"
+    assert mcp._normalize_agent("weird!!name///") == "weird-name"
+    assert mcp._normalize_agent("!!!") == "unknown"
+    assert len(mcp._normalize_agent("x" * 200)) == 40
 
 
 # --------------------------------------------------------------------------- #
