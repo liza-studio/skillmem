@@ -4,17 +4,19 @@
 
 [![CI](https://github.com/liza-studio/skillmem/actions/workflows/ci.yml/badge.svg)](https://github.com/liza-studio/skillmem/actions/workflows/ci.yml)
 
-**Self-improving skills for Claude Code — your agent learns, recalls, reinforces, and forgets.**
+**Self-improving skills for Claude Code and Codex — your agents learn, recall, reinforce, and forget.**
 
 ![skillmem demo: a Russian query finds an English skill, unused skills decay](docs/demo.gif)
 
-skillmem gives Claude Code a local, persistent skill & memory layer. After every non-trivial task the agent can record *how it was done* as a skill; before the next task it recalls the relevant ones; skills that keep proving useful get stronger, and skills nobody uses fade away — the way human memory works.
+skillmem gives Claude Code and the Codex CLI a local, persistent skill & memory layer. After every non-trivial task the agent can record *how it was done* as a skill; before the next task it recalls the relevant ones; skills that keep proving useful get stronger, and skills nobody uses fade away — the way human memory works.
 
 - **$0 per write and per read** — no LLM calls, no cloud, no API keys. Plain SQLite on your disk.
 - **Bilingual hybrid search, fully local** — FTS5 BM25 + Snowball stemming (EN/RU) + a multilingual ONNX embedding model. A Russian query finds an English skill and vice versa, all on CPU, offline.
 - **Ebbinghaus strength model** — `reinforce` bumps a skill's strength, scheduled decay fades unused ones, lifecycle sweeps move dead skills to a backed-up archive (never deleted).
 - **Tamper-evident history** — every edit is appended to a SHA256 hash-chain; `skillmem verify` detects any after-the-fact tampering.
 - **Deep Claude Code integration** — 6 hooks + 8 MCP tools installed with one command.
+- **One memory, several agents** — Claude Code and Codex share a single database, and every
+  record carries the agent that wrote it, so authorship stays readable when they learn side by side.
 - **Cross-platform** — macOS (launchd), Windows (schtasks), Linux (systemd user timers, cron fallback).
 - **No vendor lock** — `export-all` dumps everything to plain markdown with YAML frontmatter; re-importing the dump yields the same records.
 
@@ -42,10 +44,29 @@ Or from a checkout:
 uv venv && uv pip install -e '.[semantic]'
 source .venv/bin/activate       # or prefix the commands below with `uv run`
 skillmem init --claude-code     # wires MCP server + hooks into Claude Code
+skillmem init --codex           # wires the MCP server into the Codex CLI
 skillmem doctor                 # health check: DB, schema, semantic status
 ```
 
+Both flags can be combined in one run — the two agents then share one database.
+
 `init --claude-code` registers the MCP server in `~/.claude.json` and the hooks in `~/.claude/settings.json` (idempotent, with backups). Use `--hooks minimal` for just the Stop→migrate hook, or `--hooks none` for MCP only.
+
+### Codex CLI
+
+```bash
+skillmem init --codex
+```
+
+Appends an `[mcp_servers.skillmem]` table to `~/.codex/config.toml` and marks the entry with
+`SKILLMEM_AGENT=codex`, so skills written from Codex are attributable in a shared database.
+The file is appended to, never rewritten: your own settings and comments stay where you put
+them, the result is parsed before it is written, and invalid TOML is refused rather than
+overwritten. `skillmem uninstall` removes the table again and leaves the rest of the file intact.
+
+Codex reads `AGENTS.md` for project rules; if you keep yours in `CLAUDE.md`, point Codex at it
+with `project_doc_fallback_filenames = ["CLAUDE.md"]` in the same config file — then both agents
+follow one set of rules and one memory.
 
 ### Claude Code plugin & MCP Registry (coming soon)
 
@@ -137,11 +158,11 @@ skillmem schedule install        # decay daily 04:15, export weekly Sun 04:30
 ## Uninstall
 
 ```bash
-skillmem uninstall               # removes MCP entry, hooks, scheduled jobs; keeps the DB
+skillmem uninstall               # removes MCP entries (both agents), hooks, scheduled jobs; keeps the DB
 skillmem uninstall --purge-db    # ...and deletes the database
 ```
 
-Config edits are made atomically with timestamped backups, and corrupt JSON is never overwritten.
+Config edits are made atomically with timestamped backups; corrupt JSON or TOML is never overwritten.
 
 ## Benchmarks
 
