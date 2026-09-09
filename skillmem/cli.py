@@ -374,6 +374,132 @@ def _patch_claude_json(
             "backup": str(backup) if backup else None}
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Atomic write for plain text: tempfile in same dir + os.replace."""
+    import os as _os, tempfile as _tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = _tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    try:
+        with _os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        _os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _toml_str(value: str) -> str:
+    """TOML basic string. Escapes backslashes first — Windows paths break otherwise."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _patch_codex_config(
+    config_toml: Path,
+    mcp_binary: Path,
+    *,
+    db_env: str | None = None,
+    agent: str = "codex",
+) -> dict[str, Any]:
+    """Add an ``[mcp_servers.skillmem]`` table to ~/.codex/config.toml.
+
+    Appends rather than rewrites: the file is hand-edited by users and full
+    round-tripping would drop their comments. New tables at the end of a TOML
+    document are always valid, and the result is parsed before it is written —
+    if appending would corrupt the file we refuse and keep the backup.
+
+    ``SKILLMEM_AGENT`` marks every skill Codex writes, so authorship stays
+    visible in a database shared with Claude Code.
+    """
+    import time as _time
+    import tomllib
+
+    raw = ""
+    backup: Path | None = None
+    if config_toml.exists():
+        raw = config_toml.read_text(encoding="utf-8")
+        backup = config_toml.with_suffix(f".toml.bak.{int(_time.time())}")
+        backup.write_text(raw, encoding="utf-8")
+        try:
+            parsed = tomllib.loads(raw)
+        except tomllib.TOMLDecodeError as exc:
+            click.echo(
+                f"warn: {config_toml} contains invalid TOML ({exc}); refusing to "
+                f"touch it. Inspect backup at {backup} and re-run init after fixing.",
+                err=True,
+            )
+            return {"changed": False, "reason": "existing TOML is invalid",
+                    "backup": str(backup)}
+        if "skillmem" in (parsed.get("mcp_servers") or {}):
+            return {"changed": False, "reason": "skillmem MCP already configured",
+                    "backup": str(backup)}
+
+    env: dict[str, str] = {"SKILLMEM_AGENT": agent}
+    if db_env:
+        env["SKILLMEM_DB"] = db_env
+
+    lines = ["", "[mcp_servers.skillmem]",
+             f"command = {_toml_str(str(mcp_binary))}",
+             "args = []",
+             "startup_timeout_sec = 30",
+             "", "[mcp_servers.skillmem.env]"]
+    lines += [f"{k} = {_toml_str(v)}" for k, v in env.items()]
+
+    if raw and not raw.endswith("\n"):
+        raw += "\n"
+    new_raw = raw + "\n".join(lines) + "\n"
+
+    try:
+        tomllib.loads(new_raw)
+    except tomllib.TOMLDecodeError as exc:
+        return {"changed": False, "reason": f"appending would break the file: {exc}",
+                "backup": str(backup) if backup else None}
+
+    _atomic_write_text(config_toml, new_raw)
+    return {"changed": True, "added": "mcp_servers.skillmem",
+            "agent": agent,
+            "backup": str(backup) if backup else None}
+
+
+def _unpatch_codex_config(config_toml: Path) -> dict[str, Any]:
+    """Remove the ``[mcp_servers.skillmem]`` tables added by init --codex.
+
+    Line-based on purpose, symmetric with the append above: drop the skillmem
+    tables and their sub-tables, leave every other line (comments included)
+    exactly where the user put it.
+    """
+    import time as _time
+    import tomllib
+
+    if not config_toml.exists():
+        return {"changed": False, "reason": "no config.toml"}
+    raw = config_toml.read_text(encoding="utf-8")
+    try:
+        parsed = tomllib.loads(raw)
+    except tomllib.TOMLDecodeError:
+        return {"changed": False, "reason": f"could not parse {config_toml}"}
+    if "skillmem" not in (parsed.get("mcp_servers") or {}):
+        return {"changed": False, "reason": "skillmem MCP not configured"}
+
+    out: list[str] = []
+    dropping = False
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            header = stripped.strip("[]").strip()
+            dropping = (header == "mcp_servers.skillmem"
+                        or header.startswith("mcp_servers.skillmem."))
+        if not dropping:
+            out.append(line)
+
+    while out and not out[-1].strip():
+        out.pop()
+    backup = config_toml.with_suffix(f".toml.bak.{int(_time.time())}")
+    backup.write_text(raw, encoding="utf-8")
+    _atomic_write_text(config_toml, "\n".join(out) + ("\n" if out else ""))
+    return {"changed": True, "removed": "mcp_servers.skillmem",
+            "backup": str(backup)}
+
+
 def _venv_script(name: str) -> Path:
     """Console script next to the interpreter: bin/<name> or Scripts\\<name>.exe."""
     scripts = Path(sys.executable).parent
@@ -449,6 +575,8 @@ def _patch_settings_hook(
 @main.command()
 @click.option("--claude-code", is_flag=True,
               help="Configure MCP entry in ~/.claude.json and add Stop hook")
+@click.option("--codex", is_flag=True,
+              help="Configure MCP entry in ~/.codex/config.toml (Codex CLI)")
 @click.option("--migrate-existing/--skip-migrate", default=True,
               help="Auto-discover and import all ~/.claude/projects/*/memory")
 @click.option("--mcp-binary", type=click.Path(path_type=Path), default=None,
@@ -461,11 +589,12 @@ def _patch_settings_hook(
 def init(
     ctx: click.Context,
     claude_code: bool,
+    codex: bool,
     migrate_existing: bool,
     mcp_binary: Path | None,
     hooks_mode: str,
 ) -> None:
-    """First-time setup: create DB, migrate auto-memory, wire up Claude Code."""
+    """First-time setup: create DB, migrate auto-memory, wire up your agents."""
     report: dict[str, Any] = {}
 
     db_path = ctx.obj["db_path"] or S.default_db_path()
@@ -522,19 +651,37 @@ def init(
             ]
         report["hooks"] = hook_reports
 
+    if codex:
+        codex_binary = mcp_binary or _venv_script("skillmem-mcp")
+        if not codex_binary.exists():
+            click.echo(f"warn: {codex_binary} not found — install package first",
+                       err=True)
+        report["codex_config"] = _patch_codex_config(
+            Path.home() / ".codex" / "config.toml", codex_binary,
+            db_env=str(db_path) if str(db_path) != str(S.default_db_path()) else None,
+        )
+
     click.echo(json.dumps(report, ensure_ascii=False, indent=2))
     click.echo("")
-    click.echo("Done. Open `claude` in any project — the mem_* tools will be there.")
+    if claude_code and codex:
+        click.echo("Done. Open `claude` or `codex` — both share one skill database.")
+    elif codex:
+        click.echo("Done. Open `codex` in any project — the mem_* tools will be there.")
+    else:
+        click.echo("Done. Open `claude` in any project — the mem_* tools will be there.")
     click.echo("Undo: skillmem uninstall")
 
 
 @main.command()
 @click.option("--claude-code", is_flag=True, default=True,
               help="Restore ~/.claude.json and remove hooks from settings.json")
+@click.option("--codex/--no-codex", default=True,
+              help="Remove the skillmem MCP entry from ~/.codex/config.toml")
 @click.option("--keep-db/--purge-db", default=True,
               help="Keep the SQLite DB (default) or delete it")
 @click.pass_context
-def uninstall(ctx: click.Context, claude_code: bool, keep_db: bool) -> None:
+def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
+               keep_db: bool) -> None:
     """Reverse `skillmem init`: remove MCP entry + hook. DB stays unless --purge-db."""
     import time as _time
     report: dict[str, Any] = {"removed": [], "warnings": []}
@@ -590,6 +737,12 @@ def uninstall(ctx: click.Context, claude_code: bool, keep_db: bool) -> None:
                     report["removed"].append(f"hooks pointing to skillmem (backup: {backup})")
             except json.JSONDecodeError:
                 report["warnings"].append(f"could not parse {settings_json}")
+
+    if codex:
+        r = _unpatch_codex_config(Path.home() / ".codex" / "config.toml")
+        if r.get("changed"):
+            report["removed"].append(
+                f"mcp_servers.skillmem from config.toml (backup: {r['backup']})")
 
     # Remove decay/export from the OS scheduler (best-effort).
     try:
