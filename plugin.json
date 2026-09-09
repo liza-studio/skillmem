@@ -1,0 +1,21 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "skillmem",
+  "version": "0.9.2",
+  "description": "Self-improving skill memory for coding agents: learn, recall, reinforce, decay. One memory shared by Claude Code and Codex, local and zero-cost. Requires the skillmem Python package on PATH (pip install skillmem).",
+  "author": {
+    "name": "Liza Studio",
+    "url": "https://github.com/liza-studio"
+  },
+  "homepage": "https://skillmem.dev",
+  "repository": "https://github.com/liza-studio/skillmem",
+  "license": "Apache-2.0",
+  "keywords": [
+    "memory",
+    "skills",
+    "self-improving",
+    "mcp",
+    "sqlite",
+    "recall"
+  ]
+}

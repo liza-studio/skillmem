@@ -75,7 +75,10 @@ follow one set of rules and one memory.
 
 The repo is also a plugin, in two flavours, both pointing at the same `skillmem-mcp` binary:
 
-- **Portable** (`plugin.json` + `mcp.json` at the repo root) — the agent-plugins format the Codex CLI installs from a marketplace.
+- **Agent Plugins** (`plugin.json` + `mcp.json` at the repo root) — what the Codex CLI installs from a
+  marketplace. `mcp.json` needs both its `$schema` and `"type": "stdio"`, and the command must be a bare
+  executable name rather than an absolute path — Codex's parser ignores the file otherwise, with no error.
+  `codex mcp list` listing the server is the check that it parsed.
 - **Claude Code** (`.claude-plugin/` + `hooks/hooks.json`) — MCP server *and* all six hooks in one install.
 
 Either way the package itself must be on PATH (`pip install skillmem`); the plugin wires the server, not the runtime. An MCP Registry manifest (`server.json`) is in the repo as well:
