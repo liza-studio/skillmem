@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Four more agents share the one database: `init --cursor`, `--windsurf`,
+  `--gemini` (Gemini CLI) and `--opencode`, plus `--all-agents` for every
+  agent at once. Cursor, Windsurf and Gemini CLI take the Claude-shaped
+  `mcpServers` map; opencode gets its own `mcp` block with an argv command.
+  Entries are idempotent, backed up, and stamped with `SKILLMEM_AGENT` so
+  authorship survives in a shared database; `uninstall` removes them
+  (`--no-editors` opts out).
+
 - Distribution packaging (no code changes): Claude Code plugin
   (`.claude-plugin/plugin.json` + `hooks/hooks.json` + single-plugin
   marketplace), MCP Registry manifest (`server.json`,

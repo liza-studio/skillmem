@@ -46,10 +46,28 @@ uv venv && uv pip install -e '.[semantic]'
 source .venv/bin/activate       # or prefix the commands below with `uv run`
 skillmem init --claude-code     # wires MCP server + hooks into Claude Code
 skillmem init --codex           # wires the MCP server into the Codex CLI
+skillmem init --all-agents      # ...or all six at once (see below)
 skillmem doctor                 # health check: DB, schema, semantic status
 ```
 
-Both flags can be combined in one run — the two agents then share one database.
+Flags combine in one run — the agents then share one database.
+
+### All six agents
+
+| Flag | Agent | Config it writes |
+|---|---|---|
+| `--claude-code` | Claude Code | `~/.claude.json` + hooks in `~/.claude/settings.json` |
+| `--codex` | Codex CLI | `~/.codex/config.toml` |
+| `--cursor` | Cursor | `~/.cursor/mcp.json` |
+| `--windsurf` | Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+| `--gemini` | Gemini CLI | `~/.gemini/settings.json` |
+| `--opencode` | opencode | `~/.config/opencode/opencode.json` |
+
+Every entry is idempotent and backed up before it is touched; a config that
+does not parse is left alone rather than overwritten. Each agent is stamped
+with `SKILLMEM_AGENT`, so in a shared database "who learned this" stays
+answerable. `skillmem uninstall` removes all of them (`--no-editors` to keep
+the editor entries).
 
 `init --claude-code` registers the MCP server in `~/.claude.json` and the hooks in `~/.claude/settings.json` (idempotent, with backups). Use `--hooks minimal` for just the Stop→migrate hook, or `--hooks none` for MCP only.
 

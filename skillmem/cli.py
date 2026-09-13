@@ -374,6 +374,155 @@ def _patch_claude_json(
             "backup": str(backup) if backup else None}
 
 
+#: Editors that read the Claude-shaped ``{"mcpServers": {...}}`` map. The path
+#: and the ``SKILLMEM_AGENT`` stamp are all that differ between them.
+MCP_JSON_AGENTS: dict[str, tuple[tuple[str, ...], str]] = {
+    "cursor": ((".cursor", "mcp.json"), "Cursor"),
+    "windsurf": ((".codeium", "windsurf", "mcp_config.json"), "Windsurf"),
+    "gemini": ((".gemini", "settings.json"), "Gemini CLI"),
+}
+
+#: opencode keeps its servers under ``mcp`` in the global config instead.
+OPENCODE_CONFIG = (".config", "opencode", "opencode.json")
+
+
+def _agent_config_path(parts: tuple[str, ...]) -> Path:
+    return Path.home().joinpath(*parts)
+
+
+def _read_json_config(path: Path) -> tuple[dict[str, Any], Path | None, str | None]:
+    """Read a JSON config, backing it up first. Returns (data, backup, error).
+
+    A non-None error means the file is there but unparseable — callers refuse to
+    touch it and point the user at the backup, same as ``_patch_claude_json``.
+    """
+    import time as _time
+    if not path.exists():
+        return {}, None, None
+    raw = path.read_text(encoding="utf-8")
+    backup = path.with_suffix(f"{path.suffix}.bak.{int(_time.time())}")
+    backup.write_text(raw, encoding="utf-8")
+    try:
+        return (json.loads(raw) if raw.strip() else {}), backup, None
+    except json.JSONDecodeError as exc:
+        return {}, backup, str(exc)
+
+
+def _patch_mcp_servers_json(
+    config_json: Path,
+    mcp_binary: Path,
+    *,
+    agent: str,
+    db_env: str | None = None,
+) -> dict[str, Any]:
+    """Add ``mcpServers.skillmem`` to an editor config in the Claude shape.
+
+    ``SKILLMEM_AGENT`` marks every skill the editor writes, so authorship stays
+    answerable in a database shared by several agents.
+    """
+    data, backup, err = _read_json_config(config_json)
+    if err:
+        click.echo(
+            f"warn: {config_json} contains invalid JSON ({err}); refusing to "
+            f"overwrite. Inspect backup at {backup} and re-run init after fixing.",
+            err=True,
+        )
+        return {"changed": False, "reason": "existing JSON is invalid",
+                "backup": str(backup)}
+
+    servers = data.setdefault("mcpServers", {})
+    if "skillmem" in servers:
+        return {"changed": False, "reason": "skillmem MCP already configured",
+                "backup": str(backup) if backup else None}
+
+    env: dict[str, str] = {"SKILLMEM_AGENT": agent}
+    if db_env:
+        env["SKILLMEM_DB"] = db_env
+    servers["skillmem"] = {"command": str(mcp_binary), "args": [], "env": env}
+    _atomic_write_json(config_json, data)
+    return {"changed": True, "added": "mcpServers.skillmem", "agent": agent,
+            "path": str(config_json),
+            "backup": str(backup) if backup else None}
+
+
+def _unpatch_mcp_servers_json(config_json: Path) -> dict[str, Any]:
+    """Remove the ``mcpServers.skillmem`` entry added by init."""
+    if not config_json.exists():
+        return {"changed": False, "reason": f"no {config_json.name}"}
+    data, backup, err = _read_json_config(config_json)
+    if err:
+        return {"changed": False, "reason": f"could not parse {config_json}"}
+    servers = data.get("mcpServers") or {}
+    if "skillmem" not in servers:
+        return {"changed": False, "reason": "skillmem MCP not configured"}
+    del servers["skillmem"]
+    if not servers:
+        data.pop("mcpServers", None)
+    _atomic_write_json(config_json, data)
+    return {"changed": True, "removed": "mcpServers.skillmem",
+            "path": str(config_json), "backup": str(backup) if backup else None}
+
+
+def _patch_opencode_json(
+    config_json: Path,
+    mcp_binary: Path,
+    *,
+    db_env: str | None = None,
+    agent: str = "opencode",
+) -> dict[str, Any]:
+    """Add an ``mcp.skillmem`` local server to opencode's global config.
+
+    opencode has its own shape: servers live under ``mcp``, the command is an
+    argv array, and environment variables go in ``environment``.
+    """
+    data, backup, err = _read_json_config(config_json)
+    if err:
+        click.echo(
+            f"warn: {config_json} contains invalid JSON ({err}); refusing to "
+            f"overwrite. Inspect backup at {backup} and re-run init after fixing.",
+            err=True,
+        )
+        return {"changed": False, "reason": "existing JSON is invalid",
+                "backup": str(backup)}
+
+    servers = data.setdefault("mcp", {})
+    if "skillmem" in servers:
+        return {"changed": False, "reason": "skillmem MCP already configured",
+                "backup": str(backup) if backup else None}
+
+    env: dict[str, str] = {"SKILLMEM_AGENT": agent}
+    if db_env:
+        env["SKILLMEM_DB"] = db_env
+    servers["skillmem"] = {
+        "type": "local",
+        "command": [str(mcp_binary)],
+        "enabled": True,
+        "environment": env,
+    }
+    _atomic_write_json(config_json, data)
+    return {"changed": True, "added": "mcp.skillmem", "agent": agent,
+            "path": str(config_json),
+            "backup": str(backup) if backup else None}
+
+
+def _unpatch_opencode_json(config_json: Path) -> dict[str, Any]:
+    """Remove the ``mcp.skillmem`` server added by init --opencode."""
+    if not config_json.exists():
+        return {"changed": False, "reason": "no opencode.json"}
+    data, backup, err = _read_json_config(config_json)
+    if err:
+        return {"changed": False, "reason": f"could not parse {config_json}"}
+    servers = data.get("mcp") or {}
+    if "skillmem" not in servers:
+        return {"changed": False, "reason": "skillmem MCP not configured"}
+    del servers["skillmem"]
+    if not servers:
+        data.pop("mcp", None)
+    _atomic_write_json(config_json, data)
+    return {"changed": True, "removed": "mcp.skillmem",
+            "path": str(config_json), "backup": str(backup) if backup else None}
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     """Atomic write for plain text: tempfile in same dir + os.replace."""
     import os as _os, tempfile as _tempfile
@@ -577,6 +726,16 @@ def _patch_settings_hook(
               help="Configure MCP entry in ~/.claude.json and add Stop hook")
 @click.option("--codex", is_flag=True,
               help="Configure MCP entry in ~/.codex/config.toml (Codex CLI)")
+@click.option("--cursor", is_flag=True,
+              help="Configure MCP entry in ~/.cursor/mcp.json")
+@click.option("--windsurf", is_flag=True,
+              help="Configure MCP entry in ~/.codeium/windsurf/mcp_config.json")
+@click.option("--gemini", is_flag=True,
+              help="Configure MCP entry in ~/.gemini/settings.json (Gemini CLI)")
+@click.option("--opencode", is_flag=True,
+              help="Configure MCP entry in ~/.config/opencode/opencode.json")
+@click.option("--all-agents", is_flag=True,
+              help="Every agent above: one database, six agents")
 @click.option("--migrate-existing/--skip-migrate", default=True,
               help="Auto-discover and import all ~/.claude/projects/*/memory")
 @click.option("--mcp-binary", type=click.Path(path_type=Path), default=None,
@@ -590,12 +749,19 @@ def init(
     ctx: click.Context,
     claude_code: bool,
     codex: bool,
+    cursor: bool,
+    windsurf: bool,
+    gemini: bool,
+    opencode: bool,
+    all_agents: bool,
     migrate_existing: bool,
     mcp_binary: Path | None,
     hooks_mode: str,
 ) -> None:
     """First-time setup: create DB, migrate auto-memory, wire up your agents."""
     report: dict[str, Any] = {}
+    if all_agents:
+        claude_code = codex = cursor = windsurf = gemini = opencode = True
 
     db_path = ctx.obj["db_path"] or S.default_db_path()
     conn = _conn(db_path)
@@ -661,12 +827,40 @@ def init(
             db_env=str(db_path) if str(db_path) != str(S.default_db_path()) else None,
         )
 
+    db_override = str(db_path) if str(db_path) != str(S.default_db_path()) else None
+    editors = {"cursor": cursor, "windsurf": windsurf, "gemini": gemini}
+    for agent, wanted in editors.items():
+        if not wanted:
+            continue
+        binary = mcp_binary or _venv_script("skillmem-mcp")
+        if not binary.exists():
+            click.echo(f"warn: {binary} not found — install package first", err=True)
+        report[f"{agent}_config"] = _patch_mcp_servers_json(
+            _agent_config_path(MCP_JSON_AGENTS[agent][0]), binary,
+            agent=agent, db_env=db_override,
+        )
+
+    if opencode:
+        binary = mcp_binary or _venv_script("skillmem-mcp")
+        if not binary.exists():
+            click.echo(f"warn: {binary} not found — install package first", err=True)
+        report["opencode_config"] = _patch_opencode_json(
+            _agent_config_path(OPENCODE_CONFIG), binary, db_env=db_override,
+        )
+
     click.echo(json.dumps(report, ensure_ascii=False, indent=2))
     click.echo("")
-    if claude_code and codex:
-        click.echo("Done. Open `claude` or `codex` — both share one skill database.")
+    wired = [name for name, on in (
+        ("Claude Code", claude_code), ("Codex", codex), ("Cursor", cursor),
+        ("Windsurf", windsurf), ("Gemini CLI", gemini), ("opencode", opencode),
+    ) if on]
+    if len(wired) > 1:
+        click.echo(f"Done. {', '.join(wired)} — one skill database, "
+                   f"{len(wired)} agents.")
     elif codex:
         click.echo("Done. Open `codex` in any project — the mem_* tools will be there.")
+    elif wired and not claude_code:
+        click.echo(f"Done. Open {wired[0]} — the mem_* tools will be there.")
     else:
         click.echo("Done. Open `claude` in any project — the mem_* tools will be there.")
     click.echo("Undo: skillmem uninstall")
@@ -677,11 +871,14 @@ def init(
               help="Restore ~/.claude.json and remove hooks from settings.json")
 @click.option("--codex/--no-codex", default=True,
               help="Remove the skillmem MCP entry from ~/.codex/config.toml")
+@click.option("--editors/--no-editors", default=True,
+              help="Remove the skillmem MCP entry from Cursor, Windsurf, "
+                   "Gemini CLI and opencode configs")
 @click.option("--keep-db/--purge-db", default=True,
               help="Keep the SQLite DB (default) or delete it")
 @click.pass_context
 def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
-               keep_db: bool) -> None:
+               editors: bool, keep_db: bool) -> None:
     """Reverse `skillmem init`: remove MCP entry + hook. DB stays unless --purge-db."""
     import time as _time
     report: dict[str, Any] = {"removed": [], "warnings": []}
@@ -743,6 +940,17 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
         if r.get("changed"):
             report["removed"].append(
                 f"mcp_servers.skillmem from config.toml (backup: {r['backup']})")
+
+    if editors:
+        for agent, (parts, label) in MCP_JSON_AGENTS.items():
+            r = _unpatch_mcp_servers_json(_agent_config_path(parts))
+            if r.get("changed"):
+                report["removed"].append(
+                    f"mcpServers.skillmem from {label} (backup: {r['backup']})")
+        r = _unpatch_opencode_json(_agent_config_path(OPENCODE_CONFIG))
+        if r.get("changed"):
+            report["removed"].append(
+                f"mcp.skillmem from opencode (backup: {r['backup']})")
 
     # Remove decay/export from the OS scheduler (best-effort).
     try:
