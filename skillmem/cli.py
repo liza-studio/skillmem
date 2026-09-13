@@ -1506,18 +1506,45 @@ def decay(ctx: click.Context, days: int) -> None:
 
 @main.command()
 @click.argument("slug")
+@click.option("--evidence", type=click.Choice(sorted(S.EVIDENCE_WEIGHTS)),
+              default="self_report", show_default=True,
+              help="What confirms the outcome. Only outside evidence moves strength.")
 @click.pass_context
-def reinforce(ctx: click.Context, slug: str) -> None:
-    """Explicitly reinforce a skill after it proved useful (mirrors mem_reinforce)."""
+def reinforce(ctx: click.Context, slug: str, evidence: str) -> None:
+    """Record how a skill turned out (mirrors mem_reinforce).
+
+    Strength rises only on evidence from outside the agent's own judgement;
+    the default `self_report` refreshes recency without rewarding anything.
+    """
     conn = _conn(ctx.obj["db_path"])
-    result = S.reinforce(conn, slug)
+    result = S.reinforce(conn, slug, evidence=evidence)
     if not result:
         click.echo(f"not found: {slug}", err=True)
         sys.exit(1)
     click.echo(
         f"Reinforced: {result['slug']} strength={result['strength']:.2f} "
-        f"access={result['access_count']}"
+        f"access={result['access_count']} evidence={result['evidence']}"
     )
+
+
+@main.command()
+@click.argument("slug")
+@click.option("--off", is_flag=True, help="Unpin instead: put it back under decay.")
+@click.pass_context
+def pin(ctx: click.Context, slug: str, off: bool) -> None:
+    """Exempt a skill from decay and archiving (mirrors mem_pin).
+
+    For a rule that matters precisely because it is rarely needed — a deploy
+    gate, a safety constraint — where being unused is not evidence of being
+    useless.
+    """
+    conn = _conn(ctx.obj["db_path"])
+    result = S.set_pinned(conn, slug, not off)
+    if not result:
+        click.echo(f"not found: {slug}", err=True)
+        sys.exit(1)
+    state = "pinned" if result["pinned"] else "unpinned"
+    click.echo(f"{state}: {slug}" + ("" if result["changed"] else " (already)"))
 
 
 @main.command("mcp")

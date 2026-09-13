@@ -38,19 +38,68 @@ def test_schema_v5_columns(conn):
     assert "last_accessed_at" in cols
 
 
-def test_reinforce_grows_strength(three_skills):
+def test_reinforce_grows_strength_on_outside_evidence(three_skills):
+    """Only a signal from outside the agent's own judgement raises strength."""
     conn = three_skills
     item = S.get(conn, "skill-nginx")
     assert item.strength == 1.0
     assert item.access_count == 0
 
-    r = S.reinforce(conn, "skill-nginx")
+    r = S.reinforce(conn, "skill-nginx", evidence="test_passed")
     assert r["strength"] == pytest.approx(1.15, abs=0.01)
     assert r["access_count"] == 1
+    assert r["confirmed_count"] == 1
 
-    r2 = S.reinforce(conn, "skill-nginx")
+    r2 = S.reinforce(conn, "skill-nginx", evidence="user_confirmed")
     assert r2["strength"] == pytest.approx(1.30, abs=0.01)
     assert r2["access_count"] == 2
+    assert r2["confirmed_count"] == 2
+
+
+def test_self_report_does_not_grow_strength(three_skills):
+    """An agent declaring its own skill useful must not reinforce its mistake."""
+    conn = three_skills
+    r = S.reinforce(conn, "skill-nginx")          # default: self_report
+    assert r["strength"] == pytest.approx(1.0, abs=0.001)
+    assert r["access_count"] == 1                 # recency still refreshed
+    assert r["confirmed_count"] == 0
+
+
+def test_failure_weakens_skill(three_skills):
+    """A skill followed by a failed task loses ground."""
+    conn = three_skills
+    S.reinforce(conn, "skill-nginx", evidence="test_passed")
+    r = S.reinforce(conn, "skill-nginx", evidence="failure")
+    assert r["strength"] == pytest.approx(1.15 * S.FAILURE_FACTOR, abs=0.01)
+    assert r["failure_count"] == 1
+    assert r["confirmed_count"] == 1              # past confirmation is not erased
+
+
+def test_unknown_evidence_is_rejected(three_skills):
+    """A typo in the evidence must fail loudly, not silently reinforce."""
+    with pytest.raises(ValueError):
+        S.reinforce(three_skills, "skill-nginx", evidence="looks_fine")
+
+
+def test_pinned_skill_never_decays_or_archives(three_skills):
+    """The rule that matters because it is rarely needed must not fade."""
+    conn = three_skills
+    assert S.set_pinned(conn, "skill-nginx", True)["pinned"] is True
+
+    conn.execute("UPDATE memory_items SET strength = ?, last_accessed_at = 0 "
+                 "WHERE slug = ?", (S.DECAY_FLOOR, "skill-nginx"))
+    decayed = [d["slug"] for d in S.decay_stale(conn, days_threshold=0)]
+    assert "skill-nginx" not in decayed        # pinned: sat out the sweep
+    assert decayed                             # the unpinned ones still decayed
+
+    swept = S.sweep_lifecycle(conn)
+    assert "skill-nginx" not in swept["archived"]
+    assert "skill-nginx" not in swept["staled"]
+    assert S.get(conn, "skill-nginx").pinned is True
+
+    # Unpinning puts it back under the ordinary rules.
+    S.set_pinned(conn, "skill-nginx", False)
+    assert "skill-nginx" in S.sweep_lifecycle(conn)["archived"]
 
 
 def test_reinforce_caps_at_max(conn):
@@ -105,10 +154,11 @@ def test_recall_finds_relevant_skill(three_skills):
     assert results[0]["slug"] == "skill-nginx"
 
 
-def test_recall_auto_reinforce(three_skills):
+def test_recall_auto_reinforce_refreshes_recency_only(three_skills):
+    """Retrieval is not evidence: it refreshes recency without raising strength."""
     conn = three_skills
     results = S.recall_skills(conn, "nginx", auto_reinforce=True)
-    assert results[0]["strength"] > 1.0
+    assert results[0]["strength"] == pytest.approx(1.0, abs=0.001)
     assert results[0]["access_count"] == 1
 
 
@@ -123,3 +173,27 @@ def test_stats_includes_skills(three_skills):
     st = S.stats(conn)
     assert "skills" in st
     assert st["skills"] == 3
+
+
+def test_migration_from_v8_adds_columns_without_losing_rows(conn):
+    """An existing database picks up the v9 columns in place, data intact."""
+    item = S.MemoryItem(slug="skill-old", kind="skill", title="pre-migration",
+                        body="written before v9", visibility="public")
+    S.upsert(conn, item)
+
+    # Roll the database back to what v8 looked like.
+    for col in ("pinned", "confirmed_count", "failure_count"):
+        conn.execute(f"ALTER TABLE memory_items DROP COLUMN {col}")
+    conn.execute("UPDATE meta SET value = '8' WHERE key = 'schema_version'")
+
+    S.init_schema(conn)
+
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(memory_items)")}
+    assert {"pinned", "confirmed_count", "failure_count"} <= cols
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()[0] == str(S.CURRENT_SCHEMA_VERSION)
+
+    survived = S.get(conn, "skill-old")
+    assert survived.body == "written before v9"
+    assert survived.pinned is False          # existing rows default to unpinned

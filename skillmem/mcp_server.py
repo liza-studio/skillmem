@@ -8,7 +8,8 @@ Tools:
     mem_list      — list memories by kind/project, most-recent first
     mem_learn     — record an after-action skill (trigger/steps/outcome/lessons)
     mem_recall    — find relevant skills for a task, strength-weighted
-    mem_reinforce — bump a skill's strength after it proved useful
+    mem_reinforce — record a skill's outcome; outside evidence moves strength
+    mem_pin       — exempt a skill from decay and archiving
 
 Designed to be wired into ~/.claude.json under mcpServers.
 """
@@ -263,13 +264,30 @@ def _tool_recall(args: dict[str, Any]) -> list[TextContent]:
 
 
 def _tool_reinforce(args: dict[str, Any]) -> list[TextContent]:
-    """Explicitly reinforce a skill after successful use."""
+    """Record a skill's outcome. Strength moves only on outside evidence."""
+    slug = args.get("slug")
+    if not slug:
+        return _err("slug is required")
+    evidence = args.get("evidence", "self_report")
+    if evidence not in S.EVIDENCE_WEIGHTS:
+        return _err(f"unknown evidence: {evidence}; expected one of "
+                    f"{', '.join(sorted(S.EVIDENCE_WEIGHTS))}")
+    conn = _shared_conn()
+    S.init_schema(conn)
+    result = S.reinforce(conn, slug, evidence=evidence)
+    if not result:
+        return _err(f"not found: {slug}")
+    return _ok(result)
+
+
+def _tool_pin(args: dict[str, Any]) -> list[TextContent]:
+    """Pin a skill so it never decays, or unpin it."""
     slug = args.get("slug")
     if not slug:
         return _err("slug is required")
     conn = _shared_conn()
     S.init_schema(conn)
-    result = S.reinforce(conn, slug)
+    result = S.set_pinned(conn, slug, bool(args.get("pinned", True)))
     if not result:
         return _err(f"not found: {slug}")
     return _ok(result)
@@ -428,13 +446,46 @@ TOOLS: list[Tool] = [
     Tool(
         name="mem_reinforce",
         description=(
-            "Explicitly reinforce a skill after confirming it was useful. "
-            "Bumps strength and access_count."
+            "Record how a recalled skill turned out. Strength rises only on "
+            "evidence from outside your own judgement (a test that passed, a "
+            "diff that was accepted, the user saying so) and falls when the "
+            "task failed after you applied it. Saying it helped is not "
+            "evidence: the default only refreshes recency."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "slug": {"type": "string", "description": "Skill slug to reinforce."},
+                "evidence": {
+                    "type": "string",
+                    "enum": ["self_report", "test_passed", "diff_accepted",
+                             "user_confirmed", "failure"],
+                    "description": (
+                        "What confirms the outcome. self_report (default): you "
+                        "judged it useful — recorded, not rewarded. test_passed / "
+                        "diff_accepted / user_confirmed: outside signal, raises "
+                        "strength. failure: the task went wrong after applying "
+                        "it, lowers strength."
+                    ),
+                },
+            },
+            "required": ["slug"],
+        },
+    ),
+    Tool(
+        name="mem_pin",
+        description=(
+            "Pin a skill so it never decays and is never archived, or unpin it. "
+            "For a rule that matters precisely because it is rarely needed — a "
+            "deploy gate, a safety constraint — where rarity is the point and "
+            "decay would read it as irrelevance."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Skill slug to pin."},
+                "pinned": {"type": "boolean",
+                           "description": "true to pin (default), false to unpin."},
             },
             "required": ["slug"],
         },
@@ -451,6 +502,7 @@ TOOL_HANDLERS = {
     "mem_learn": _tool_learn,
     "mem_recall": _tool_recall,
     "mem_reinforce": _tool_reinforce,
+    "mem_pin": _tool_pin,
 }
 
 

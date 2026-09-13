@@ -40,10 +40,10 @@ def _payload(result) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def test_eight_tools_and_handlers_match(mcp):
+def test_tools_and_handlers_match(mcp):
     names = [t.name for t in mcp.TOOLS]
-    assert len(names) == 8
-    assert len(set(names)) == 8
+    assert len(names) == 9
+    assert len(set(names)) == 9
     assert set(names) == set(mcp.TOOL_HANDLERS)
 
 
@@ -203,8 +203,21 @@ def test_learn_recall_reinforce_cycle(mcp):
     ))
     assert any(s["slug"] == "skill-nginx-reload" for s in recalled["skills"])
 
-    boosted = _payload(mcp.TOOL_HANDLERS["mem_reinforce"]({"slug": "skill-nginx-reload"}))
-    assert boosted["strength"] > 1.0 and boosted["access_count"] == 1
+    # Self-report is recorded, not rewarded.
+    noted = _payload(mcp.TOOL_HANDLERS["mem_reinforce"]({"slug": "skill-nginx-reload"}))
+    assert noted["strength"] == 1.0 and noted["access_count"] == 1
+
+    # An outside signal is what actually moves it.
+    boosted = _payload(mcp.TOOL_HANDLERS["mem_reinforce"](
+        {"slug": "skill-nginx-reload", "evidence": "test_passed"}))
+    assert boosted["strength"] > 1.0 and boosted["confirmed_count"] == 1
+
+    bad = _payload(mcp.TOOL_HANDLERS["mem_reinforce"](
+        {"slug": "skill-nginx-reload", "evidence": "looks_fine"}))
+    assert "error" in bad
+
+    pinned = _payload(mcp.TOOL_HANDLERS["mem_pin"]({"slug": "skill-nginx-reload"}))
+    assert pinned["pinned"] is True
 
     missing = _payload(mcp.TOOL_HANDLERS["mem_reinforce"]({"slug": "no-such-skill"}))
     assert "error" in missing

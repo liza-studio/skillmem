@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Strength is earned, not claimed (schema v9).** `mem_reinforce` takes an
+  `evidence` argument: `self_report` (the default, and what plain retrieval
+  produces) refreshes recency without touching strength, while `test_passed` /
+  `diff_accepted` / `user_confirmed` raise it and `failure` lowers it (×0.7).
+  An agent can no longer reinforce its own mistake by declaring it useful.
+  New `confirmed_count` / `failure_count` columns keep the two signals apart.
+- **`mem_pin` / `skillmem pin`** exempt a skill from decay and archiving, for
+  rules that matter precisely because they are rarely needed (a deploy gate, a
+  safety constraint) — where going unused is not evidence of being useless.
+
 - Four more agents share the one database: `init --cursor`, `--windsurf`,
   `--gemini` (Gemini CLI) and `--opencode`, plus `--all-agents` for every
   agent at once. Cursor, Windsurf and Gemini CLI take the Claude-shaped

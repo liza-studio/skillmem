@@ -379,7 +379,8 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         return {"count": len(visible), "skills": visible, "agent": agent.name}
 
     @app.post("/reinforce/{slug}")
-    def reinforce(slug: str, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
+    def reinforce(slug: str, evidence: str = "self_report",
+                  agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
         conn = get_conn()
         # Visibility gate: without it any agent could bump strength of skills
         # it cannot see — a write side-channel into someone else's memory, and
@@ -387,7 +388,9 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         item = S.get(conn, slug)
         if not item or not _visible_to(item, agent):
             raise HTTPException(status_code=404, detail="not found")
-        result = S.reinforce(conn, slug)
+        if evidence not in S.EVIDENCE_WEIGHTS:
+            raise HTTPException(status_code=422, detail=f"unknown evidence: {evidence}")
+        result = S.reinforce(conn, slug, evidence=evidence)
         if not result:
             raise HTTPException(status_code=404, detail="not found")
         return result

@@ -12,9 +12,9 @@ skillmem gives Claude Code and the Codex CLI a local, persistent skill & memory 
 
 - **$0 per write and per read** — no LLM calls, no cloud, no API keys. Plain SQLite on your disk.
 - **Bilingual hybrid search, fully local** — FTS5 BM25 + Snowball stemming (EN/RU) + a multilingual ONNX embedding model. A Russian query finds an English skill and vice versa, all on CPU, offline.
-- **Ebbinghaus strength model** — `reinforce` bumps a skill's strength, scheduled decay fades unused ones, lifecycle sweeps move dead skills to a backed-up archive (never deleted).
+- **Ebbinghaus strength model, earned not claimed** — strength rises only on evidence from outside the agent's own judgement, falls after a failure, and fades on a schedule when unused; dead skills are swept to a backed-up archive (never deleted). Rules that are rare by nature can be pinned out of decay.
 - **Tamper-evident history** — every edit is appended to a SHA256 hash-chain; `skillmem verify` detects any after-the-fact tampering.
-- **Deep Claude Code integration** — 6 hooks + 8 MCP tools installed with one command.
+- **Deep Claude Code integration** — 6 hooks + 9 MCP tools installed with one command.
 - **One memory, several agents** — Claude Code and Codex share a single database, and every
   record carries the agent that wrote it, taken from the MCP handshake, so authorship stays
   readable when they learn side by side.
@@ -121,7 +121,7 @@ The MCP server also works in the Claude Desktop chat app — add to
 }
 ```
 
-You get all 8 `mem_*` tools on demand (search, learn, recall, reinforce…).
+You get all 9 `mem_*` tools on demand (search, learn, recall, reinforce…).
 The automatic hooks (auto-recall on every prompt, session recap) are a
 Claude Code mechanism and do not run in the chat app.
 
@@ -132,14 +132,14 @@ Claude Code mechanism and do not run in the chat app.
    │          │            │           │
    │          │            │           └─ daily job: unused skills lose strength;
    │          │            │              fully faded ones are archived (backed up)
-   │          │            └─ strength +0.15 when a skill proves useful
+   │          │            └─ strength +0.15 on outside evidence; ×0.7 after a failure
    │          └─ hybrid BM25 + vector search, strength-weighted ranking
    └─ after a hard task: trigger / steps / outcome / lessons
 ```
 
 1. **learn** — after a task that took real debugging, the agent calls `mem_learn` with a slug, trigger, steps, outcome, and lessons.
 2. **recall** — before the next task, `mem_recall` (or the automatic hooks) surfaces the most relevant skills, fusing lexical and semantic signals via Reciprocal Rank Fusion.
-3. **reinforce** — when a recalled skill helped, `mem_reinforce` bumps its strength, so proven skills rank higher next time.
+3. **reinforce** — when a recalled skill is confirmed by something outside the agent's own judgement (a test that passed, a diff that was accepted, the user saying so), `mem_reinforce` raises its strength, so proven skills rank higher next time. The agent calling its own skill useful is recorded but not rewarded; a task that failed after applying a skill lowers it. Rules that matter precisely because they are rarely needed can be exempted from decay with `mem_pin`.
 4. **decay** — a scheduled `skillmem decay` run applies Ebbinghaus-style forgetting; skills untouched for months drift to `stale`, then to an `archived` state (excluded from recall, restorable with one command, snapshotted to JSONL first).
 
 ## MCP tools
@@ -152,8 +152,9 @@ Claude Code mechanism and do not run in the chat app.
 | `mem_write` | Insert a new memory; refuses silent overwrites and near-duplicates |
 | `mem_update` | Update an existing memory; old version is kept in the hash-chained history |
 | `mem_learn` | Record an after-action skill (trigger / steps / outcome / lessons) |
-| `mem_recall` | Find relevant skills for a task, strength-weighted; auto-reinforces |
-| `mem_reinforce` | Explicitly bump a skill's strength after it proved useful |
+| `mem_recall` | Find relevant skills for a task, strength-weighted; refreshes recency |
+| `mem_reinforce` | Record how a skill turned out; only outside evidence moves strength |
+| `mem_pin` | Exempt a skill from decay and archiving (and undo it) |
 
 ## Hooks
 

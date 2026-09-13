@@ -164,6 +164,9 @@ CREATE TABLE IF NOT EXISTS memory_items (
     supersedes_id   INTEGER REFERENCES memory_items(id) ON DELETE SET NULL,
     confidence      REAL NOT NULL DEFAULT 1.0,
     strength        REAL NOT NULL DEFAULT 1.0,
+    pinned          INTEGER NOT NULL DEFAULT 0,    -- 1 = never decays, never archived (v9)
+    confirmed_count INTEGER NOT NULL DEFAULT 0,    -- times an external signal confirmed it (v9)
+    failure_count   INTEGER NOT NULL DEFAULT 0,    -- times it was followed by a failure (v9)
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     deleted_at      INTEGER,
@@ -217,7 +220,7 @@ CREATE INDEX IF NOT EXISTS idx_traces_created ON skill_traces(created_at);
 """
 
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -341,6 +344,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
         DROP TABLE IF EXISTS mem_fts;
         """
     )
+
+    # --- v9: evidence-weighted reinforcement ---
+    # `pinned` exempts a rule from decay and archiving: a rule that matters
+    # precisely because it is rarely needed ("deploy only through the gate")
+    # must not fade at the same rate as a note nobody reads. The two counters
+    # keep confirmations and failures apart from raw retrieval count, so a
+    # skill's strength can be traced back to what actually confirmed it.
+    if "pinned" not in cols:
+        conn.execute(
+            "ALTER TABLE memory_items ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
+        )
+    if "confirmed_count" not in cols:
+        conn.execute(
+            "ALTER TABLE memory_items ADD COLUMN confirmed_count INTEGER NOT NULL DEFAULT 0"
+        )
+    if "failure_count" not in cols:
+        conn.execute(
+            "ALTER TABLE memory_items ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0"
+        )
 
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
@@ -500,6 +522,9 @@ class MemoryItem:
     freshness_until: int | None = None
     confidence: float = 1.0
     strength: float = 1.0
+    pinned: bool = False
+    confirmed_count: int = 0
+    failure_count: int = 0
     access_count: int = 0
     last_accessed_at: int | None = None
     id: int | None = None
@@ -533,6 +558,10 @@ class MemoryItem:
             supersedes_id=row["supersedes_id"],
             confidence=row["confidence"],
             strength=row["strength"],
+            pinned=bool(row["pinned"]) if "pinned" in row.keys() else False,
+            confirmed_count=(row["confirmed_count"]
+                             if "confirmed_count" in row.keys() else 0),
+            failure_count=row["failure_count"] if "failure_count" in row.keys() else 0,
             access_count=row["access_count"] if "access_count" in row.keys() else 0,
             last_accessed_at=row["last_accessed_at"] if "last_accessed_at" in row.keys() else None,
             created_at=row["created_at"],
@@ -1523,22 +1552,91 @@ STALE_AFTER_DAYS = 30
 ARCHIVE_AFTER_DAYS = 90
 
 
-def reinforce(conn: sqlite3.Connection, slug: str) -> dict[str, Any] | None:
-    """Bump strength + access_count when a skill is retrieved and used."""
+#: What counts as evidence that a skill helped, and what it does to strength.
+#: Retrieval is not evidence: an agent that recalls its own skill and declares
+#: it useful would otherwise reinforce its own mistake, and a wrong skill that
+#: keeps getting recalled would outrank a right one nobody needed lately.
+#: Only a signal from outside the agent's own judgement moves strength up.
+EVIDENCE_WEIGHTS: dict[str, float] = {
+    "self_report": 0.0,      # the agent says it helped — recorded, not rewarded
+    "test_passed": STRENGTH_BOOST,
+    "diff_accepted": STRENGTH_BOOST,
+    "user_confirmed": STRENGTH_BOOST,
+    "failure": 0.0,          # handled separately: multiplies strength down
+}
+#: A skill followed by a failure loses ground faster than idleness takes it.
+FAILURE_FACTOR = 0.7
+
+
+def reinforce(
+    conn: sqlite3.Connection,
+    slug: str,
+    *,
+    evidence: str = "self_report",
+) -> dict[str, Any] | None:
+    """Record that a skill was used, and move its strength by the evidence.
+
+    ``evidence`` is one of ``EVIDENCE_WEIGHTS``. ``self_report`` (the default,
+    and what plain retrieval produces) refreshes recency and the access count
+    but leaves strength alone. ``test_passed`` / ``diff_accepted`` /
+    ``user_confirmed`` are outside signals and raise it. ``failure`` says the
+    task went wrong after the skill was applied and lowers it.
+    """
+    if evidence not in EVIDENCE_WEIGHTS:
+        raise ValueError(
+            f"unknown evidence {evidence!r}; expected one of "
+            f"{', '.join(sorted(EVIDENCE_WEIGHTS))}"
+        )
     row = conn.execute(
-        "SELECT id, strength, access_count FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
+        "SELECT id, strength, access_count, confirmed_count, failure_count "
+        "FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
         (slug,),
     ).fetchone()
     if not row:
         return None
+
     now = _now()
-    new_strength = min(STRENGTH_CAP, row["strength"] + STRENGTH_BOOST)
+    confirmed = row["confirmed_count"]
+    failures = row["failure_count"]
+    if evidence == "failure":
+        new_strength = max(DECAY_FLOOR, row["strength"] * FAILURE_FACTOR)
+        failures += 1
+    else:
+        new_strength = min(STRENGTH_CAP, row["strength"] + EVIDENCE_WEIGHTS[evidence])
+        if EVIDENCE_WEIGHTS[evidence] > 0:
+            confirmed += 1
     new_count = row["access_count"] + 1
+
     conn.execute(
-        "UPDATE memory_items SET strength = ?, access_count = ?, last_accessed_at = ? WHERE id = ?",
-        (new_strength, new_count, now, row["id"]),
+        "UPDATE memory_items SET strength = ?, access_count = ?, last_accessed_at = ?, "
+        "confirmed_count = ?, failure_count = ? WHERE id = ?",
+        (new_strength, new_count, now, confirmed, failures, row["id"]),
     )
-    return {"slug": slug, "strength": round(new_strength, 3), "access_count": new_count}
+    return {"slug": slug, "strength": round(new_strength, 3),
+            "access_count": new_count, "evidence": evidence,
+            "confirmed_count": confirmed, "failure_count": failures}
+
+
+def set_pinned(
+    conn: sqlite3.Connection, slug: str, pinned: bool
+) -> dict[str, Any] | None:
+    """Pin or unpin a skill. A pinned skill never decays and is never archived.
+
+    For the rule that matters *because* it is rarely needed — "deploy only
+    through the gate", "never force-push to main" — rarity is the whole point,
+    and decay would read it as irrelevance.
+    """
+    row = conn.execute(
+        "SELECT id, pinned FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
+        (slug,),
+    ).fetchone()
+    if not row:
+        return None
+    conn.execute(
+        "UPDATE memory_items SET pinned = ?, updated_at = ? WHERE id = ?",
+        (1 if pinned else 0, _now(), row["id"]),
+    )
+    return {"slug": slug, "pinned": pinned, "changed": bool(row["pinned"]) != pinned}
 
 
 def decay_stale(
@@ -1551,7 +1649,7 @@ def decay_stale(
     cutoff = _now() - days_threshold * 86400
     rows = conn.execute(
         "SELECT id, slug, strength, last_accessed_at FROM memory_items "
-        "WHERE kind = ? AND deleted_at IS NULL AND strength > ? "
+        "WHERE kind = ? AND deleted_at IS NULL AND strength > ? AND pinned = 0 "
         "AND (last_accessed_at IS NULL OR last_accessed_at < ?)",
         (kind, DECAY_FLOOR, cutoff),
     ).fetchall()
@@ -1598,6 +1696,8 @@ def sweep_lifecycle(
     - stale:    untouched > STALE_AFTER_DAYS, currently 'active'
     - archived: untouched > ARCHIVE_AFTER_DAYS AND strength at the decay floor
                 (fully faded) — backed up first, never deleted.
+    Pinned skills sit out both transitions: they stay active however long they
+    go unused, which is the point of pinning them.
     Archived skills are excluded from recall (see _bm25_ids/_vector_ids).
     """
     now = _now()
@@ -1608,6 +1708,7 @@ def sweep_lifecycle(
     archive_rows = conn.execute(
         "SELECT id, slug, title, strength, last_accessed_at FROM memory_items "
         "WHERE kind = ? AND deleted_at IS NULL AND lifecycle != 'archived' "
+        "AND pinned = 0 "
         "AND strength <= ? AND COALESCE(last_accessed_at, created_at) < ?",
         (kind, DECAY_FLOOR, archive_cut),
     ).fetchall()
@@ -1621,6 +1722,7 @@ def sweep_lifecycle(
     stale_rows = conn.execute(
         "SELECT id, slug FROM memory_items "
         "WHERE kind = ? AND deleted_at IS NULL AND lifecycle = 'active' "
+        "AND pinned = 0 "
         "AND COALESCE(last_accessed_at, created_at) < ?",
         (kind, stale_cut),
     ).fetchall()
