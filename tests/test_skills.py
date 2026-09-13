@@ -1,6 +1,8 @@
 """Tests for self-improving skills (v0.4.0): reinforce, decay, recall."""
 
+import sqlite3
 import time
+
 import pytest
 
 from skillmem import storage as S
@@ -175,6 +177,10 @@ def test_stats_includes_skills(three_skills):
     assert st["skills"] == 3
 
 
+@pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 35),
+    reason="ALTER TABLE ... DROP COLUMN needs SQLite 3.35+ to stage the old schema",
+)
 def test_migration_from_v8_adds_columns_without_losing_rows(conn):
     """An existing database picks up the v9 columns in place, data intact."""
     item = S.MemoryItem(slug="skill-old", kind="skill", title="pre-migration",
