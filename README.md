@@ -8,6 +8,12 @@
 
 ![skillmem demo: a Russian query finds an English skill, unused skills decay](docs/demo.gif)
 
+Strength has to be earned — saying a skill helped is not evidence, a passing test is:
+
+![skillmem: self-report does not raise strength, a passing test does, and rare rules can be pinned](docs/demo-evidence.svg)
+
+<sub>Generated from a real run: `scripts/demo.sh --record | python3 scripts/cast_to_svg.py > docs/demo-evidence.svg`.</sub>
+
 skillmem gives Claude Code and the Codex CLI a local, persistent skill & memory layer. After every non-trivial task the agent can record *how it was done* as a skill; before the next task it recalls the relevant ones; skills that keep proving useful get stronger, and skills nobody uses fade away — the way human memory works.
 
 - **$0 per write and per read** — no LLM calls, no cloud, no API keys. Plain SQLite on your disk.
