@@ -156,6 +156,29 @@ Claude Code mechanism and do not run in the chat app.
 | `mem_reinforce` | Record how a skill turned out; only outside evidence moves strength |
 | `mem_pin` | Exempt a skill from decay and archiving (and undo it) |
 
+## Skill packs
+
+Third-party skill packs — ponytail, unlazy, `addyosmani/agent-skills`, anything
+that ships `SKILL.md` files — can live in the same database as your own skills:
+
+```bash
+skillmem skills add DietrichGebert/ponytail   # owner/repo, a git URL, or a path
+skillmem skills ls                            # strength, confirmations, failures
+skillmem skills rm ponytail
+```
+
+Loose in a directory, a pack's skills are loaded on every session whether they
+are relevant or not. Imported, they live by the ordinary rules: recalled when
+they match, strengthened only when something outside the agent confirms they
+helped, faded out when they never do. After a fortnight `skills ls` says which
+pack earned its place.
+
+Nothing from a pack is executed — only `SKILL.md` files are read. The
+repository, commit and licence travel with each skill into a provenance block,
+and every import is tagged `untrusted-origin`: a skill file is a set of
+instructions written by a stranger, and you should be able to tell those from
+rules you wrote yourself.
+
 ## Hooks
 
 | Event | Hook | What it injects |

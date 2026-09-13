@@ -1547,6 +1547,70 @@ def pin(ctx: click.Context, slug: str, off: bool) -> None:
     click.echo(f"{state}: {slug}" + ("" if result["changed"] else " (already)"))
 
 
+@main.group()
+def skills() -> None:
+    """Import and manage third-party skill packs (ponytail, unlazy, ...)."""
+
+
+@skills.command("add")
+@click.argument("source")
+@click.option("--name", default=None, help="Override the pack name.")
+@click.option("--dry-run", is_flag=True, help="List what would be imported.")
+@click.pass_context
+def skills_add(ctx: click.Context, source: str, name: str | None, dry_run: bool) -> None:
+    """Import a skill pack from a repo (owner/repo), a git URL, or a local path.
+
+    Only SKILL.md files are read — nothing from the pack is executed. Imported
+    skills carry their origin and licence, are tagged untrusted-origin, and
+    from then on live by the ordinary rules: recalled when relevant, confirmed
+    by outside evidence, faded out when they never help.
+    """
+    from .packs import PackError, import_pack
+
+    conn = _conn(ctx.obj["db_path"])
+    try:
+        report = import_pack(conn, source, pack_name=name, dry_run=dry_run)
+    except PackError as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+    click.echo(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+    verb = "would import" if dry_run else "imported"
+    click.echo(f"\n{verb} {len(report.imported)} skills from {report.pack}"
+               + (f" (licence: {report.license})" if report.license else ""))
+
+
+@skills.command("ls")
+@click.pass_context
+def skills_ls(ctx: click.Context) -> None:
+    """List imported packs and how well each is holding up."""
+    from .packs import list_packs
+
+    rows = list_packs(_conn(ctx.obj["db_path"]))
+    if not rows:
+        click.echo("(no packs imported)")
+        return
+    click.echo(f"{'pack':<24}{'skills':>7}{'strength':>10}{'confirmed':>11}"
+               f"{'failures':>10}{'archived':>10}")
+    for r in rows:
+        click.echo(f"{r['pack']:<24}{r['skills']:>7}{r['avg_strength']:>10.2f}"
+                   f"{r['confirmed']:>11}{r['failures']:>10}{r['archived']:>10}")
+
+
+@skills.command("rm")
+@click.argument("pack")
+@click.option("--reason", default="pack removed", show_default=True)
+@click.pass_context
+def skills_rm(ctx: click.Context, pack: str, reason: str) -> None:
+    """Remove every skill imported from a pack (soft delete, history kept)."""
+    from .packs import remove_pack
+
+    removed = remove_pack(_conn(ctx.obj["db_path"]), pack, reason=reason)
+    if not removed:
+        click.echo(f"no skills found for pack: {pack}", err=True)
+        sys.exit(1)
+    click.echo(f"removed {len(removed)} skills from {pack}")
+
+
 @main.command("mcp")
 def mcp_cmd() -> None:
     """Run the MCP stdio server (registry clients launch `uvx skillmem mcp`)."""

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **`skillmem skills add <repo>`** imports third-party skill packs (ponytail,
+  unlazy, addyosmani/agent-skills — anything shipping `SKILL.md` files) into
+  the same database, where they stop being files loaded on every session and
+  become ordinary skills: recalled when relevant, confirmed by outside
+  evidence, faded out when they never help. Nothing from a pack is executed —
+  only `SKILL.md` is read; repo, commit and licence travel with every skill;
+  imports are tagged `untrusted-origin` and carry a visible provenance block.
+  Per-agent copies of one skill (`skills/x/` vs `.openclaw/skills/x/`) import
+  once. `skills ls` shows per-pack strength, confirmations and failures;
+  `skills rm` removes a pack (soft delete, history kept).
+
 - **Strength is earned, not claimed (schema v9).** `mem_reinforce` takes an
   `evidence` argument: `self_report` (the default, and what plain retrieval
   produces) refreshes recency without touching strength, while `test_passed` /
