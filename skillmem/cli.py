@@ -815,8 +815,10 @@ def init(
                 # recap invokes `claude -p` — the timeout must cover the LLM call
                 _hook("Stop", ["hook", "session-recap"], timeout=95),
                 # Stop fires per turn and is rate-limited; SessionEnd fires once
-                # and is not, so the closing turns still reach memory.
-                _hook("SessionEnd", ["hook", "session-recap"], timeout=95),
+                # and is not, so the closing turns still reach memory. Claude
+                # Code raises the SessionEnd budget to the per-hook timeout but
+                # never past 60s, so asking for more would be a lie.
+                _hook("SessionEnd", ["hook", "session-recap"], timeout=60),
             ]
         report["hooks"] = hook_reports
 

@@ -75,6 +75,11 @@ def _emit(event: str, context: str) -> None:
 
 
 def _state_dir() -> Path:
+    # An explicit override works on every OS — XDG_STATE_HOME is ignored on
+    # Windows, which left the test suite writing into the real state dir there.
+    explicit = os.environ.get("SKILLMEM_STATE_DIR")
+    if explicit:
+        return Path(explicit).expanduser()
     if sys.platform == "win32":
         from platformdirs import user_state_dir
         return Path(user_state_dir(S.APP_NAME))
@@ -473,6 +478,9 @@ RECAP_MAX_PARALLEL = _env_int("SKILLMEM_RECAP_MAX_PARALLEL", 2, 1, 16)
 # in every child session, and a persisted transcript leaves a ghost session
 # behind. Dropped automatically on a CLI too old to know them.
 RECAP_LEAN_FLAGS = ["--strict-mcp-config", "--no-session-persistence"]
+# SessionEnd hooks share a budget Claude Code raises to the per-hook timeout but
+# never past 60s, so the final recap has to ask the model for less than Stop can.
+RECAP_TIMEOUT_FINAL = min(RECAP_TIMEOUT, 45)
 
 
 def _recap_stamp(session_id: str) -> Path:
@@ -497,8 +505,12 @@ def _acquire_recap_slot() -> Path | None:
     for i in range(RECAP_MAX_PARALLEL):
         lock = d / f"slot{i}.lock"
         try:
-            if lock.exists() and time.time() - lock.stat().st_mtime > stale:
-                lock.unlink()
+            mtime = lock.stat().st_mtime
+            if time.time() - mtime > stale:
+                # Re-check before unlinking: another process may have just taken
+                # this slot between the stat and here.
+                if lock.stat().st_mtime == mtime:
+                    lock.unlink()
         except OSError:
             pass
         try:
@@ -509,6 +521,32 @@ def _acquire_recap_slot() -> Path | None:
         except OSError:
             continue
     return None
+
+
+_UNKNOWN_FLAG_RE = re.compile(
+    r"unknown option|unrecognized option|unknown argument|too many arguments"
+    r"|error: unknown|invalid option", re.I)
+
+
+def _note_basis(path: Path) -> int:
+    """How much of the transcript the note on disk was built from (0 if none)."""
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:2000]
+    except OSError:
+        return 0
+    m = re.search(r"^\s*transcript_bytes:\s*(\d+)\s*$", head, re.M)
+    return int(m.group(1)) if m else 0
+
+
+def _release_recap_slot(lock: Path | None) -> None:
+    """Only ever release our own lock: a reclaimed slot may belong to someone."""
+    if lock is None:
+        return
+    try:
+        if lock.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            lock.unlink()
+    except OSError:
+        pass
 
 
 def _filter_transcript(path: Path) -> str:
@@ -584,6 +622,11 @@ def session_recap() -> None:
     slug = f"session-{day}-{sid}"
     outfile = memory_dir / f"{slug}.md"
 
+    try:
+        basis = transcript.stat().st_size
+    except OSError:
+        basis = 0
+
     filtered = _filter_transcript(transcript)
     if not filtered.strip():
         return
@@ -594,9 +637,13 @@ def session_recap() -> None:
         _log_line("session-recap", session_id[:8], "skip:no-claude-cli")
         return
     slot = _acquire_recap_slot()
-    if slot is None:
+    if slot is None and not force:
         _log_line("session-recap", session_id[:8], "skip:busy")
         return
+    if slot is None:
+        # The final recap happens once per session; dropping it on a busy slot
+        # loses the closing turns for good, and one extra child is affordable.
+        _log_line("session-recap", session_id[:8], "note:final-runs-without-slot")
     # Stamp the ATTEMPT, not the success: a model that keeps failing must not
     # get a fresh call on every turn.
     try:
@@ -605,32 +652,40 @@ def session_recap() -> None:
     except OSError:
         pass
 
-    def _run(flags: list[str]) -> tuple[str, int]:
+    # SessionEnd has at most 60s in total, so the final call asks for less.
+    budget = RECAP_TIMEOUT_FINAL if force else RECAP_TIMEOUT
+    deadline = time.time() + budget
+
+    def _run(flags: list[str]) -> tuple[str, int, str]:
+        left = max(5, int(deadline - time.time()))
         proc = subprocess.run(
             [claude_bin, "-p", "--model", RECAP_MODEL, *flags],
             input=(RECAP_PROMPT + payload + "\n---\n").encode("utf-8"),
-            capture_output=True, timeout=RECAP_TIMEOUT,
+            capture_output=True, timeout=left,
             # the child is a Claude Code session too: without this its own Stop
             # hook recaps the recap, and every generation spawns the next one.
             env={**os.environ, "SKILLMEM_NO_RECAP": "1"},
         )
-        return proc.stdout.decode("utf-8", errors="replace").strip(), proc.returncode
+        return (proc.stdout.decode("utf-8", errors="replace").strip(),
+                proc.returncode,
+                proc.stderr.decode("utf-8", errors="replace")[-500:])
 
     summary, code = "", -1
     try:
-        summary, code = _run(RECAP_LEAN_FLAGS)
-        if code != 0 and not summary:
-            # An older CLI rejects the lean flags outright — try the plain call.
-            summary, code = _run([])
+        summary, code, err = _run(RECAP_LEAN_FLAGS)
+        # Retry only when the CLI plainly did not understand a flag. Retrying on
+        # any failure would re-run a network or auth error with MCP and session
+        # persistence back on, and could double the time spent.
+        if code != 0 and not summary and _UNKNOWN_FLAG_RE.search(err):
+            summary, code, _ = _run([])
             if code == 0:
                 _log_line("session-recap", session_id[:8], "note:lean-flags-unsupported")
+    except subprocess.TimeoutExpired:
+        _log_line("session-recap", session_id[:8], f"timeout after {budget}s")
     except Exception as exc:
         _log_line("session-recap", session_id[:8], f"error {type(exc).__name__}")
     finally:
-        try:
-            slot.unlink()
-        except OSError:
-            pass
+        _release_recap_slot(slot)
     # A non-zero exit means the text is an error message, not a recap — writing
     # it would overwrite a good note with noise.
     if code != 0 or len(summary) < 100:
@@ -644,19 +699,49 @@ def session_recap() -> None:
         f"Session recap {day}",
     )[:120]
     ended = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Two recaps of one session can overlap — a slow Stop and the SessionEnd
+    # that follows it. Whoever read less of the transcript must not land last.
+    if _note_basis(outfile) > basis:
+        _log_line("session-recap", session_id[:8],
+                  f"skip:stale basis={basis} < written={_note_basis(outfile)}")
+        return
+
     tmp = outfile.with_name(outfile.name + f".tmp-{os.getpid()}")
-    tmp.write_text(
-        "---\n"
-        f"name: {slug}\n"
-        f"description: {json.dumps(desc, ensure_ascii=False)}\n"
-        "metadata:\n"
-        "  type: note\n"
-        f"  source_session: {session_id}\n"
-        f"  ended_at: {ended}\n"
-        "---\n\n"
-        f"{summary}\n",
-        encoding="utf-8",
-    )
-    # Replace in one step: a crash mid-write must not leave a half note behind.
-    os.replace(tmp, outfile)
+    try:
+        tmp.write_text(
+            "---\n"
+            f"name: {slug}\n"
+            f"description: {json.dumps(desc, ensure_ascii=False)}\n"
+            "metadata:\n"
+            "  type: note\n"
+            f"  source_session: {session_id}\n"
+            f"  ended_at: {ended}\n"
+            f"  transcript_bytes: {basis}\n"
+            "---\n\n"
+            f"{summary}\n",
+            encoding="utf-8",
+        )
+        # Replace in one step: a crash mid-write must not leave a half note.
+        os.replace(tmp, outfile)
+    except OSError as exc:
+        _log_line("session-recap", session_id[:8], f"write-failed {type(exc).__name__}")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return
     _log_line("session-recap", session_id[:8], f"wrote {outfile.name} ({len(summary)}b)")
+
+    # Index it here rather than leaving it to the separate migrate hook: hooks on
+    # one event run in parallel, and SessionEnd registers only this one, so the
+    # closing recap could sit outside the database until some later run.
+    try:
+        from . import storage as _S
+        from .migrate import import_file
+        conn = _S.connect(_S.default_db_path())
+        _S.init_schema(conn)
+        import_file(conn, outfile)
+        conn.commit()
+    except Exception as exc:
+        _log_line("session-recap", session_id[:8], f"index-failed {type(exc).__name__}")

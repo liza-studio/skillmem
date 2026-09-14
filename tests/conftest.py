@@ -16,6 +16,9 @@ def memhome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # without this the suite writes into the developer's live ~/.local/state
     # and a stamp left by one test silently debounces the next.
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    # XDG_STATE_HOME is ignored on Windows — the explicit override is the only
+    # isolation that holds on every OS.
+    monkeypatch.setenv("SKILLMEM_STATE_DIR", str(tmp_path / "state" / "skillmem"))
     monkeypatch.delenv("SKILLMEM_DB", raising=False)
     return tmp_path
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.9.6
+
+A second review pass over what 0.9.4–0.9.5 actually shipped. The races it found
+are the kind that lose the most valuable recap — the last one.
+
+- **A stale recap can no longer overwrite a fresher one.** A slow Stop and the
+  SessionEnd behind it overlap; the note now records how much of the transcript
+  it was built from (`transcript_bytes`) and a run that read less refuses to
+  land on top of one that read more.
+- **The final recap survives a busy slot.** SessionEnd used to return silently
+  when both parallel slots were taken, losing the session's closing turns; it
+  now runs anyway — it happens once per session.
+- **The SessionEnd budget is honest.** Claude Code raises that event's shared
+  budget to the per-hook timeout but never past 60s, so `init` registers 60 and
+  the final recap asks the model for at most 45.
+- **The lean-flag fallback only fires on an unknown flag.** Any failure used to
+  trigger a second run with MCP and session persistence back on — a network or
+  auth error would pay twice. A timeout is never retried, and both attempts
+  share one deadline.
+- **Slot locks are released by their owner only**, and a stale lock is
+  re-checked before it is reclaimed, so a collector cannot free a slot someone
+  just took.
+- **The closing recap is indexed immediately** instead of waiting for the
+  separate migrate hook: hooks on one event run in parallel, and SessionEnd
+  registers only the recap.
+- **A failed write no longer leaves a temp file behind**, and `SKILLMEM_STATE_DIR`
+  now overrides the state directory on every OS — `XDG_STATE_HOME` is ignored on
+  Windows, where the test suite was using the real one.
+
 ## 0.9.5
 
 Four defects an outside review of the hook path turned up — each one silent.

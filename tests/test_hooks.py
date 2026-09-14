@@ -177,7 +177,7 @@ def test_session_recap_writes_note(db: Path, tmp_path: Path,
     monkeypatch.setattr(H.shutil, "which", lambda *_: "/fake/claude")
     fake_summary = "## ЧТО РЕШИЛИ\nПеренесли skillmem на Windows.\n" + "x" * 120
     monkeypatch.setattr(H.subprocess, "run", lambda *a, **kw: SimpleNamespace(
-        stdout=fake_summary.encode("utf-8"), returncode=0))
+        stdout=fake_summary.encode("utf-8"), returncode=0, stderr=b""))
 
     out = _hook(db, "session-recap", {
         "session_id": "abcd1234-ffff-0000-1111-222233334444",
@@ -212,7 +212,7 @@ def test_session_recap_debounces_and_rewrites_one_note(
         calls.append(1)
         return SimpleNamespace(
             stdout=(f"## DONE\nпрогон номер {len(calls)}\n" + "x" * 120).encode(),
-            returncode=0)
+            returncode=0, stderr=b"")
 
     monkeypatch.setattr(H.subprocess, "run", fake_run)
     payload = {"session_id": "abcd1234-ffff-0000-1111-222233334444",
@@ -259,7 +259,7 @@ def test_session_recap_rejects_failed_run_and_still_debounces(
     def fake_run(*a, **kw):
         calls.append(1)
         return SimpleNamespace(stdout=b"Error: usage limit reached. " * 20,
-                               returncode=1)
+                               returncode=1, stderr=b"")
 
     monkeypatch.setattr(H.subprocess, "run", fake_run)
     _hook(db, "session-recap", payload)
@@ -281,7 +281,7 @@ def test_session_recap_session_end_ignores_debounce(
         calls.append(1)
         return SimpleNamespace(
             stdout=(f"## DONE\nпрогон {len(calls)}\n" + "x" * 120).encode(),
-            returncode=0)
+            returncode=0, stderr=b"")
 
     monkeypatch.setattr(H.subprocess, "run", fake_run)
     _hook(db, "session-recap", payload)
@@ -317,6 +317,97 @@ def test_env_int_survives_garbage_and_clamps(monkeypatch: pytest.MonkeyPatch):
     assert H._env_int("SKILLMEM_TEST_INT", 600, 0, 86_400) == 86_400
 
 
+def _fake_claude(monkeypatch, *, stdout=b"", rc=0, stderr=b"", raises=None):
+    from skillmem import hooks as H
+    monkeypatch.setattr(H.shutil, "which", lambda *_: "/fake/claude")
+    calls = []
+
+    def run(*a, **kw):
+        calls.append(list(a[0]) if a else [])
+        if raises is not None:
+            raise raises
+        return SimpleNamespace(stdout=stdout, returncode=rc, stderr=stderr)
+
+    monkeypatch.setattr(H.subprocess, "run", run)
+    return calls
+
+
+def test_session_recap_never_overwrites_a_fresher_note(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """A slow Stop and the SessionEnd behind it can overlap: whoever read less
+    of the transcript must not land last."""
+    proj, payload = _recap_fixture(tmp_path)
+    memory = proj / "memory"
+    memory.mkdir()
+    note = memory / f"session-{__import__('datetime').date.today()}-abcd1234ffff.md"
+    note.write_text(
+        "---\nname: x\nmetadata:\n  type: note\n"
+        "  transcript_bytes: 999999\n---\n\nFINAL\n", encoding="utf-8")
+    _fake_claude(monkeypatch, stdout=b"## DONE\nOLD\n" + b"x" * 120, rc=0)
+    _hook(db, "session-recap", payload)
+    assert "FINAL" in note.read_text(encoding="utf-8")
+
+
+def test_session_end_recap_runs_even_with_no_free_slot(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Dropping the final recap on a busy slot loses the closing turns for good."""
+    proj, payload = _recap_fixture(tmp_path)
+    from skillmem import hooks as H
+    monkeypatch.setattr(H, "_acquire_recap_slot", lambda: None)
+    calls = _fake_claude(monkeypatch, stdout=b"## DONE\n" + b"x" * 120, rc=0)
+    _hook(db, "session-recap", payload)                      # Stop: skipped
+    assert calls == []
+    _hook(db, "session-recap", {**payload, "hook_event_name": "SessionEnd"})
+    assert len(calls) == 1
+
+
+def test_lean_flag_fallback_only_on_unknown_flag(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Retrying any failure would re-run a network or auth error with MCP and
+    session persistence switched back on."""
+    _, payload = _recap_fixture(tmp_path)
+    calls = _fake_claude(monkeypatch, rc=1, stderr=b"API error: 529 overloaded")
+    _hook(db, "session-recap", payload)
+    assert len(calls) == 1
+
+    _, payload2 = _recap_fixture(tmp_path / "second")
+    payload2["session_id"] = "bbbb2222-ffff-0000-1111-222233334444"  # own debounce stamp
+    calls2 = _fake_claude(monkeypatch, rc=1, stderr=b"error: unknown option '--no-session-persistence'")
+    _hook(db, "session-recap", payload2)
+    assert len(calls2) == 2
+    assert "--strict-mcp-config" in calls2[0] and "--strict-mcp-config" not in calls2[1]
+
+
+def test_recap_timeout_is_not_retried(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    proj, payload = _recap_fixture(tmp_path)
+    import subprocess as sp
+    calls = _fake_claude(monkeypatch, raises=sp.TimeoutExpired("claude", 45))
+    _hook(db, "session-recap", payload)
+    assert len(calls) == 1
+    assert list((proj / "memory").glob("session-*.md")) == []
+
+
+def test_recap_indexes_its_note_into_the_db(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """SessionEnd registers only the recap, and hooks on one event run in
+    parallel — the closing note must not wait for some later migrate."""
+    monkeypatch.setenv("SKILLMEM_DB", str(db))
+    _, payload = _recap_fixture(tmp_path)
+    _fake_claude(monkeypatch, stdout="## DONE\nПочинили хук рекапа.\n".encode() + b"x" * 120, rc=0)
+    _hook(db, "session-recap", {**payload, "hook_event_name": "SessionEnd"})
+    conn = S.connect(db)
+    rows = conn.execute(
+        "select slug, source_session from memory_items where kind='note'").fetchall()
+    assert any(r["slug"].startswith("session-") for r in rows)
+    assert any(r["source_session"] == payload["session_id"] for r in rows)
+
+
 def test_session_recap_optout_reaches_the_child(db: Path, tmp_path: Path,
                                                 monkeypatch: pytest.MonkeyPatch):
     """The spawned `claude -p` is a session too: without the flag its own Stop
@@ -335,7 +426,7 @@ def test_session_recap_optout_reaches_the_child(db: Path, tmp_path: Path,
 
     def fake_run(*a, **kw):
         seen.update(kw)
-        return SimpleNamespace(stdout=b"x" * 200, returncode=0)
+        return SimpleNamespace(stdout=b"x" * 200, returncode=0, stderr=b"")
 
     monkeypatch.setattr(H.subprocess, "run", fake_run)
     _hook(db, "session-recap", {
