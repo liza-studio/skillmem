@@ -638,16 +638,12 @@ def run_recap(data: dict[str, Any]) -> None:
     transcript = Path(str(tp)).expanduser()
     if not transcript.is_file():
         return
-    try:
-        with transcript.open(encoding="utf-8", errors="replace") as fh:
-            line_count = sum(1 for _ in fh)
-    except Exception:
-        return
-    if line_count < 20:  # an accidentally opened session — nothing to recap
-        return
 
-    # SessionEnd is the session's last word — it must never be rate-limited away,
-    # or the closing turns never reach memory. Asking by hand skips the limit too,
+    # Check the rate limit BEFORE touching the transcript. Stop fires after every
+    # turn, and a long session's transcript runs to tens of megabytes — counting
+    # its lines only to then skip the run costs more than the run it skips.
+    # SessionEnd is the session's last word and is never rate-limited away, or
+    # the closing turns never reach memory. Asking by hand skips the limit too,
     # but only the real SessionEnd event lives inside that event's 60s budget.
     is_session_end = str(data.get("hook_event_name") or "") == "SessionEnd"
     force = (is_session_end or bool(data.get("force"))
@@ -662,6 +658,14 @@ def run_recap(data: dict[str, Any]) -> None:
             _log_line("session-recap", session_id[:8],
                       f"skip:debounce {int(age)}s < {RECAP_MIN_INTERVAL}s")
             return
+
+    try:
+        with transcript.open(encoding="utf-8", errors="replace") as fh:
+            line_count = sum(1 for _ in fh)
+    except Exception:
+        return
+    if line_count < 20:  # an accidentally opened session — nothing to recap
+        return
 
     memory_dir = transcript.parent / "memory"
     try:

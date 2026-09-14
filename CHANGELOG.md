@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.8
+
+- **A rate-limited turn no longer reads the transcript.** The line count ran
+  before the rate-limit check, so every Stop — most of which are skipped —
+  streamed the whole session transcript first. On one machine those files run to
+  59MB, and there were 840MB of them.
+
 ## 0.9.7
 
 - **Memory arrives with a trust boundary.** Anything this machine did not author

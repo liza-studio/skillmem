@@ -481,3 +481,24 @@ def test_manual_recap_gets_the_full_budget(
     seen.clear()
     H.run_recap({**payload, "hook_event_name": "SessionEnd"})
     assert seen and seen[0] <= H.RECAP_TIMEOUT_FINAL
+
+
+def test_debounced_turn_does_not_read_the_transcript(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Stop fires per turn and a long session's transcript reaches tens of
+    megabytes: counting its lines only to then skip costs more than the run."""
+    proj, payload = _recap_fixture(tmp_path)
+    _fake_claude(monkeypatch, stdout=b"## DONE\n" + b"x" * 120, rc=0)
+    _hook(db, "session-recap", payload)            # first run: stamps the session
+
+    opened: list[str] = []
+    real_open = Path.open
+
+    def spy(self, *a, **kw):
+        opened.append(self.name)
+        return real_open(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "open", spy)
+    _hook(db, "session-recap", payload)            # debounced
+    assert "sess.jsonl" not in opened
