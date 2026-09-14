@@ -11,12 +11,16 @@ from skillmem.cli import main as cli_main
 
 
 def _seed(conn) -> None:
-    S.upsert(conn, S.MemoryItem(slug="user-sergey", kind="user",
-                                title="Owner profile", body="prefers short answers"))
-    S.upsert(conn, S.MemoryItem(slug="feedback-no-guessing", kind="feedback",
-                                title="Verify before claiming", body="search first"))
-    S.upsert(conn, S.MemoryItem(slug="ref-something", kind="reference",
-                                title="Some reference", body="not injected by default"))
+    """The briefing shows only what the owner approved (v10), so the fixtures are
+    approved the way a person at a terminal would approve their own writes."""
+    for slug, kind, title, body in (
+        ("user-sergey", "user", "Owner profile", "prefers short answers"),
+        ("feedback-no-guessing", "feedback", "Verify before claiming", "search first"),
+        ("ref-something", "reference", "Some reference", "not injected by default"),
+    ):
+        S.upsert(conn, S.MemoryItem(slug=slug, kind=kind, title=title, body=body,
+                                    origin="owner"))
+        S.set_trust(conn, slug, trusted=True)
 
 
 def test_briefing_empty_db(conn):

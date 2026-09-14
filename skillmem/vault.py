@@ -27,6 +27,7 @@ from .migrate import desurrogate
 import yaml
 
 from . import storage as S
+from .migrate import _origin_from as _migrate_origin
 from .migrate import FRONTMATTER_RE
 
 
@@ -191,6 +192,7 @@ def import_vault(
     kind: str = "document",
     project_override: str | None = None,
     skip_auto_memories: bool = True,
+    default_origin: str = "owner",
 ) -> VaultReport:
     """Bulk-import an Obsidian vault. All upserts run inside a single outer
     transaction so a 1000-file vault is one commit, not 1000 (with per-file
@@ -201,12 +203,12 @@ def import_vault(
 
     with S.tx(conn):
         _run_import(conn, root, assets_root, kind, project_override,
-                    skip_auto_memories, report)
+                    skip_auto_memories, report, default_origin)
     return report
 
 
 def _run_import(conn, root, assets_root, kind, project_override,
-                skip_auto_memories, report) -> None:
+                skip_auto_memories, report, default_origin="owner") -> None:
     for path in _iter_md(root):
         try:
             meta, body = _parse_md(path.read_text(encoding="utf-8"))
@@ -236,6 +238,9 @@ def _run_import(conn, root, assets_root, kind, project_override,
                 attachments.append(_store_asset(asset, assets_root))
 
             item = S.MemoryItem(
+                # A file may lower its own origin (a pack stays a pack across an
+                # export/import) but never raise it — see migrate._origin_from.
+                origin=_migrate_origin(meta, item_kind, default_origin),
                 slug=slug,
                 kind=item_kind,
                 title=title,

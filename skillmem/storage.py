@@ -167,6 +167,9 @@ CREATE TABLE IF NOT EXISTS memory_items (
     pinned          INTEGER NOT NULL DEFAULT 0,    -- 1 = never decays, never archived (v9)
     confirmed_count INTEGER NOT NULL DEFAULT 0,    -- times an external signal confirmed it (v9)
     failure_count   INTEGER NOT NULL DEFAULT 0,    -- times it was followed by a failure (v9)
+    origin          TEXT NOT NULL DEFAULT 'unknown', -- owner|agent|imported|derived (v10)
+    trusted_at      INTEGER,                       -- set only by the owner (v10)
+    trusted_by      TEXT,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     deleted_at      INTEGER,
@@ -220,7 +223,7 @@ CREATE INDEX IF NOT EXISTS idx_traces_created ON skill_traces(created_at);
 """
 
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -260,6 +263,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE memory_items ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active'"
         )
+    # v10, same self-healing reason: a DB whose version says 10 but whose ALTER
+    # never landed would otherwise fail every read with "no such column: origin".
+    if not {"origin", "trusted_at", "trusted_by"} <= live_cols:
+        _migrate_v10(conn)
 
     if _current_schema_version(conn) >= CURRENT_SCHEMA_VERSION:
         return
@@ -364,10 +371,148 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ALTER TABLE memory_items ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0"
         )
 
+    # --- v10: provenance, and trust as an explicit act ---
+    # The loop this closes: an external text (a README, a web page) reaches a
+    # transcript, a model distils it into a note, and the note comes back as a
+    # rule in the next session. Origin records where text came from; trust is
+    # only ever granted by the owner, because an agent can be talked into
+    # storing a rule by the very document it was reading.
+    if not {"origin", "trusted_at", "trusted_by"} <= cols:
+        _migrate_v10(conn)
+
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(CURRENT_SCHEMA_VERSION),),
     )
+
+
+# Origin of existing rows, best-effort and in priority order: the first rule
+# that matches wins, so a skill carrying the imported tag is imported, not agent.
+# Rules for existing rows, in priority order — the first match wins, so a skill
+# carrying the imported tag is imported, not agent.
+_ORIGIN_BACKFILL = (
+    ("derived", "kind = 'note'"),
+    ("owner", "kind IN ('user','feedback','rule','reference','project')"),
+    ("agent", "kind = 'skill'"),
+)
+
+
+_V10_COLUMNS = (
+    ("origin", "TEXT NOT NULL DEFAULT 'unknown'"),
+    ("trusted_at", "INTEGER"),
+    ("trusted_by", "TEXT"),
+)
+
+
+def _backup_before_v10(conn: sqlite3.Connection) -> None:
+    """A copy of the database before its first structural change of this release.
+
+    Cheap insurance the changelog promises: SQLite's own backup API, so a WAL in
+    flight cannot produce a torn copy. A failure here must not block the upgrade —
+    the migration itself is additive.
+    """
+    try:
+        path = conn.execute("PRAGMA database_list").fetchone()[2]
+        if not path:
+            return  # :memory:
+        dest = Path(path).parent / "backups" / f"pre-v10-{int(time.time())}.db"
+        if dest.exists():
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(str(dest)) as out:
+            conn.backup(out)
+        log.info("pre-v10 backup written to %s", dest)
+    except Exception as exc:  # noqa: BLE001 - never block the upgrade
+        log.warning("could not write the pre-v10 backup: %s", exc)
+
+
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """Add provenance + approval, atomically, once.
+
+    Two processes can open the same database at the same moment (a recall hook
+    and the CLI), so the columns are re-checked after the write lock is held:
+    without that the loser of the race dies on a duplicate column, and a partial
+    set of columns would then fail every read.
+    """
+    _backup_before_v10(conn)
+    try:
+        with tx(conn):  # BEGIN IMMEDIATE — the lock is held for the whole change
+            have = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)")}
+            added = False
+            for name, decl in _V10_COLUMNS:
+                if name not in have:
+                    conn.execute(f"ALTER TABLE memory_items ADD COLUMN {name} {decl}")
+                    added = True
+            if added:
+                _backfill_origin(conn)
+    except sqlite3.OperationalError as exc:
+        # Another process finished the same migration between our check and the
+        # lock; anything else is a real problem worth surfacing.
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+
+def _classify_tags(conn: sqlite3.Connection) -> tuple[list[int], list[int]]:
+    """Split rows into (imported, unreadable) by their tag list.
+
+    Deliberately not json_each: a missing JSON1 extension or one malformed list
+    used to fail the whole rule, and those rows then fell through to the
+    kind-based rules — which turned someone else's pack into a trusted rule.
+
+    A row whose tags will not parse is not guessed at either way: truncated JSON
+    can hide the marker entirely (`'["imported",'`), so it is labelled `unknown`,
+    which is never grandfathered. An upgrade that leaves a handful of rows
+    needing `skillmem trust` is a cost; approving a pack silently is not.
+    """
+    imported: list[int] = []
+    unreadable: list[int] = []
+    for row in conn.execute("SELECT id, tags FROM memory_items"):
+        raw = row["tags"]
+        if raw in (None, "", "[]"):
+            continue
+        try:
+            tags = json.loads(raw) if isinstance(raw, str) else list(raw)
+            if not isinstance(tags, list):
+                raise ValueError("tags is not a list")
+        except Exception:
+            unreadable.append(row["id"])
+            continue
+        if "untrusted-origin" in tags or any(str(t).startswith("pack:") for t in tags):
+            imported.append(row["id"])
+    return imported, unreadable
+
+
+def _backfill_origin(conn: sqlite3.Connection) -> None:
+    """Label existing rows, then grandfather only what the owner accumulated.
+
+    Grandfathering is a deliberate, stated compromise: the alternative is that
+    every rule the owner has relied on for months arrives unapproved on the
+    morning after an upgrade. Imported packs and transcript summaries never get it.
+    """
+    now = int(time.time())
+    imported, unreadable = _classify_tags(conn)
+    if imported:
+        marks = ",".join("?" * len(imported))
+        conn.execute(
+            f"UPDATE memory_items SET origin = 'imported' WHERE id IN ({marks})",
+            imported)
+    # Rows whose tags we could not read keep origin='unknown' and are held back
+    # from the kind rules below: we cannot see their provenance, so we neither
+    # invent one nor approve them.
+    skip = "" if not unreadable else (
+        f" AND id NOT IN ({','.join('?' * len(unreadable))})")
+    for origin, clause in _ORIGIN_BACKFILL:
+        conn.execute(
+            f"UPDATE memory_items SET origin = ? WHERE origin = 'unknown' "
+            f"AND ({clause}){skip}", (origin, *unreadable))
+    # Grandfather only what the owner accumulated themselves: their own notes and
+    # rules, and the skills their own sessions learned. Never an imported pack,
+    # and never a transcript summary — `derived` is precisely the class this
+    # release exists to distrust, and approving 7809 of them at once would empty
+    # the marker of meaning on day one.
+    conn.execute(
+        "UPDATE memory_items SET trusted_at = ?, trusted_by = 'migration-v10' "
+        "WHERE trusted_at IS NULL AND origin IN ('owner', 'agent')", (now,))
 
 
 def _chain_hash(prev_hash: str | None, payload: dict) -> str:
@@ -527,6 +672,15 @@ class MemoryItem:
     failure_count: int = 0
     access_count: int = 0
     last_accessed_at: int | None = None
+    # Where the text came from — never a judgement, just a fact:
+    # owner (a human typed it) / agent (an agent stored it mid-session) /
+    # imported (someone else's pack) / derived (a model's summary of a
+    # transcript) / unknown.
+    origin: str = "unknown"
+    # Trust is an explicit act by the owner, not a guess from origin: an agent
+    # can be talked into storing a rule by a README it was reading.
+    trusted_at: int | None = None
+    trusted_by: str | None = None
     id: int | None = None
     supersedes_id: int | None = None
     content_hash: str = ""
@@ -564,6 +718,10 @@ class MemoryItem:
             failure_count=row["failure_count"] if "failure_count" in row.keys() else 0,
             access_count=row["access_count"] if "access_count" in row.keys() else 0,
             last_accessed_at=row["last_accessed_at"] if "last_accessed_at" in row.keys() else None,
+            origin=(row["origin"] if "origin" in row.keys() and row["origin"]
+                    else "unknown"),
+            trusted_at=row["trusted_at"] if "trusted_at" in row.keys() else None,
+            trusted_by=row["trusted_by"] if "trusted_by" in row.keys() else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             deleted_at=row["deleted_at"],
@@ -683,6 +841,36 @@ def load_body(item: "MemoryItem") -> str:
     return path.read_text(encoding="utf-8")
 
 
+ORIGINS = ("owner", "agent", "imported", "derived", "unknown")
+
+
+def _valid_origin(origin: str | None) -> str:
+    """Anything unrecognised is 'unknown' — and unknown is never trusted."""
+    return origin if origin in ORIGINS else "unknown"
+
+
+def set_trust(conn: sqlite3.Connection, slug: str, *, trusted: bool,
+              by: str = "owner") -> MemoryItem | None:
+    """Grant or withdraw the owner's approval. The only way trust is ever set."""
+    row = conn.execute(
+        "SELECT id FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
+        (slug,),
+    ).fetchone()
+    if not row:
+        return None
+    if trusted:
+        conn.execute(
+            "UPDATE memory_items SET trusted_at = ?, trusted_by = ? WHERE id = ?",
+            (_now(), by, row["id"]),
+        )
+    else:
+        conn.execute(
+            "UPDATE memory_items SET trusted_at = NULL, trusted_by = NULL "
+            "WHERE id = ?", (row["id"],),
+        )
+    return get(conn, slug)
+
+
 def upsert(
     conn: sqlite3.Connection,
     item: MemoryItem,
@@ -748,8 +936,9 @@ def upsert(
                         slug, kind, title, body, body_path, stemmed, project, tags,
                         topics, visibility, agent, source_session, attachments, ttl_days,
                         freshness_until, wordcount, content_hash, supersedes_id,
-                        confidence, strength, created_at, updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        confidence, strength, origin, trusted_at, trusted_by,
+                        created_at, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         item.slug, item.kind, item.title, item.body, item.body_path,
@@ -759,6 +948,7 @@ def upsert(
                         item.ttl_days, item.freshness_until,
                         item.wordcount, item.content_hash, item.supersedes_id,
                         item.confidence, item.strength,
+                        _valid_origin(item.origin), item.trusted_at, item.trusted_by,
                         item.created_at, item.updated_at,
                     ),
                 )
@@ -872,6 +1062,11 @@ def _upsert_update_tx(
                 tags = ?, topics = ?, visibility = ?, agent = ?, source_session = ?,
                 attachments = ?, ttl_days = ?, freshness_until = ?, wordcount = ?,
                 content_hash = ?, supersedes_id = ?, confidence = ?, strength = ?,
+                origin = ?,
+                -- We only get here when title/body actually changed (an
+                -- identical write returns early), and approval belongs to the
+                -- text that was approved, not to the slug.
+                trusted_at = NULL, trusted_by = NULL,
                 updated_at = ?
             WHERE id = ?
             """,
@@ -881,7 +1076,8 @@ def _upsert_update_tx(
                 item.visibility, item.agent, item.source_session,
                 _json_list(item.attachments),
                 item.ttl_days, freshness, item.wordcount, item.content_hash,
-                item.supersedes_id, item.confidence, item.strength, now,
+                item.supersedes_id, item.confidence, item.strength,
+                _valid_origin(item.origin), now,
                 existing["id"],
             ),
         )
@@ -1470,20 +1666,28 @@ def briefing(
     sections: list[dict[str, Any]] = []
     used = 0
     omitted = 0
+    unapproved = 0
 
     ordered = [k for k in _INJECT_KIND_ORDER if k in kinds] + [
         k for k in kinds if k not in _INJECT_KIND_ORDER
     ]
 
     for kind in ordered:
+        # Titles only, and only what the owner approved: the briefing has no room
+        # for a frame, and a title is text from the same source as its body —
+        # an unapproved one would arrive looking like a rule the owner set.
         rows = conn.execute(
             """
             SELECT slug, title, updated_at FROM memory_items
-            WHERE kind = ? AND deleted_at IS NULL
+            WHERE kind = ? AND deleted_at IS NULL AND trusted_at IS NOT NULL
             ORDER BY updated_at DESC LIMIT ?
             """,
             (kind, per_kind_limit),
         ).fetchall()
+        unapproved += conn.execute(
+            "SELECT COUNT(*) FROM memory_items WHERE kind = ? AND deleted_at IS NULL "
+            "AND trusted_at IS NULL", (kind,),
+        ).fetchone()[0]
         if not rows:
             continue
 
@@ -1503,6 +1707,7 @@ def briefing(
     return {
         "sections": sections,
         "approx_tokens": used // _CHARS_PER_TOKEN,
+        "unapproved": unapproved,
         "omitted": omitted,
         "budget_tokens": budget_tokens,
     }
@@ -1880,6 +2085,13 @@ def recall_skills(
             "visibility": row["visibility"],
             "agent": row["agent"],
             "topics": _parse_json_list(row["topics"]),
+            # Provenance and approval. Omitting them made every skill — including
+            # the ones the owner had approved — read as unapproved downstream,
+            # which is how a trust marker stops meaning anything.
+            "origin": (row["origin"] if "origin" in row.keys() else "unknown"),
+            "trusted_at": (row["trusted_at"] if "trusted_at" in row.keys() else None),
+            "kind": row["kind"],
+            "tags": _parse_json_list(row["tags"]),
         }
         if row["body_path"]:
             item = MemoryItem.from_row(row)

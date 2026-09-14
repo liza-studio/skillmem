@@ -47,6 +47,9 @@ def _frontmatter(item: S.MemoryItem, *, truncated: bool = False) -> str:
             "node_type": "memory",
             "type": item.kind,
             "originSessionId": item.source_session,
+            # Provenance travels with the file: a re-import must know that a pack
+            # is a pack. Approval never travels — only the owner grants it.
+            "origin": item.origin,
         },
         "exported_at": dt.datetime.fromtimestamp(int(time.time()), tz=dt.timezone.utc)
             .strftime("%Y-%m-%dT%H:%M:%SZ"),

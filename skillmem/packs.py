@@ -237,6 +237,7 @@ def import_pack(
                 report.imported.append(slug)
                 continue
             item = S.MemoryItem(
+                origin="imported",
                 slug=slug,
                 kind="skill",
                 title=f"[{pack}] {skill.title}",

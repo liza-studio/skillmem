@@ -167,6 +167,28 @@ def _title_from(meta: dict[str, Any], body: str, slug: str) -> str:
     return slug
 
 
+# A file can claim anything in its frontmatter, so a claimed origin is accepted
+# only when it is NOT a claim of ownership: re-importing a file must never be a
+# way to launder an imported or model-written memory into a trusted one. Trust
+# itself is never imported — only the owner grants it.
+_CLAIMABLE_ORIGINS = ("agent", "imported", "derived")
+
+
+def _origin_from(meta: dict[str, Any], kind: str, default: str = "owner") -> str:
+    """The caller declares provenance; the file may only lower it, never raise it.
+
+    `default` is what the importer knows about the directory it is reading (the
+    owner's own memory dir → owner). A file claiming `origin: owner` is ignored,
+    or re-importing a pack would be a way to launder it into a trusted rule.
+    """
+    md = meta.get("metadata") or {}
+    claimed = str(md.get("origin") or "").strip().lower() if isinstance(md, dict) else ""
+    if claimed in _CLAIMABLE_ORIGINS:
+        return claimed
+    # A session recap is a model's summary of a transcript, whatever the file says.
+    return "derived" if kind == "note" else default
+
+
 def _source_session(meta: dict[str, Any]) -> str | None:
     md = meta.get("metadata") or {}
     if isinstance(md, dict):
@@ -179,7 +201,8 @@ def _source_session(meta: dict[str, Any]) -> str | None:
     return None
 
 
-def import_file(conn, path: Path, *, force: bool = True) -> str:
+def import_file(conn, path: Path, *, force: bool = True,
+                default_origin: str = "owner") -> str:
     """Import a single .md file. Returns 'inserted' | 'updated'."""
     meta, body = parse_file(path)
     slug = _slug_from(meta, path)
@@ -197,6 +220,7 @@ def import_file(conn, path: Path, *, force: bool = True) -> str:
         body=body,
         source_session=_source_session(meta),
         visibility="private",
+        origin=_origin_from(meta, kind, default_origin),
     )
     upsert(
         conn, item,
@@ -212,6 +236,7 @@ def import_dir(
     source: Path = DEFAULT_SOURCE_DIR,
     *,
     skip_index: bool = True,
+    default_origin: str = "owner",
 ) -> ImportReport:
     report = ImportReport()
     if not source.exists():
@@ -224,7 +249,7 @@ def import_dir(
                 report.skipped += 1
                 continue
             try:
-                action = import_file(conn, path)
+                action = import_file(conn, path, default_origin=default_origin)
                 if action == "inserted":
                     report.inserted += 1
                 else:

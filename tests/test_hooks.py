@@ -364,22 +364,37 @@ def test_session_end_recap_runs_even_with_no_free_slot(
     assert len(calls) == 1
 
 
-def test_lean_flag_fallback_only_on_unknown_flag(
+def test_fallback_drops_hygiene_but_never_safety(
     db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
-    """Retrying any failure would re-run a network or auth error with MCP and
-    session persistence switched back on."""
+    """A summariser with tools is the hole this closes, so an unsupported safety
+    flag means no recap at all. An unsupported hygiene flag is worth dropping."""
     _, payload = _recap_fixture(tmp_path)
+
+    # 1. generic failure: no retry at all
     calls = _fake_claude(monkeypatch, rc=1, stderr=b"API error: 529 overloaded")
     _hook(db, "session-recap", payload)
     assert len(calls) == 1
 
-    _, payload2 = _recap_fixture(tmp_path / "second")
-    payload2["session_id"] = "bbbb2222-ffff-0000-1111-222233334444"  # own debounce stamp
-    calls2 = _fake_claude(monkeypatch, rc=1, stderr=b"error: unknown option '--no-session-persistence'")
-    _hook(db, "session-recap", payload2)
+    # 2. hygiene flag unknown: retry, still carrying the safety flags
+    _, p2 = _recap_fixture(tmp_path / "second")
+    p2["session_id"] = "bbbb2222-ffff-0000-1111-222233334444"
+    calls2 = _fake_claude(
+        monkeypatch, rc=1,
+        stderr=b"error: unknown option '--no-session-persistence'")
+    _hook(db, "session-recap", p2)
     assert len(calls2) == 2
-    assert "--strict-mcp-config" in calls2[0] and "--strict-mcp-config" not in calls2[1]
+    assert "--strict-mcp-config" in calls2[1] and "--tools" in calls2[1]
+    assert "--no-session-persistence" not in calls2[1]
+
+    # 3. safety flag unknown: give up, and say so
+    proj3, p3 = _recap_fixture(tmp_path / "third")
+    p3["session_id"] = "cccc3333-ffff-0000-1111-222233334444"
+    calls3 = _fake_claude(
+        monkeypatch, rc=1, stderr=b"error: unknown option '--strict-mcp-config'")
+    _hook(db, "session-recap", p3)
+    assert len(calls3) == 1
+    assert list((proj3 / "memory").glob("session-*.md")) == []
 
 
 def test_recap_timeout_is_not_retried(

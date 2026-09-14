@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.10.0
+
+**Memory now carries where it came from, and trust is something the owner grants.**
+
+The loop this closes was real and open: an external text — a README, a web page —
+reaches a transcript, a model distils it into a note, and the note comes back in
+the next session under a heading that reads like the user's own rules. Worse, a
+document could talk an agent into saving a rule through `mem_learn`, and that
+rule then looked exactly like one a human wrote.
+
+- **`origin` on every memory** (schema v10): `owner`, `agent`, `imported`,
+  `derived`, `unknown`. Writers declare it; nothing guesses.
+- **Trust is explicit.** `trusted_at` is set only by the owner — `skillmem trust
+  <slug>` (`--untrust` to withdraw) — and editing an approved memory's text drops
+  the approval with it. `origin` alone never confers trust: an agent can be
+  talked into storing a rule by the document it was reading. A CLI write approves
+  itself only from a TTY, because an agent can call the CLI through Bash as easily
+  as a person can type it.
+- **One frame at read time, on every channel.** Unapproved memory arrives inside
+  a marked block that says it is data, not instructions, with its provenance
+  (`origin=derived session=…`, `origin=imported pack=…`) on the line. The frame is
+  applied when the text is read, not written into the note: recall collapses
+  newlines, session-history truncates, snippets cut the middle, and a summary can
+  contain closing backticks of its own. It covers `auto-recall`, `tool-recall`,
+  `session-history`, `mem_recall`, `mem_get`, `cat`, and `inject` (which shows
+  approved titles only and reports the rest as a count).
+- **The summariser runs caged, or not at all.** The child `claude -p` gets
+  `--tools ""` and `--strict-mcp-config`, and if a CLI does not understand one of
+  those, the recap is skipped with `skip:unsafe-cli` rather than run without them.
+  `--no-session-persistence` is hygiene, not safety, and may be dropped.
+- **Migration:** additive, inside one transaction, with a copy of the database in
+  `<data>/backups/pre-v10-*.db` first, and columns re-checked under the lock so
+  two processes opening the same database cannot collide. On the machine this was
+  developed on: 8901 rows, 0.45s.
+- **Grandfathering, stated plainly:** existing `owner` and `agent` rows are
+  approved by the migration (`trusted_by='migration-v10'`) — the alternative is
+  that every rule you have relied on for months arrives unapproved the morning
+  after an upgrade. Imported packs and transcript summaries are **not**
+  grandfathered; on that machine 7809 summaries stayed unapproved.
+- `export` writes `origin` into frontmatter and `import_vault` / `import_dir`
+  accept `default_origin`, so provenance survives a round trip. A file may lower
+  its own origin but never raise it, and trust is never importable.
+
+**What this does not do:** a frame makes the boundary legible, it does not
+guarantee a model ignores an instruction inside data. The guarantee comes from the
+reader having no tools — which is why the summariser has none.
+
 ## 0.9.9
 
 Two defects a third review pass reproduced — both in code shipped this week.
