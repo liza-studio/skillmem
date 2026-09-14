@@ -487,6 +487,9 @@ def session_recap() -> None:
             [claude_bin, "-p", "--model", RECAP_MODEL],
             input=(RECAP_PROMPT + payload + "\n---\n").encode("utf-8"),
             capture_output=True, timeout=RECAP_TIMEOUT,
+            # the child is a Claude Code session too: without this its own Stop
+            # hook recaps the recap, and every generation spawns the next one.
+            env={**os.environ, "SKILLMEM_NO_RECAP": "1"},
         )
         summary = proc.stdout.decode("utf-8", errors="replace").strip()
     except Exception:

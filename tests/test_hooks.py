@@ -166,6 +166,34 @@ def test_session_recap_writes_note(db: Path, tmp_path: Path,
     assert "source_session: abcd1234-ffff-0000-1111-222233334444" in text
 
 
+def test_session_recap_optout_reaches_the_child(db: Path, tmp_path: Path,
+                                                monkeypatch: pytest.MonkeyPatch):
+    """The spawned `claude -p` is a session too: without the flag its own Stop
+    hook recaps the recap, and every generation spawns the next one."""
+    proj = tmp_path / "projects" / "-Users-someone"
+    proj.mkdir(parents=True)
+    transcript = proj / "sess.jsonl"
+    transcript.write_text("\n".join(
+        json.dumps({"type": "user", "message": {"content": [
+            {"type": "text", "text": f"вопрос номер {i} про деплой и хуки"}]}})
+        for i in range(25)) + "\n", encoding="utf-8")
+
+    from skillmem import hooks as H
+    monkeypatch.setattr(H.shutil, "which", lambda *_: "/fake/claude")
+    seen: dict = {}
+
+    def fake_run(*a, **kw):
+        seen.update(kw)
+        return SimpleNamespace(stdout=b"x" * 200, returncode=0)
+
+    monkeypatch.setattr(H.subprocess, "run", fake_run)
+    _hook(db, "session-recap", {
+        "session_id": "abcd1234-ffff-0000-1111-222233334444",
+        "transcript_path": str(transcript),
+    })
+    assert seen["env"]["SKILLMEM_NO_RECAP"] == "1"
+
+
 def test_session_recap_respects_optout(db: Path, tmp_path: Path):
     out = _hook(db, "session-recap",
                 {"session_id": "x", "transcript_path": str(tmp_path / "no.jsonl")},

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.3
+
+- **The Stop hook no longer recaps its own recaps.** `session-recap` spawns
+  `claude -p` to write the summary, and that child is a Claude Code session
+  too: with no opt-out in its environment its own Stop hook recapped the recap,
+  and every generation spawned the next one. One machine went from 6 recaps a
+  day to 4083 in a day — thousands of ghost sessions, a gigabyte of transcripts
+  and a burned subscription quota. The child now inherits
+  `SKILLMEM_NO_RECAP=1`, and a test asserts the flag reaches it (the old test
+  only covered the flag arriving from outside, which is why the regression
+  shipped green).
+
 ## Unreleased
 
 - **`skillmem skills add <repo>`** imports third-party skill packs (ponytail,
