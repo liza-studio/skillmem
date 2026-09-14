@@ -136,6 +136,31 @@ def test_session_history_reads_memory_next_to_transcript(db: Path, tmp_path: Pat
     assert "session-2026-08-01-1200-aaaa" in ctx
 
 
+def test_tool_recall_reads_notebook_path(db: Path, tmp_path: Path):
+    """NotebookEdit carries notebook_path, not file_path — reading only the
+    latter left notebook edits with an empty query and no recall at all."""
+    conn = S.connect(db)
+    S.upsert(conn, S.MemoryItem(
+        slug="skill-notebook-deploy", kind="skill",
+        title="Прогон ноутбука analysis.ipynb перед деплоем",
+        body="trigger: правки в analysis.ipynb; steps: прогнать все ячейки."))
+    conn.commit()
+    out = _hook(db, "tool-recall", {
+        "session_id": "nb-1", "tool_name": "NotebookEdit",
+        "tool_input": {"notebook_path": "/work/analysis.ipynb"},
+    })
+    assert "analysis.ipynb" in out
+
+
+def test_dedup_ledger_lives_in_private_state_dir(tmp_path: Path,
+                                                monkeypatch: pytest.MonkeyPatch):
+    """In a shared /tmp a neighbour could pre-create the ledger and mute recall."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    from skillmem import hooks as H
+    p = H._dedup_file("abc-123")
+    assert str(tmp_path) in str(p) and p.name == "abc-123.txt"
+
+
 def test_session_recap_writes_note(db: Path, tmp_path: Path,
                                    monkeypatch: pytest.MonkeyPatch):
     proj = tmp_path / "projects" / "-Users-someone"

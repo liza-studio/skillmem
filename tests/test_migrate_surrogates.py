@@ -51,3 +51,13 @@ def test_parse_file_survives_escaped_emoji(tmp_path: Path):
     meta["description"].encode("utf-8")  # the operation that used to explode
     assert meta["description"] == "🔴 ночной отчёт"
     assert body == "body text"
+
+
+def test_source_session_from_recap_frontmatter():
+    """The recap hook writes metadata.source_session; the importer only knew
+    originSessionId/sessionId, so every session note landed unlinked."""
+    from skillmem.migrate import _source_session
+    sid = "abcd1234-ffff-0000-1111-222233334444"
+    assert _source_session({"metadata": {"source_session": sid}}) == sid
+    assert _source_session({"metadata": {"sessionId": sid}}) == sid
+    assert _source_session({"metadata": {}}) is None

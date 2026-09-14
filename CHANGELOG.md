@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.5
+
+Four defects an outside review of the hook path turned up — each one silent.
+
+- **Notebook edits get recall again.** `tool-recall` read `file_path`, but
+  Claude Code sends `notebook_path` for NotebookEdit, so the query was empty
+  and the hook returned nothing at all for every notebook edit.
+- **Session notes are linked to their session again.** The recap writes
+  `metadata.source_session`; the importer only knew `originSessionId` /
+  `sessionId`, so every imported session note landed with a null session —
+  7793 of 7793 on the machine where this was found.
+- **The MCP guard's count told the truth.** It reported `len(actual)` of
+  `len(expected)`, so a config with extra servers could claim "12 of 10
+  expected connected" in the same breath as listing one missing.
+- **The per-session recall ledger moved out of the shared temp dir** into the
+  private state dir (on Linux without `TMPDIR` it sat in a world-writable
+  `/tmp`, where a neighbour could pre-create the file and mute someone's
+  recall), and stale ledgers are pruned after seven days — they used to
+  accumulate one file per session forever.
+
 ## 0.9.4
 
 Everything here is about the Stop hook, which fires after **every** assistant

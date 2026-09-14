@@ -170,7 +170,10 @@ def _title_from(meta: dict[str, Any], body: str, slug: str) -> str:
 def _source_session(meta: dict[str, Any]) -> str | None:
     md = meta.get("metadata") or {}
     if isinstance(md, dict):
-        sid = md.get("originSessionId") or md.get("sessionId")
+        # source_session is what the recap hook writes; the other two come from
+        # older exports. Missing it left every session note unlinked.
+        sid = (md.get("source_session") or md.get("originSessionId")
+               or md.get("sessionId"))
         if sid:
             return str(sid)
     return None

@@ -107,8 +107,31 @@ def _log_line(*fields: Any) -> None:
 
 
 def _dedup_file(session_id: str) -> Path:
+    """Which slugs this session already saw. Kept in the private state dir: in a
+    shared /tmp a neighbour could pre-create the file and mute someone's recall.
+    """
     safe = re.sub(r"[^A-Za-z0-9-]", "", session_id or "unknown")[:64] or "unknown"
-    return Path(tempfile.gettempdir()) / f"skillmem-injected-{safe}.txt"
+    d = _state_dir() / "injected"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return Path(tempfile.gettempdir()) / f"skillmem-injected-{safe}.txt"
+    return d / f"{safe}.txt"
+
+
+def _prune_dedup_files(days: int = 7) -> None:
+    """Sessions end without notice, so their ledgers pile up — one machine had
+    1905 of them. Called once per session, from SessionStart."""
+    cutoff = time.time() - days * 86_400
+    try:
+        for f in (_state_dir() / "injected").glob("*.txt"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def _read_seen(session_id: str) -> set[str]:
@@ -259,7 +282,10 @@ def tool_recall(ctx: click.Context) -> None:
     if tool_name == "Bash":
         query = str(tool_input.get("command") or "")[:200]
     elif tool_name in ("Edit", "Write", "NotebookEdit"):
-        query = str(tool_input.get("file_path") or "")[:200]
+        # NotebookEdit carries notebook_path, not file_path: reading only the
+        # latter left notebook edits with an empty query and no recall at all.
+        query = str(tool_input.get("file_path")
+                    or tool_input.get("notebook_path") or "")[:200]
     else:
         return
     if len(query) < 5:
@@ -313,7 +339,8 @@ def mcp_guard() -> None:
     if not missing:
         return
     _emit("SessionStart", (
-        f"⚠️ MCP guard: {len(actual)} of {len(expected)} expected servers connected. "
+        f"⚠️ MCP guard: {len(actual & expected)} of {len(expected)} expected "
+        "servers connected. "
         f"MISSING: {' '.join(missing)}\n"
         "Tell the user about this in your very first reply. "
         "Restore with: claude mcp add-json <name> '<json>' -s user\n"
@@ -340,6 +367,7 @@ def _memory_dir_for(data: dict[str, Any]) -> Path | None:
 def session_history() -> None:
     """Top-3 freshest session-*.md from project memory → "where we left off" context."""
     data = _read_input()
+    _prune_dedup_files()
     memory_dir = _memory_dir_for(data)
     if memory_dir is None:
         return
