@@ -587,6 +587,53 @@ def _note_basis(path: Path) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _publish_note(outfile: Path, basis: int, text: str) -> str:
+    """Compare-and-swap the note: re-read the basis INSIDE a short lock.
+
+    Checking freshness and then replacing the file are two steps, and a Stop that
+    passed the check before SessionEnd wrote the final recap would otherwise
+    replace it afterwards. The lock covers milliseconds, not the model call.
+    """
+    lock = outfile.with_name(outfile.name + ".publock")
+    got = False
+    for _ in range(50):  # ~1s worth of tries, then publish anyway
+        try:
+            if lock.exists() and time.time() - lock.stat().st_mtime > 30:
+                lock.unlink()  # a writer that died mid-publish
+        except OSError:
+            pass
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+            got = True
+            break
+        except FileExistsError:
+            time.sleep(0.02)
+        except OSError:
+            break
+    try:
+        written = _note_basis(outfile)
+        if written > basis:
+            return f"skip:stale basis={basis} < written={written}"
+        tmp = outfile.with_name(outfile.name + f".tmp-{os.getpid()}")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, outfile)
+        except OSError as exc:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return f"write-failed {type(exc).__name__}"
+    finally:
+        if got:
+            try:
+                lock.unlink()
+            except OSError:
+                pass
+    return ""
+
+
 def _release_recap_slot(lock: Path | None) -> None:
     """Only ever release our own lock: a reclaimed slot may belong to someone."""
     if lock is None:
@@ -763,34 +810,19 @@ def run_recap(data: dict[str, Any]) -> None:
 
     # Two recaps of one session can overlap — a slow Stop and the SessionEnd
     # that follows it. Whoever read less of the transcript must not land last.
-    if _note_basis(outfile) > basis:
-        _log_line("session-recap", session_id[:8],
-                  f"skip:stale basis={basis} < written={_note_basis(outfile)}")
-        return
-
-    tmp = outfile.with_name(outfile.name + f".tmp-{os.getpid()}")
-    try:
-        tmp.write_text(
-            "---\n"
-            f"name: {slug}\n"
-            f"description: {json.dumps(desc, ensure_ascii=False)}\n"
-            "metadata:\n"
-            "  type: note\n"
-            f"  source_session: {session_id}\n"
-            f"  ended_at: {ended}\n"
-            f"  transcript_bytes: {basis}\n"
-            "---\n\n"
-            f"{summary}\n",
-            encoding="utf-8",
-        )
-        # Replace in one step: a crash mid-write must not leave a half note.
-        os.replace(tmp, outfile)
-    except OSError as exc:
-        _log_line("session-recap", session_id[:8], f"write-failed {type(exc).__name__}")
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+    problem = _publish_note(outfile, basis,
+        "---\n"
+        f"name: {slug}\n"
+        f"description: {json.dumps(desc, ensure_ascii=False)}\n"
+        "metadata:\n"
+        "  type: note\n"
+        f"  source_session: {session_id}\n"
+        f"  ended_at: {ended}\n"
+        f"  transcript_bytes: {basis}\n"
+        "---\n\n"
+        f"{summary}\n")
+    if problem:
+        _log_line("session-recap", session_id[:8], problem)
         return
     _log_line("session-recap", session_id[:8], f"wrote {outfile.name} ({len(summary)}b)")
 

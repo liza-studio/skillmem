@@ -1222,10 +1222,16 @@ def _bm25_ids(
     kind: str | None = None,
     project: str | None = None,
     pool: int = _CANDIDATE_POOL,
+    exclude_kinds: tuple[str, ...] = (),
 ) -> list[int]:
     """Lexical candidate ids, best-first, from the stemmed FTS5 index."""
     kind_clause = "AND m.kind = ?" if kind else ""
     project_clause = "AND m.project = ?" if project else ""
+    # Excluding kinds AFTER the candidate pool would drop the answer: the pool is
+    # capped, so a wall of session recaps can fill it and hide every skill.
+    excl_clause = (
+        f"AND m.kind NOT IN ({','.join('?' * len(exclude_kinds))})"
+        if exclude_kinds else "")
     sql = f"""
         SELECT m.id AS id, bm25(mem_fts_stem) AS r
         FROM mem_fts_stem
@@ -1235,6 +1241,7 @@ def _bm25_ids(
           AND m.lifecycle != 'archived'
           {kind_clause}
           {project_clause}
+          {excl_clause}
         ORDER BY r
         LIMIT ?
     """
@@ -1243,6 +1250,7 @@ def _bm25_ids(
         params.append(kind)
     if project:
         params.append(project)
+    params.extend(exclude_kinds)
     params.append(pool)
     return [row["id"] for row in conn.execute(sql, params).fetchall()]
 
@@ -1254,6 +1262,7 @@ def _vector_ids(
     kind: str | None = None,
     project: str | None = None,
     pool: int = _CANDIDATE_POOL,
+    exclude_kinds: tuple[str, ...] = (),
 ) -> list[int]:
     """Semantic candidate ids, best-first, via brute-force cosine.
 
@@ -1272,17 +1281,21 @@ def _vector_ids(
         return []
     kind_clause = "AND kind = ?" if kind else ""
     project_clause = "AND project = ?" if project else ""
+    excl_clause = (
+        f"AND kind NOT IN ({','.join('?' * len(exclude_kinds))})"
+        if exclude_kinds else "")
     sql = (
         "SELECT id, embedding FROM memory_items "
         "WHERE embedding IS NOT NULL AND deleted_at IS NULL "
         "AND lifecycle != 'archived' "
-        f"{kind_clause} {project_clause}"
+        f"{kind_clause} {project_clause} {excl_clause}"
     )
     params: list[Any] = []
     if kind:
         params.append(kind)
     if project:
         params.append(project)
+    params.extend(exclude_kinds)
     rows = conn.execute(sql, params).fetchall()
     if not rows:
         return []
@@ -1310,10 +1323,13 @@ def hybrid_rank_ids(
     kind: str | None = None,
     project: str | None = None,
     limit: int = 10,
+    exclude_kinds: tuple[str, ...] = (),
 ) -> list[int]:
     """Fused id ranking. Falls back to pure BM25 when no vector signal."""
-    bm = _bm25_ids(conn, query, kind=kind, project=project)
-    vec = _vector_ids(conn, query, kind=kind, project=project)
+    bm = _bm25_ids(conn, query, kind=kind, project=project,
+                   exclude_kinds=exclude_kinds)
+    vec = _vector_ids(conn, query, kind=kind, project=project,
+                      exclude_kinds=exclude_kinds)
     if not vec:
         return bm[:limit]
     scores = _rrf_scores(bm, vec)
@@ -1328,8 +1344,10 @@ def search(
     kind: str | None = None,
     project: str | None = None,
     limit: int = 10,
+    exclude_kinds: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
-    ids = hybrid_rank_ids(conn, query, kind=kind, project=project, limit=limit)
+    ids = hybrid_rank_ids(conn, query, kind=kind, project=project, limit=limit,
+                          exclude_kinds=exclude_kinds)
     if not ids:
         return []
     placeholders = ",".join("?" * len(ids))

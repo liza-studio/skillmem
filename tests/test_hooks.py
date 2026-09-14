@@ -7,6 +7,7 @@ and these tests exercise the Cyrillic code path end to end.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -502,3 +503,28 @@ def test_debounced_turn_does_not_read_the_transcript(
     monkeypatch.setattr(Path, "open", spy)
     _hook(db, "session-recap", payload)            # debounced
     assert "sess.jsonl" not in opened
+
+
+def test_publish_waits_for_the_lock_then_rechecks(tmp_path: Path):
+    """The interleaving Astra reproduced: this run passed its freshness check,
+    SessionEnd wrote the final recap meanwhile, and this run must stand down.
+    The re-read happens inside the lock, so the late writer sees the final note.
+    """
+    import threading
+    from skillmem import hooks as H
+    note = tmp_path / "session-x.md"
+    lock = note.with_name(note.name + ".publock")
+    lock.write_text("held", encoding="utf-8")   # someone else is publishing
+
+    def finish_first() -> None:
+        time.sleep(0.15)
+        note.write_text("---\nmetadata:\n  transcript_bytes: 999999\n---\n\nFINAL\n",
+                        encoding="utf-8")
+        lock.unlink()
+
+    t = threading.Thread(target=finish_first)
+    t.start()
+    problem = H._publish_note(note, 100, "OLD\n")
+    t.join()
+    assert problem.startswith("skip:stale")
+    assert "FINAL" in note.read_text(encoding="utf-8")

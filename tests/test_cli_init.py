@@ -133,3 +133,29 @@ def test_hooks_status_reads_the_log(tmp_path, monkeypatch):
     assert out.exit_code == 0
     assert "auto-recall" in out.output and "session-recap" in out.output
     assert "skipped=1" in out.output
+
+
+def test_search_widens_past_a_wall_of_notes(tmp_path, monkeypatch):
+    """Filtering a fixed window returned nothing while a matching skill sat just
+    below it — the window has to widen instead."""
+    from click.testing import CliRunner
+    from skillmem import storage as S
+    from skillmem.cli import main as cli_main
+    monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path))
+    monkeypatch.setenv("SKILLMEM_STATE_DIR", str(tmp_path / "state"))
+    db = tmp_path / "memory.db"
+    conn = S.connect(db)
+    S.init_schema(conn)
+    for i in range(60):                      # a wall of session recaps
+        S.upsert(conn, S.MemoryItem(
+            slug=f"session-2026-09-{i:02d}-aaaa", kind="note",
+            title=f"выжимка {i} про хук рекапа",
+            body="хук рекапа сработал, выжимка сессии про хук рекапа"))
+    S.upsert(conn, S.MemoryItem(
+        slug="skill-recap-hook", kind="skill", title="Хук рекапа: как починить",
+        body="trigger: хук рекапа плодит сессии; steps: вернуть env-флаг."))
+    conn.commit()
+    out = CliRunner().invoke(cli_main, ["--db", str(db), "search", "хук рекапа", "--limit", "3"],
+                             catch_exceptions=False)
+    assert out.exit_code == 0
+    assert "skill-recap-hook" in out.output

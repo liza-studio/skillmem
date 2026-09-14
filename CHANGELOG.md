@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.9
+
+Two defects a third review pass reproduced — both in code shipped this week.
+
+- **Publishing a recap is now compare-and-swap.** The freshness check and the
+  file replacement were two steps: a Stop that passed the check before
+  SessionEnd wrote the final recap would replace it afterwards. The basis is
+  re-read inside a short publish lock (milliseconds, not the model call), so the
+  late writer sees the final note and stands down.
+- **Excluding session recaps from `search` happened after the candidate pool.**
+  The pool is capped at 50 per signal, so a wall of recaps filled it and the
+  search returned nothing while a matching skill sat just below — `--kind skill`
+  found it. Kinds are now excluded inside the ranking query itself
+  (`exclude_kinds` on `search` / `hybrid_rank_ids`).
+
 ## 0.9.8
 
 - **A rate-limited turn no longer reads the transcript.** The line count ran

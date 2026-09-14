@@ -90,24 +90,22 @@ def search(
 ) -> None:
     """Full-text search via FTS5 BM25."""
     conn = _conn(ctx.obj["db_path"])
-    hidden = 0
-    if kind is None and not with_notes:
-        # Session recaps accumulate one per session and can be 90% of the words
-        # in the database: unfiltered, a search returns the diary, not the rules.
-        raw = S.search(conn, query, kind=None, project=project, limit=limit * 5)
-        hidden = sum(1 for h in raw if h.get("kind") == "note")
-        hits = [h for h in raw if h.get("kind") != "note"][:limit]
-    else:
-        hits = S.search(conn, query, kind=kind, project=project, limit=limit)
+    excluded = kind is None and not with_notes
+    # Session recaps accumulate one per session and can be 90% of the words in
+    # the database. They are excluded inside the ranking query, not afterwards:
+    # the candidate pool is capped, so a wall of recaps would fill it and hide
+    # every skill that matched.
+    hits = S.search(conn, query, kind=kind, project=project, limit=limit,
+                    exclude_kinds=("note",) if excluded else ())
     if fmt == "json":
         click.echo(json.dumps(hits, ensure_ascii=False, default=str))
         return
     if not hits:
-        click.echo("(no results)" + (f" — {hidden} session recaps hidden, "
-                                     "--notes to include" if hidden else ""))
+        click.echo("(no results)" + (" — session recaps excluded, --notes to "
+                                     "include" if excluded else ""))
         return
-    if hidden:
-        click.echo(f"({hidden} session recaps hidden; --notes to include)")
+    if excluded:
+        click.echo("(session recaps excluded; --notes to include)")
     for h in hits:
         snippet = (h.get("snippet") or "").replace("\n", " ")
         rank = h.get("rank")
