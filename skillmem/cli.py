@@ -814,6 +814,9 @@ def init(
                       matcher="Bash|Edit|Write|NotebookEdit"),
                 # recap invokes `claude -p` — the timeout must cover the LLM call
                 _hook("Stop", ["hook", "session-recap"], timeout=95),
+                # Stop fires per turn and is rate-limited; SessionEnd fires once
+                # and is not, so the closing turns still reach memory.
+                _hook("SessionEnd", ["hook", "session-recap"], timeout=95),
             ]
         report["hooks"] = hook_reports
 

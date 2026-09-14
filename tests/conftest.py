@@ -12,6 +12,10 @@ import pytest
 def memhome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate SKILLMEM_HOME under tmp so tests never touch the real DB."""
     monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path))
+    # Hook state (recap stamps, parallel slots, logs) lives in the state dir:
+    # without this the suite writes into the developer's live ~/.local/state
+    # and a stamp left by one test silently debounces the next.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.delenv("SKILLMEM_DB", raising=False)
     return tmp_path
 

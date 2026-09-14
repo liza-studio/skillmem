@@ -159,11 +159,137 @@ def test_session_recap_writes_note(db: Path, tmp_path: Path,
         "transcript_path": str(transcript),
     })
     assert out.strip() == ""  # recap injects nothing, it only writes a file
-    notes = list((proj / "memory").glob("session-*abcd1234.md"))
+    notes = list((proj / "memory").glob("session-*abcd1234ffff.md"))
     assert len(notes) == 1
     text = notes[0].read_text(encoding="utf-8")
     assert "Перенесли skillmem на Windows" in text
     assert "source_session: abcd1234-ffff-0000-1111-222233334444" in text
+
+
+def test_session_recap_debounces_and_rewrites_one_note(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Stop fires per turn: the second recap within the interval is skipped, and
+    a later one rewrites the same note instead of adding another."""
+    proj = tmp_path / "projects" / "-Users-someone"
+    proj.mkdir(parents=True)
+    transcript = proj / "sess.jsonl"
+    transcript.write_text("\n".join(
+        json.dumps({"type": "user", "message": {"content": [
+            {"type": "text", "text": f"вопрос номер {i} про деплой и хуки"}]}})
+        for i in range(25)) + "\n", encoding="utf-8")
+
+    from skillmem import hooks as H
+    monkeypatch.setattr(H.shutil, "which", lambda *_: "/fake/claude")
+    calls = []
+
+    def fake_run(*a, **kw):
+        calls.append(1)
+        return SimpleNamespace(
+            stdout=(f"## DONE\nпрогон номер {len(calls)}\n" + "x" * 120).encode(),
+            returncode=0)
+
+    monkeypatch.setattr(H.subprocess, "run", fake_run)
+    payload = {"session_id": "abcd1234-ffff-0000-1111-222233334444",
+               "transcript_path": str(transcript)}
+
+    _hook(db, "session-recap", payload)
+    _hook(db, "session-recap", payload)          # same turn-ish: debounced
+    assert len(calls) == 1
+    notes = list((proj / "memory").glob("session-*.md"))
+    assert len(notes) == 1
+    assert "прогон номер 1" in notes[0].read_text(encoding="utf-8")
+
+    # past the interval: the model runs again and the one note is rewritten
+    monkeypatch.setattr(H, "RECAP_MIN_INTERVAL", 0)
+    _hook(db, "session-recap", payload)
+    assert len(calls) == 2
+    notes = list((proj / "memory").glob("session-*.md"))
+    assert len(notes) == 1
+    assert "прогон номер 2" in notes[0].read_text(encoding="utf-8")
+
+
+def _recap_fixture(tmp_path: Path):
+    proj = tmp_path / "projects" / "-Users-someone"
+    proj.mkdir(parents=True)
+    transcript = proj / "sess.jsonl"
+    transcript.write_text("\n".join(
+        json.dumps({"type": "user", "message": {"content": [
+            {"type": "text", "text": f"вопрос номер {i} про деплой и хуки"}]}})
+        for i in range(25)) + "\n", encoding="utf-8")
+    return proj, {"session_id": "abcd1234-ffff-0000-1111-222233334444",
+                  "transcript_path": str(transcript)}
+
+
+def test_session_recap_rejects_failed_run_and_still_debounces(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """A non-zero exit is an error message, not a recap — and the attempt still
+    counts, or a permanently failing model buys a call on every single turn."""
+    proj, payload = _recap_fixture(tmp_path)
+    from skillmem import hooks as H
+    monkeypatch.setattr(H.shutil, "which", lambda *_: "/fake/claude")
+    calls = []
+
+    def fake_run(*a, **kw):
+        calls.append(1)
+        return SimpleNamespace(stdout=b"Error: usage limit reached. " * 20,
+                               returncode=1)
+
+    monkeypatch.setattr(H.subprocess, "run", fake_run)
+    _hook(db, "session-recap", payload)
+    assert list((proj / "memory").glob("session-*.md")) == []
+    _hook(db, "session-recap", payload)
+    assert len(calls) == 1, "failed attempt must be stamped, not retried at once"
+
+
+def test_session_recap_session_end_ignores_debounce(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """SessionEnd is the session's last word: rate-limiting it loses the tail."""
+    proj, payload = _recap_fixture(tmp_path)
+    from skillmem import hooks as H
+    monkeypatch.setattr(H.shutil, "which", lambda *_: "/fake/claude")
+    calls = []
+
+    def fake_run(*a, **kw):
+        calls.append(1)
+        return SimpleNamespace(
+            stdout=(f"## DONE\nпрогон {len(calls)}\n" + "x" * 120).encode(),
+            returncode=0)
+
+    monkeypatch.setattr(H.subprocess, "run", fake_run)
+    _hook(db, "session-recap", payload)
+    _hook(db, "session-recap", {**payload, "hook_event_name": "SessionEnd"})
+    assert len(calls) == 2
+    notes = list((proj / "memory").glob("session-*.md"))
+    assert len(notes) == 1 and "прогон 2" in notes[0].read_text(encoding="utf-8")
+
+
+def test_session_recap_skips_when_all_slots_busy(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Second barrier after the recursion guard: no storm of parallel children."""
+    proj, payload = _recap_fixture(tmp_path)
+    from skillmem import hooks as H
+    monkeypatch.setattr(H.shutil, "which", lambda *_: "/fake/claude")
+    monkeypatch.setattr(H, "_acquire_recap_slot", lambda: None)
+    called = []
+    monkeypatch.setattr(H.subprocess, "run",
+                        lambda *a, **kw: called.append(1))
+    _hook(db, "session-recap", payload)
+    assert called == [] and list((proj / "memory").glob("session-*.md")) == []
+
+
+def test_env_int_survives_garbage_and_clamps(monkeypatch: pytest.MonkeyPatch):
+    """A typo in the environment must not take the whole CLI down with it."""
+    from skillmem import hooks as H
+    monkeypatch.setenv("SKILLMEM_TEST_INT", "oops")
+    assert H._env_int("SKILLMEM_TEST_INT", 600, 0, 86_400) == 600
+    monkeypatch.setenv("SKILLMEM_TEST_INT", "-5")
+    assert H._env_int("SKILLMEM_TEST_INT", 600, 0, 86_400) == 0
+    monkeypatch.setenv("SKILLMEM_TEST_INT", "999999")
+    assert H._env_int("SKILLMEM_TEST_INT", 600, 0, 86_400) == 86_400
 
 
 def test_session_recap_optout_reaches_the_child(db: Path, tmp_path: Path,

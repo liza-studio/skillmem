@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.9.4
+
+Everything here is about the Stop hook, which fires after **every** assistant
+turn rather than when the session closes. 0.9.3 stopped it recursing; this
+release stops it being expensive, and closes what a review of the recap path
+turned up.
+
+- **Rate-limited recaps, one note per session.** At most one model call per
+  session per `SKILLMEM_RECAP_MIN_INTERVAL` (default 600s), and the note is
+  named per session and day, so a later recap rewrites it instead of leaving
+  the day full of near-identical copies.
+- **The limit counts attempts, not successes.** A failing model used to leave no
+  trace, so every following turn bought another call.
+- **A non-zero exit is no longer stored as memory.** Any output over 100
+  characters — a usage-limit message, a stack trace — became a note and
+  overwrote a good recap.
+- **SessionEnd gets its own recap**, not rate-limited, so the closing turns of a
+  session still reach memory. `skillmem init` wires it; existing installs pick
+  it up by re-running init.
+- **The parallel-slot semaphore is back** (`SKILLMEM_RECAP_MAX_PARALLEL`,
+  default 2), lost in the rename. The env opt-out stops recursion; this stops a
+  storm from any other cause. O_EXCL locks, reclaimed by age, so a process
+  killed with SIGKILL cannot wedge a slot.
+- **The summariser child runs lean:** `--strict-mcp-config` (it was booting
+  every MCP server) and `--no-session-persistence` (it was leaving a transcript
+  on disk per call — a gigabyte on one machine). Dropped automatically on a CLI
+  too old to know the flags.
+- **Notes are written atomically** (temp file + replace): a crash mid-write left
+  a half-written note behind.
+- **A typo in an environment variable no longer breaks the CLI.** `int()` on
+  `SKILLMEM_RECAP_TIMEOUT` ran at import, so one bad value made every command
+  fail, not just the recap. Values are parsed safely and clamped.
+- **Tests no longer write into the developer's live state directory**, and a
+  stamp left by one test no longer silently debounces the next.
+
 ## 0.9.3
 
 - **The Stop hook no longer recaps its own recaps.** `session-recap` spawns
