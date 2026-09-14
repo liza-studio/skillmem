@@ -457,3 +457,27 @@ def test_state_dir_respects_xdg_state_home(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     assert H._state_dir() == tmp_path / ".local" / "state" / "skillmem"
+
+
+def test_manual_recap_gets_the_full_budget(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Asking by hand skips the rate limit but is not inside SessionEnd's 60s
+    ceiling — the first live run of `skillmem recap` timed out at 45s because of
+    exactly this conflation."""
+    _, payload = _recap_fixture(tmp_path)
+    from skillmem import hooks as H
+    monkeypatch.setattr(H.shutil, "which", lambda *_: "/fake/claude")
+    seen: list[int] = []
+
+    def run(*a, **kw):
+        seen.append(kw.get("timeout", 0))
+        return SimpleNamespace(stdout=b"## DONE\n" + b"x" * 120, returncode=0, stderr=b"")
+
+    monkeypatch.setattr(H.subprocess, "run", run)
+    H.run_recap({**payload, "hook_event_name": "Manual", "force": True})
+    assert seen and seen[0] > H.RECAP_TIMEOUT_FINAL
+
+    seen.clear()
+    H.run_recap({**payload, "hook_event_name": "SessionEnd"})
+    assert seen and seen[0] <= H.RECAP_TIMEOUT_FINAL

@@ -73,6 +73,9 @@ def migrate(ctx: click.Context, source: Path) -> None:
 @click.option("--kind", default=None, help="Filter by kind (feedback/project/...)")
 @click.option("--project", default=None)
 @click.option("--limit", default=10, show_default=True)
+@click.option("--notes/--no-notes", "with_notes", default=False,
+              help="Include session recaps. Hidden by default: they outnumber "
+                   "everything else and crowd skills out of the top results.")
 @click.option(
     "--format",
     "fmt",
@@ -82,17 +85,29 @@ def migrate(ctx: click.Context, source: Path) -> None:
 )
 @click.pass_context
 def search(
-    ctx: click.Context, query: str, kind: str | None, project: str | None, limit: int, fmt: str
+    ctx: click.Context, query: str, kind: str | None, project: str | None, limit: int,
+    with_notes: bool, fmt: str,
 ) -> None:
     """Full-text search via FTS5 BM25."""
     conn = _conn(ctx.obj["db_path"])
-    hits = S.search(conn, query, kind=kind, project=project, limit=limit)
+    hidden = 0
+    if kind is None and not with_notes:
+        # Session recaps accumulate one per session and can be 90% of the words
+        # in the database: unfiltered, a search returns the diary, not the rules.
+        raw = S.search(conn, query, kind=None, project=project, limit=limit * 5)
+        hidden = sum(1 for h in raw if h.get("kind") == "note")
+        hits = [h for h in raw if h.get("kind") != "note"][:limit]
+    else:
+        hits = S.search(conn, query, kind=kind, project=project, limit=limit)
     if fmt == "json":
         click.echo(json.dumps(hits, ensure_ascii=False, default=str))
         return
     if not hits:
-        click.echo("(no results)")
+        click.echo("(no results)" + (f" — {hidden} session recaps hidden, "
+                                     "--notes to include" if hidden else ""))
         return
+    if hidden:
+        click.echo(f"({hidden} session recaps hidden; --notes to include)")
     for h in hits:
         snippet = (h.get("snippet") or "").replace("\n", " ")
         rank = h.get("rank")
@@ -267,6 +282,94 @@ def inject(
         suffix = f"({brief['omitted']} omitted, budget={brief['budget_tokens']} tk)"
         lines.append(f"_… {suffix}_" if fmt == "md" else suffix)
     click.echo("\n".join(lines))
+
+
+@main.command("recap")
+@click.argument("transcript", required=False,
+                type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--force/--no-force", default=True, show_default=True,
+              help="Ignore the rate limit (that is the point of asking by hand).")
+def recap_cmd(transcript: Path | None, force: bool) -> None:
+    """Write a session recap now — by default for this project's newest transcript.
+
+    The Stop hook is rate-limited, so the closing minutes of a session may not be
+    in memory yet. This is how you save them without waiting.
+    """
+    from .hooks import newest_transcript_for_cwd, run_recap
+    path = transcript or newest_transcript_for_cwd()
+    if path is None or not path.is_file():
+        raise click.ClickException(
+            "no transcript found for this directory — pass one: "
+            "skillmem recap ~/.claude/projects/<project>/<session>.jsonl")
+    data = {
+        "session_id": path.stem,
+        "transcript_path": str(path),
+        # Not SessionEnd: this run is not inside that event's 60s budget.
+        "hook_event_name": "Manual",
+        "force": force,
+    }
+    run_recap(data)
+    click.echo(f"recap run for {path.name} (see `skillmem hooks-status`)")
+
+
+@main.command("hooks-status")
+@click.option("--lines", default=4000, show_default=True,
+              help="How much of the tail of the hook log to read.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+def hooks_status(lines: int, fmt: str) -> None:
+    """What the hooks have actually been doing: last run, skips, failures.
+
+    Every hook swallows its own errors so it can never break a session, which
+    also means a hook that silently stopped working looks exactly like one with
+    nothing to do. This is where you see the difference.
+    """
+    from .hooks import _hook_log_path, _state_dir
+    log = _hook_log_path()
+    rows: list[list[str]] = []
+    if log.is_file():
+        with log.open(encoding="utf-8", errors="replace") as fh:
+            tail = fh.readlines()[-lines:]
+        rows = [ln.rstrip("\n").split("\t") for ln in tail if "\t" in ln]
+    per: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        if len(r) < 2:
+            continue
+        name = r[1]
+        rest = " ".join(r[3:]) if len(r) > 3 else ""
+        e = per.setdefault(name, {"runs": 0, "last": "", "last_detail": "",
+                                  "skipped": 0, "failed": 0})
+        e["runs"] += 1
+        e["last"], e["last_detail"] = r[0], rest[:120]
+        if rest.startswith("skip") or ":busy" in rest or "debounce" in rest:
+            e["skipped"] += 1
+        if ("empty/failed" in rest or rest.startswith("error")
+                or "timeout" in rest or "failed" in rest):
+            e["failed"] += 1
+    report = {
+        "log": str(log),
+        "log_exists": log.is_file(),
+        "state_dir": str(_state_dir()),
+        "recap_stamps": len(list((_state_dir() / "recap-stamps").glob("*.stamp")))
+        if (_state_dir() / "recap-stamps").is_dir() else 0,
+        "ledgers": len(list((_state_dir() / "injected").glob("*.txt")))
+        if (_state_dir() / "injected").is_dir() else 0,
+        "hooks": per,
+    }
+    if fmt == "json":
+        click.echo(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        return
+    click.echo(f"log: {report['log']}" + ("" if report["log_exists"] else "  (MISSING)"))
+    click.echo(f"state: {report['state_dir']}  stamps={report['recap_stamps']} "
+               f"ledgers={report['ledgers']}")
+    if not per:
+        click.echo("no hook activity in the log tail — hooks may not be wired "
+                   "(check `skillmem init` and ~/.claude/settings.json)")
+        return
+    for name, e in sorted(per.items()):
+        click.echo(f"{name:<16} runs={e['runs']:<5} skipped={e['skipped']:<5} "
+                   f"failed={e['failed']:<5} last={e['last']}")
+        if e["last_detail"]:
+            click.echo(f"{'':<16} └ {e['last_detail']}")
 
 
 @main.command("export-all")

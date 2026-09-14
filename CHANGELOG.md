@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.7
+
+- **Memory arrives with a trust boundary.** Anything this machine did not author
+  — an imported pack, or a note distilled from a transcript that may itself
+  quote a web page — is now injected under its own header that says plainly it
+  is data, not instructions. A stored instruction is still an instruction, and
+  it used to land in the same block as the user's own rules.
+- **`skillmem search` hides session recaps by default** (`--notes` brings them
+  back). They accumulate one per session and reached 90% of the words in one
+  database, so an unfiltered search returned the diary instead of the rules.
+- **`skillmem recap [TRANSCRIPT] [--force]`** writes a recap on demand — the
+  Stop hook is rate-limited, and this is how you save the closing minutes
+  without waiting. With no argument it picks this project's newest transcript.
+- **`skillmem hooks-status`** shows what the hooks have actually been doing:
+  runs, skips, failures and the last line per hook, plus the state directory.
+  Hooks swallow their own errors so they can never break a session, which also
+  means one that silently stopped working looks exactly like one with nothing
+  to do.
+- **Asking by hand no longer inherits SessionEnd's budget.** The first live run
+  of `skillmem recap` timed out at 45s: only the real SessionEnd event lives
+  inside that 60s ceiling. A manual run gets the full timeout; the SessionEnd
+  one also trims its input to 20KB, because a truncated recap beats one that
+  times out.
+
 ## 0.9.6
 
 A second review pass over what 0.9.4–0.9.5 actually shipped. The races it found

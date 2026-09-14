@@ -114,3 +114,22 @@ def test_mcp_subcommand_exists():
     r = CliRunner().invoke(cli_main, ["mcp", "--help"])
     assert r.exit_code == 0
     assert "MCP" in r.output or "stdio" in r.output
+
+
+def test_hooks_status_reads_the_log(tmp_path, monkeypatch):
+    """Hooks swallow their own errors, so one that quietly stopped working looks
+    like one with nothing to do. This command is where the difference shows."""
+    from click.testing import CliRunner
+    from skillmem.cli import main as cli_main
+    log = tmp_path / "hooks.log"
+    log.write_text(
+        "2026-09-14T10:00:00\tauto-recall\tabcd1234\t42\t2\tslug-a,slug-b\t900\n"
+        "2026-09-14T10:01:00\tsession-recap\tabcd1234\tskip:debounce 12s < 600s\n"
+        "2026-09-14T10:02:00\tsession-recap\tabcd1234\twrote session-x.md (500b)\n",
+        encoding="utf-8")
+    monkeypatch.setenv("SKILLMEM_HOOK_LOG", str(log))
+    monkeypatch.setenv("SKILLMEM_STATE_DIR", str(tmp_path / "state"))
+    out = CliRunner().invoke(cli_main, ["hooks-status"], catch_exceptions=False)
+    assert out.exit_code == 0
+    assert "auto-recall" in out.output and "session-recap" in out.output
+    assert "skipped=1" in out.output
