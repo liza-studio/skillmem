@@ -137,7 +137,39 @@ def test_lexical_query_splits_paths_into_words(conn, monkeypatch):
         ("/work/analysis.ipynb", "skill-notebook"),
         ("analysis.ipynb", "skill-notebook"),
         ("/root/liza-v3/liza/db.py", "skill-db-py"),
+        # Two-character tokens carry the meaning in this domain (db, py, js, ci).
+        # The index used to drop them, so this matched nothing however well the
+        # query was tokenised.
+        ("db.py", "skill-db-py"),
     ):
         hits = [r["slug"] for r in S.recall_skills(conn, query, limit=3,
                                                    auto_reinforce=False)]
         assert expected in hits, f"{query!r} found {hits}"
+
+
+def test_v11_flags_the_reindex_instead_of_blocking_a_hook(tmp_path, monkeypatch):
+    """Rebuilding the lexical index takes about a minute on a real database, and
+    init_schema runs inside every hook under a 10s timeout — so the migration must
+    only leave a flag for the nightly job to pick up."""
+    monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path))
+    path = tmp_path / "m.db"
+    conn = S.connect(path)
+    S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="s-1", kind="skill", title="Правки в db.py",
+                                body="trigger: db.py"))
+    # pretend this database predates v11 and its index was built the old way
+    conn.execute("UPDATE memory_items SET stemmed = 'правк'")
+    conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('schema_version','10')")
+    conn.execute("DELETE FROM meta WHERE key = 'lexical_reindex_pending'")
+    conn.commit()
+
+    conn2 = S.connect(path)
+    S.init_schema(conn2)                       # the migration a hook would run
+    assert S.lexical_reindex_pending(conn2), "no flag was left for the nightly job"
+    assert conn2.execute(
+        "SELECT stemmed FROM memory_items").fetchone()[0] == "правк", \
+        "the migration did the heavy work inline"
+
+    assert S.restem_all(conn2) == 1            # the nightly job / CLI path
+    assert not S.lexical_reindex_pending(conn2)
+    assert "db" in conn2.execute("SELECT stemmed FROM memory_items").fetchone()[0]

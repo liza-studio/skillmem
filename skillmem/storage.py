@@ -223,7 +223,7 @@ CREATE INDEX IF NOT EXISTS idx_traces_created ON skill_traces(created_at);
 """
 
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -380,16 +380,62 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if not {"origin", "trusted_at", "trusted_by"} <= cols:
         _migrate_v10(conn)
 
+    # --- v11: the lexical index has to be rebuilt, but NOT here ---
+    # It used to drop tokens shorter than three characters, so `db`, `py`, `js`,
+    # `ci` were missing from every row and a query like "db.py" could not match
+    # however well the query itself was tokenised. The column is derived, so the
+    # fix only reaches stored memories by rebuilding it — and on a real database
+    # (8917 rows) that takes about a minute, while init_schema runs inside every
+    # hook under a 10s timeout. So the migration only leaves a flag: the nightly
+    # decay job picks it up, or `skillmem reindex-lexical` does it now.
+    if _current_schema_version(conn) < 11:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES "
+            "('lexical_reindex_pending', '1')")
+
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(CURRENT_SCHEMA_VERSION),),
     )
 
 
-# Origin of existing rows, best-effort and in priority order: the first rule
-# that matches wins, so a skill carrying the imported tag is imported, not agent.
-# Rules for existing rows, in priority order — the first match wins, so a skill
+# Origin of existing rows, in priority order — the first match wins, so a skill
 # carrying the imported tag is imported, not agent.
+def lexical_reindex_pending(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = 'lexical_reindex_pending'").fetchone()
+    return bool(row and str(row["value"]) == "1")
+
+
+def restem_all(conn: sqlite3.Connection) -> int:
+    """Rebuild the lexical index and clear the pending flag. Minutes, not seconds,
+    on a large database — call it from a scheduled job or by hand, never from a
+    hook."""
+    n = _restem_all(conn)
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES "
+                 "('lexical_reindex_pending', '0')")
+    return n
+
+
+def _restem_all(conn: sqlite3.Connection) -> int:
+    """Rebuild the stemmed column for every row. No model, no network, one pass."""
+    rows = conn.execute(
+        "SELECT id, title, body, tags, topics FROM memory_items"
+    ).fetchall()
+    n = 0
+    with tx(conn):
+        for r in rows:
+            stemmed = _stem_text(
+                f"{r['title']}\n{r['body']}\n"
+                + " ".join(_parse_json_list(r["tags"]) + _parse_json_list(r["topics"]))
+            )
+            conn.execute("UPDATE memory_items SET stemmed = ? WHERE id = ?",
+                         (stemmed, r["id"]))
+            n += 1
+    log.info("re-stemmed %d rows for v11", n)
+    return n
+
+
 _ORIGIN_BACKFILL = (
     ("derived", "kind = 'note'"),
     ("owner", "kind IN ('user','feedback','rule','reference','project')"),
@@ -592,16 +638,19 @@ def _stem_word(word: str) -> str:
 def _stem_text(text: str) -> str:
     """Return text where every token is replaced by its Snowball stem.
 
-    Tokens shorter than 3 chars are dropped (BM25 noise). Stems are joined by
-    spaces; punctuation is discarded — Snowball is what gives semantic recall
-    here, FTS5 just BM25-ranks the result.
+    Single characters are dropped as BM25 noise; two-character tokens are kept
+    because in this domain they carry the meaning — `db`, `py`, `js`, `ci`, `ui`,
+    `go`. Dropping them made a query like "db.py" match nothing at all, however
+    well the query side was tokenised. Stems are joined by spaces; punctuation is
+    discarded — Snowball is what gives lexical recall here, FTS5 just BM25-ranks
+    the result, and a frequent short word is down-weighted by BM25 anyway.
     """
     if not text:
         return ""
     out: list[str] = []
     for match in _WORD_RE.finditer(text):
         w = match.group(0)
-        if len(w) < 3:
+        if len(w) < 2:
             continue
         out.append(_stem_word(w))
     return " ".join(out)

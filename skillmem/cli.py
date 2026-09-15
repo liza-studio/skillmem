@@ -365,6 +365,21 @@ def recap_cmd(transcript: Path | None, force: bool) -> None:
     click.echo(f"recap run for {path.name} (see `skillmem hooks-status`)")
 
 
+@main.command("reindex-lexical")
+@click.pass_context
+def reindex_lexical(ctx: click.Context) -> None:
+    """Rebuild the lexical (stemmed) index now — minutes on a large database.
+
+    Needed once after 0.10.3: the index used to drop two-character tokens, so
+    `db`, `py`, `js`, `ci` were missing from every stored memory. The nightly
+    decay job does this on its own; this is the impatient path.
+    """
+    conn = _conn(ctx.obj["db_path"])
+    n = S.restem_all(conn)
+    conn.commit()
+    click.echo(f"Rebuilt the lexical index for {n} memories.")
+
+
 @main.command("hooks-status")
 @click.option("--lines", default=4000, show_default=True,
               help="How much of the tail of the hook log to read.")
@@ -1511,6 +1526,7 @@ def doctor(ctx: click.Context) -> None:
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()["value"],
         **S.stats(conn),
+        "lexical_reindex_pending": S.lexical_reindex_pending(conn),
         "semantic": _semantic_report(),
     }
     click.echo(json.dumps(info, ensure_ascii=False, indent=2))
@@ -1652,6 +1668,11 @@ def skills(ctx: click.Context, limit: int) -> None:
 def decay(ctx: click.Context, days: int) -> None:
     """Run Ebbinghaus decay on unused skills."""
     conn = _conn(ctx.obj["db_path"])
+    # The nightly job is where a minute of CPU is affordable: v11 needs the lexical
+    # index rebuilt, and doing it in a hook would blow the hook's timeout.
+    if S.lexical_reindex_pending(conn):
+        n = S.restem_all(conn)
+        click.echo(f"Rebuilt the lexical index for {n} memories (v11).")
     decayed = S.decay_stale(conn, days_threshold=days)
     if not decayed:
         click.echo("Nothing to decay.")

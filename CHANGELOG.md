@@ -1,6 +1,21 @@
 # Changelog
 
-## 0.10.2
+## 0.10.3
+
+0.10.2 fixed the query side of lexical search; this fixes the index side, which
+was the deeper half of the same defect.
+
+- **Two-character tokens are indexed.** The stemmer dropped anything shorter than
+  three characters, so `db`, `py`, `js`, `ci`, `ui`, `go` were missing from every
+  stored memory — a search for `db.py` could not match however well the query was
+  tokenised. In this domain those two letters are the meaning.
+- **The rebuild is a scheduled job, not a migration.** The stemmed column is
+  derived, so the fix only reaches memories already stored by rebuilding it — and
+  that takes about a minute on 8917 rows, while `init_schema` runs inside every
+  hook under a 10-second timeout. Schema v11 therefore only sets a flag;
+  `skillmem decay` (the nightly job) clears it, `skillmem reindex-lexical` does it
+  on demand, and `skillmem doctor` reports whether it is still pending.
+
 
 - **Lexical recall on a file path was dead without the semantic extra.** The FTS
   query was split on whitespace, so `/work/analysis.ipynb` became a single phrase

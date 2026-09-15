@@ -1,7 +1,7 @@
 {
   "name": "skillmem",
   "displayName": "skillmem",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "description": "Self-improving skill memory for Claude Code: learn, recall, reinforce, decay. Wires the skillmem MCP server (9 tools) and memory hooks on five events, with provenance on every memory and trust only you grant. Requires the skillmem Python package on PATH (pip install skillmem).",
   "author": {
     "name": "Liza Studio",
