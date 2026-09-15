@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.liza-studio/skillmem",
   "title": "skillmem",
-  "description": "Self-improving skill memory for coding agents: learn, recall, reinforce, decay — with provenance on every memory and trust only the owner grants. Local SQLite, no API key, no cloud.",
+  "description": "Skill memory for coding agents: learn, recall, reinforce, decay. Local SQLite, no API key.",
   "repository": {
     "url": "https://github.com/liza-studio/skillmem",
     "source": "github"
