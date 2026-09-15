@@ -566,7 +566,11 @@ def _remember_client(server: Server) -> None:
 
 
 def _build_server() -> Server:
-    server: Server = Server(SERVER_NAME)
+    # Report our own version, not the SDK's: a registry listing and a client's
+    # debug output both read serverInfo, and "1.30.0" (the mcp library) told
+    # anyone looking a version this package has never had.
+    from . import __version__ as _our_version
+    server: Server = Server(SERVER_NAME, version=_our_version)
 
     @server.list_tools()
     async def _list_tools() -> list[Tool]:

@@ -285,6 +285,18 @@ skillmem uninstall --purge-db    # ...and deletes the database
 
 Config edits are made atomically with timestamped backups; corrupt JSON or TOML is never overwritten.
 
+## Docker
+
+```bash
+docker build -t skillmem .                       # BM25 only, 297MB
+docker build --build-arg EXTRAS='[semantic]' -t skillmem .   # + the vector path
+docker run -i --rm -v skillmem-data:/data skillmem            # stdio MCP server
+```
+
+The image exists mostly so catalogues can build and score the server without
+guessing at it; the memory lives in the `/data` volume, so a container restart
+keeps it.
+
 ## Benchmarks
 
 Retrieval quality on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (Wu et al., ICLR 2025), full oracle set, **hybrid retrieval** (FTS5 BM25 + Snowball stemming + `paraphrase-multilingual-MiniLM-L12-v2` embeddings, RRF fusion), k=5, CPU only:

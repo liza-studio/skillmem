@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.10.4
+## 0.10.5
+
+- **The MCP server reports its own version.** `serverInfo` carried the SDK's
+  version (`1.30.0`), so a registry listing or a client's debug output told anyone
+  looking a version this package has never had.
+- **A Dockerfile, checked in.** Catalogues build a container to score an MCP
+  server, and a server whose inferred build fails is kept out of their search
+  results. Ours is explicit and verified: image builds, `initialize` answers with
+  the real version, `tools/list` returns all 9 tools over stdio.
+
 
 - **A fresh database is no longer flagged for a lexical rebuild.** Found while
   verifying a real `pip install skillmem` on Ubuntu: a brand-new database reported
