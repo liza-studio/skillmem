@@ -156,7 +156,10 @@ def test_tool_recall_reads_notebook_path(db: Path, tmp_path: Path):
 def test_dedup_ledger_lives_in_private_state_dir(tmp_path: Path,
                                                 monkeypatch: pytest.MonkeyPatch):
     """In a shared /tmp a neighbour could pre-create the ledger and mute recall."""
+    # XDG_STATE_HOME alone is ignored on Windows — the explicit override is the
+    # only isolation that holds on every OS (that is why it exists).
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("SKILLMEM_STATE_DIR", str(tmp_path / "state" / "skillmem"))
     from skillmem import hooks as H
     p = H._dedup_file("abc-123")
     assert str(tmp_path) in str(p) and p.name == "abc-123.txt"
