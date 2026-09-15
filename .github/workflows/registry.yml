@@ -22,7 +22,10 @@ jobs:
           python3 - <<'PY'
           import json, os, sys
           d = json.load(open("server.json"))
-          tag = os.environ.get("GITHUB_REF_NAME", "")
+          # Only a tag run has a version to agree with; a manual run publishes
+          # whatever server.json currently says, which is the point of the button.
+          tag = (os.environ.get("GITHUB_REF_NAME", "")
+                 if os.environ.get("GITHUB_REF_TYPE") == "tag" else "")
           want = tag[1:] if tag.startswith("v") else tag
           got = {d.get("version")} | {p.get("version") for p in d.get("packages", [])}
           if want and got != {want}:
