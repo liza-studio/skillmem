@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.10.3
+## 0.10.4
+
+- **A fresh database is no longer flagged for a lexical rebuild.** Found while
+  verifying a real `pip install skillmem` on Ubuntu: a brand-new database reported
+  `lexical_reindex_pending: true`, which sends the nightly job on a pointless pass
+  and makes `doctor` look alarming on a clean install. The flag is now set only
+  when there is something stored to rebuild.
+
 
 0.10.2 fixed the query side of lexical search; this fixes the index side, which
 was the deeper half of the same defect.

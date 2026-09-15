@@ -173,3 +173,13 @@ def test_v11_flags_the_reindex_instead_of_blocking_a_hook(tmp_path, monkeypatch)
     assert S.restem_all(conn2) == 1            # the nightly job / CLI path
     assert not S.lexical_reindex_pending(conn2)
     assert "db" in conn2.execute("SELECT stemmed FROM memory_items").fetchone()[0]
+
+
+def test_fresh_database_is_not_flagged_for_reindex(tmp_path, monkeypatch):
+    """Caught on a real Ubuntu install: a brand-new database reported
+    lexical_reindex_pending=true, which sends the nightly job on a pointless pass
+    and makes `doctor` look alarming on a clean install."""
+    monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path))
+    conn = S.connect(tmp_path / "fresh.db")
+    S.init_schema(conn)
+    assert not S.lexical_reindex_pending(conn)

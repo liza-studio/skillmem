@@ -388,7 +388,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # (8917 rows) that takes about a minute, while init_schema runs inside every
     # hook under a 10s timeout. So the migration only leaves a flag: the nightly
     # decay job picks it up, or `skillmem reindex-lexical` does it now.
-    if _current_schema_version(conn) < 11:
+    if _current_schema_version(conn) < 11 and conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM memory_items)").fetchone()[0]:
+        # Only an existing database has a stale index to rebuild; a fresh one is
+        # already correct, and flagging it would send the nightly job on a
+        # pointless pass and make `doctor` look alarming on a clean install.
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES "
             "('lexical_reindex_pending', '1')")
