@@ -33,6 +33,27 @@ jobs:
                        "advertise a version the registry cannot install")
           print("server.json and the tag agree:", want or d.get("version"))
           PY
+      - name: Wait for the version to appear on PyPI
+        # The registry verifies the package exists before it will list it, and this
+        # job runs alongside the PyPI publish — without the wait the tag run loses
+        # the race and the listing silently stays a version behind.
+        run: |
+          python3 - <<'PY'
+          import json, time, urllib.request, sys
+          want = json.load(open("server.json"))["version"]
+          for attempt in range(30):
+              try:
+                  with urllib.request.urlopen(
+                          "https://pypi.org/pypi/skillmem/json", timeout=15) as r:
+                      if want in json.load(r)["releases"]:
+                          print(f"{want} is on PyPI (attempt {attempt + 1})")
+                          sys.exit(0)
+              except Exception as exc:
+                  print("pypi check failed:", exc)
+              time.sleep(20)
+          sys.exit(f"{want} never appeared on PyPI — not registering it")
+          PY
+
       - name: Install mcp-publisher
         run: |
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
