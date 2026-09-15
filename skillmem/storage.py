@@ -1332,14 +1332,21 @@ def _escape_fts(query: str) -> str:
     would be too strict for natural-language queries — a 5-word question
     almost never has all 5 stems in a single short message.
     """
-    tokens = [t for t in query.split() if t]
+    # Split the way the FTS5 tokenizer splits the documents, not on whitespace.
+    # tool-recall passes a FILE PATH as the query, and on a BM25-only install
+    # (`pip install skillmem` without the semantic extra) "/work/analysis.ipynb"
+    # became one phrase token and matched nothing at all — recall was silently
+    # dead for every Edit/Write/NotebookEdit.
+    tokens = _WORD_RE.findall(query)  # same shape as the indexed tokens
     if not tokens:
         return '""'
     parts: list[str] = []
+    seen: set[str] = set()
     for raw in tokens:
         stem = _stem_word(raw)
-        if len(stem) < 2:
+        if len(stem) < 2 or stem in seen:
             continue
+        seen.add(stem)
         safe = stem.replace('"', '""')
         parts.append(f'"{safe}"*')
     return " OR ".join(parts) if parts else '""'

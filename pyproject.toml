@@ -1,6 +1,6 @@
 [project]
 name = "skillmem"
-version = "0.10.1"
+version = "0.10.2"
 description = "Self-improving skills for Claude Code — your agent learns, recalls, reinforces, and forgets. SQLite + FTS5 + local embeddings + MCP."
 authors = [{ name = "Liza Studio" }]
 license = "Apache-2.0"

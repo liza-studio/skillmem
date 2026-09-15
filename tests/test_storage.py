@@ -113,3 +113,31 @@ def test_sweep_lifecycle_safe_inside_tx(conn):
         sweep_lifecycle(conn)
         restore_skill(conn, "tx-skill")
         assert conn.in_transaction, "helper committed the outer transaction"
+
+
+def test_lexical_query_splits_paths_into_words(conn, monkeypatch):
+    """A file path must match lexically, with no embedder in the picture.
+
+    tool-recall passes the edited file's path as the query. Splitting only on
+    whitespace made "/work/analysis.ipynb" a single phrase token that matched
+    nothing, so on a plain `pip install skillmem` (no semantic extra) recall was
+    silently dead for every Edit / Write / NotebookEdit.
+    """
+    monkeypatch.setenv("MEM_SEMANTIC", "0")     # BM25 only, as in CI and by default
+    S.upsert(conn, S.MemoryItem(
+        slug="skill-notebook", kind="skill",
+        title="Прогон ноутбука analysis.ipynb перед деплоем",
+        body="trigger: правки в analysis.ipynb; steps: прогнать все ячейки."))
+    S.upsert(conn, S.MemoryItem(
+        slug="skill-db-py", kind="skill",
+        title="Правки в liza/db.py требуют миграции",
+        body="trigger: меняешь db.py; steps: сначала схема."))
+    conn.commit()
+    for query, expected in (
+        ("/work/analysis.ipynb", "skill-notebook"),
+        ("analysis.ipynb", "skill-notebook"),
+        ("/root/liza-v3/liza/db.py", "skill-db-py"),
+    ):
+        hits = [r["slug"] for r in S.recall_skills(conn, query, limit=3,
+                                                   auto_reinforce=False)]
+        assert expected in hits, f"{query!r} found {hits}"

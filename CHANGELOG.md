@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.10.1
+## 0.10.2
+
+- **Lexical recall on a file path was dead without the semantic extra.** The FTS
+  query was split on whitespace, so `/work/analysis.ipynb` became a single phrase
+  token that matched nothing — and `tool-recall` passes the edited file's path as
+  its query. On a plain `pip install skillmem` (BM25 only, the default) that meant
+  no recall at all for Edit, Write or NotebookEdit. Queries are now tokenised the
+  way the index is, and the test runs with the embedder disabled so CI catches a
+  regression instead of the semantic layer hiding it.
+
 
 Documentation and listing metadata only — no code change.
 
