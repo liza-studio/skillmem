@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.10.0
+## 0.10.1
+
+Documentation and listing metadata only — no code change.
+
+- The README explains what 0.10.0 changed and how this differs from the memory
+  products built for conversational or user memory, with the measured retrieval
+  numbers next to the claim. The PyPI page renders the README, so it needed a
+  release to catch up.
+- `server.json` (MCP Registry), `plugin.json` and `.claude-plugin/plugin.json`
+  were still pinned at 0.9.2 — the registry entry would have pointed installers
+  at a version that still contains the recursion fixed in 0.9.3.
+- The hooks table documents the SessionEnd recap, the rate limit, and the frame
+  around unapproved memory; the tool count reads 9, as it has been since 0.9.x.
+
 
 **Memory now carries where it came from, and trust is something the owner grants.**
 

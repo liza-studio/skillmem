@@ -2,19 +2,19 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.liza-studio/skillmem",
   "title": "skillmem",
-  "description": "Self-improving skill memory for coding agents: learn, recall, reinforce, decay. Local, no cloud.",
+  "description": "Self-improving skill memory for coding agents: learn, recall, reinforce, decay — with provenance on every memory and trust only the owner grants. Local SQLite, no API key, no cloud.",
   "repository": {
     "url": "https://github.com/liza-studio/skillmem",
     "source": "github"
   },
   "websiteUrl": "https://skillmem.dev",
-  "version": "0.9.2",
+  "version": "0.10.1",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "skillmem",
-      "version": "0.9.2",
+      "version": "0.10.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
