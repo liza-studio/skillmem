@@ -1,0 +1,41 @@
+name: mcp-registry
+
+# The official MCP Registry is the canonical index for MCP servers, and several
+# third-party directories pull from it. Publishing by hand needs an interactive
+# device-code login, which means it silently rots; this runs as the repository
+# itself via GitHub OIDC, so every tag keeps the listing honest.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC — no stored registry credential
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check server.json points at the tag
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          d = json.load(open("server.json"))
+          tag = os.environ.get("GITHUB_REF_NAME", "")
+          want = tag[1:] if tag.startswith("v") else tag
+          got = {d.get("version")} | {p.get("version") for p in d.get("packages", [])}
+          if want and got != {want}:
+              sys.exit(f"server.json says {got}, tag says {want} — refusing to "
+                       "advertise a version the registry cannot install")
+          print("server.json and the tag agree:", want or d.get("version"))
+          PY
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher --version
+      - name: Publish
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
