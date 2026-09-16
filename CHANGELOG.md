@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.10.5
+## 0.10.6
+
+- **Tool descriptions say what the tool does TO you, not just what it is for.**
+  A directory's automated review scored our descriptions and the gaps were fair:
+  side effects, parameter constraints and "when not to use this" were missing.
+  Now `mem_recall` states plainly that it marks what it returns (refreshing
+  recency, never strength); `mem_learn` and `mem_write` say they arrive
+  unapproved until the owner runs `skillmem trust`; `mem_update` says that
+  editing text drops the approval with it; every read-only tool says so; each
+  one names its defaults and points at the tool you should use instead. An agent
+  reading only the tool list can now get these right first try.
+
 
 - **The MCP server reports its own version.** `serverInfo` carried the SDK's
   version (`1.30.0`), so a registry listing or a client's debug output told anyone
