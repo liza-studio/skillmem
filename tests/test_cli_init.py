@@ -186,3 +186,68 @@ def test_init_rewrites_hooks_from_another_venv_instead_of_doubling(fakehome: Pat
     assert "/old/venv/bin/skillmem hook foreign-thing" in after  # untouched
     assert not any(c.endswith("/old/venv/bin/skillmem hook session-recap") for c in after)
     assert sum(c.endswith("hook session-recap") for c in after) == sum(c.endswith("hook session-recap") for c in before)
+
+
+def _hook_cmds(settings):
+    return [h["command"] for g in settings["hooks"].values() for grp in g for h in grp["hooks"]]
+
+
+def test_init_repairs_an_already_doubled_install(fakehome: Path):
+    """Two copies of the same hook (old venv + new, or old + old) collapse to one."""
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
+    settings_json = fakehome / ".claude" / "settings.json"
+    settings = json.loads(settings_json.read_text())
+    stop = settings["hooks"]["Stop"]
+    stop.insert(0, {"hooks": [{"type": "command", "command": "/old/venv/bin/skillmem hook session-recap", "timeout": 10}]})
+    stop.append({"hooks": [{"type": "command", "command": "/old2/venv/bin/skillmem hook session-recap"}]})
+    settings_json.write_text(json.dumps(settings))
+    _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
+    stop = json.loads(settings_json.read_text())["hooks"]["Stop"]
+    recaps = [h["command"] for g in stop for h in g["hooks"] if h["command"].endswith("hook session-recap")]
+    assert len(recaps) == 1 and "/old" not in recaps[0]     # SessionEnd keeps its own copy
+    assert stop and all(g["hooks"] for g in stop)            # no empty groups left
+
+
+def test_init_does_not_mistake_a_differently_scoped_hook_for_ours(fakehome: Path):
+    """A tool-recall hook the user scoped to `Read` is neither repointed nor counted as present."""
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    settings_json = fakehome / ".claude" / "settings.json"
+    settings_json.parent.mkdir(parents=True, exist_ok=True)
+    settings_json.write_text(json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": "Read", "hooks": [{"type": "command", "command": "/old/venv/bin/skillmem hook tool-recall"}]}]}}))
+    _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
+    pre = json.loads(settings_json.read_text())["hooks"]["PreToolUse"]
+    by_matcher = {g["matcher"]: g["hooks"][0]["command"] for g in pre}
+    assert by_matcher["Read"] == "/old/venv/bin/skillmem hook tool-recall"
+    assert by_matcher["Bash|Edit|Write|NotebookEdit"].endswith("skillmem hook tool-recall")
+    assert "/old/" not in by_matcher["Bash|Edit|Write|NotebookEdit"]
+
+
+def test_init_repoints_the_mcp_entry_with_the_hooks(fakehome: Path):
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    claude_json = fakehome / ".claude.json"
+    claude_json.write_text(json.dumps({"mcpServers": {
+        "skillmem": {"command": "/old/venv/bin/skillmem-mcp", "args": [], "env": {"X": "1"}},
+        "other": {"command": "/old/venv/bin/skillmem-mcp"}}}))
+    _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
+    servers = json.loads(claude_json.read_text())["mcpServers"]
+    assert servers["skillmem"]["command"] == mcp
+    assert servers["skillmem"]["env"] == {"X": "1"}
+    assert servers["other"]["command"] == "/old/venv/bin/skillmem-mcp"   # not ours
+
+
+def test_settings_backups_do_not_overwrite_each_other_within_a_second(fakehome: Path, monkeypatch):
+    import time
+    from skillmem import cli as _cli
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.4)   # helpers do `import time as _time`
+    settings_json = fakehome / ".claude" / "settings.json"
+    settings_json.parent.mkdir(parents=True, exist_ok=True)
+    original = json.dumps({"permissions": {"deny": []}, "hooks": {}})
+    settings_json.write_text(original)
+    _cli._patch_settings_deny(settings_json, "Bash(skillmem trust*)")
+    _cli._patch_settings_hook(settings_json, Path("/v/bin/skillmem"), event="Stop", args=["hook", "a"])
+    _cli._patch_settings_hook(settings_json, Path("/v/bin/skillmem"), event="Stop", args=["hook", "b"])
+    backups = sorted(settings_json.parent.glob("settings.json.bak.*"))
+    assert len(backups) == 3
+    assert backups[0].read_text() == original

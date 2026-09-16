@@ -515,6 +515,17 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+
+def _fresh(path: Path) -> Path:
+    """``path`` if free, else ``path.1``, ``path.2``…: init runs several helpers
+    within one second and each used to name its backup by the second — the
+    last one silently overwrote the only copy of the original."""
+    cand, n = path, 1
+    while cand.exists():
+        cand = path.with_name(f"{path.name}.{n}")
+        n += 1
+    return cand
+
 def _patch_claude_json(
     claude_json: Path,
     mcp_binary: Path,
@@ -531,7 +542,7 @@ def _patch_claude_json(
     backup: Path | None = None
     if claude_json.exists():
         raw = claude_json.read_text(encoding="utf-8")
-        backup = claude_json.with_suffix(f".json.bak.{int(_time.time())}")
+        backup = _fresh(claude_json.with_suffix(f".json.bak.{int(_time.time())}"))
         backup.write_text(raw, encoding="utf-8")
         try:
             data = json.loads(raw) if raw.strip() else {}
@@ -555,10 +566,18 @@ def _patch_claude_json(
         env = entry.get("env")
         if not isinstance(env, dict):
             env = entry["env"] = {}   # a hand-edited null/list/string env: replace, not crash
+        added: list[str] = []
         if db_env and env.get("SKILLMEM_DB") != db_env:
             env["SKILLMEM_DB"] = db_env
+            added.append(f"env.SKILLMEM_DB={db_env}")
+        cmd = entry.get("command")
+        if (isinstance(cmd, str) and cmd != str(mcp_binary)
+                and Path(cmd.strip('"')).name.lower() in ("skillmem-mcp", "skillmem-mcp.exe")):
+            entry["command"] = str(mcp_binary)   # the hooks follow the venv; so must the server
+            added.append(f"command={mcp_binary}")
+        if added:
             _atomic_write_json(claude_json, data)
-            return {"changed": True, "added": f"mcpServers.skillmem.env.SKILLMEM_DB={db_env}",
+            return {"changed": True, "added": "mcpServers.skillmem." + ", ".join(added),
                     "backup": str(backup) if backup else None}
         return {"changed": False, "reason": "skillmem MCP already configured",
                 "backup": str(backup) if backup else None}
@@ -598,7 +617,7 @@ def _read_json_config(path: Path) -> tuple[dict[str, Any], Path | None, str | No
     if not path.exists():
         return {}, None, None
     raw = path.read_text(encoding="utf-8")
-    backup = path.with_suffix(f"{path.suffix}.bak.{int(_time.time())}")
+    backup = _fresh(path.with_suffix(f"{path.suffix}.bak.{int(_time.time())}"))
     backup.write_text(raw, encoding="utf-8")
     try:
         return (json.loads(raw) if raw.strip() else {}), backup, None
@@ -804,7 +823,7 @@ def _patch_codex_config(
     backup: Path | None = None
     if config_toml.exists():
         raw = config_toml.read_bytes().decode("utf-8")   # keep CRLF as is
-        backup = config_toml.with_suffix(f".toml.bak.{int(_time.time())}")
+        backup = _fresh(config_toml.with_suffix(f".toml.bak.{int(_time.time())}"))
         backup.write_bytes(raw.encode("utf-8"))           # byte-exact, no newline translation
         try:
             parsed = tomllib.loads(raw)
@@ -919,7 +938,7 @@ def _unpatch_codex_config(config_toml: Path) -> dict[str, Any]:
     if got != expect:
         return {"changed": False, "reason": "could not remove [mcp_servers.skillmem] "
                 "cleanly; delete the table by hand", "backup": None}
-    backup = config_toml.with_suffix(f".toml.bak.{int(_time.time())}")
+    backup = _fresh(config_toml.with_suffix(f".toml.bak.{int(_time.time())}"))
     backup.write_bytes(raw.encode("utf-8"))
     _atomic_write_text(config_toml, new_raw)
     return {"changed": True, "removed": "mcp_servers.skillmem",
@@ -968,7 +987,7 @@ def _patch_settings_hook(
     backup: Path | None = None
     if settings_json.exists():
         raw = settings_json.read_text(encoding="utf-8")
-        backup = settings_json.with_suffix(f".json.bak.{int(_time.time())}")
+        backup = _fresh(settings_json.with_suffix(f".json.bak.{int(_time.time())}"))
         backup.write_text(raw, encoding="utf-8")
         try:
             data = json.loads(raw) if raw.strip() else {}
@@ -984,20 +1003,36 @@ def _patch_settings_hook(
     hooks = data.setdefault("hooks", {})
     event_hooks = hooks.setdefault(event, [])
     cmd_str = _hook_cmd(binary, args)
+    want = list(args)
+    matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for group in event_hooks:
+        if not isinstance(group, dict) or (group.get("matcher") or None) != (matcher or None):
+            continue                       # a differently scoped hook is not this one
         for h in group.get("hooks", []) or []:
-            cmd = h.get("command", "")
-            if cmd == cmd_str:
-                return {"changed": False,
-                        "reason": f"{event} hook already present: {' '.join(args)}",
-                        "backup": str(backup) if backup else None}
-            argv = _skillmem_argv(cmd)
-            if argv is not None and argv[1:] == list(args):
-                h["command"] = cmd_str
-                _atomic_write_json(settings_json, data)
-                return {"changed": True,
-                        "updated": f"hooks.{event}: {' '.join(args)} now runs {binary}",
-                        "backup": str(backup) if backup else None}
+            if not isinstance(h, dict) or not isinstance(h.get("command"), str):
+                continue
+            argv = _skillmem_argv(h["command"])
+            if h["command"] == cmd_str or (argv is not None and argv[1:] == want):
+                matches.append((group, h))
+    if matches:
+        keep_group, keep = matches[0]
+        repointed = keep["command"] != cmd_str
+        if repointed:
+            keep["command"] = cmd_str
+            keep["timeout"] = timeout
+        for group, h in matches[1:]:       # the same hook wired twice runs twice
+            group["hooks"].remove(h)
+        event_hooks[:] = [g for g in event_hooks if not isinstance(g, dict) or g.get("hooks")]
+        if not repointed and len(matches) == 1:
+            return {"changed": False,
+                    "reason": f"{event} hook already present: {' '.join(args)}",
+                    "backup": str(backup) if backup else None}
+        _atomic_write_json(settings_json, data)
+        what = f"runs {binary}" if repointed else "kept"
+        if len(matches) > 1:
+            what += f", {len(matches) - 1} duplicate(s) removed"
+        return {"changed": True, "updated": f"hooks.{event}: {' '.join(args)} — {what}",
+                "backup": str(backup) if backup else None}
     group: dict[str, Any] = {
         "hooks": [{"type": "command", "command": cmd_str, "timeout": timeout}]
     }
@@ -1073,7 +1108,7 @@ def _prune_settings_hook(settings_json: Path, *, command_prefix: str) -> dict[st
     if not removed:
         return {"changed": False, "reason": f"no '{command_prefix}' hook present"}
     import time as _time
-    backup = settings_json.with_suffix(f".json.bak.{int(_time.time())}")
+    backup = _fresh(settings_json.with_suffix(f".json.bak.{int(_time.time())}"))
     backup.write_text(settings_json.read_text(encoding="utf-8"), encoding="utf-8")
     _atomic_write_json(settings_json, data)
     return {"changed": True, "removed": f"{removed} hook(s) running '{command_prefix}'",
@@ -1100,9 +1135,15 @@ def _patch_settings_deny(settings_json: Path, rule: str) -> dict[str, Any]:
     deny = perms.setdefault("deny", [])
     if rule in deny:
         return {"changed": False, "reason": f"deny rule already present: {rule}"}
+    backup: Path | None = None
+    if settings_json.exists():
+        import time as _time
+        backup = _fresh(settings_json.with_suffix(f".json.bak.{int(_time.time())}"))
+        backup.write_bytes(settings_json.read_bytes())
     deny.append(rule)
     _atomic_write_json(settings_json, data)
-    return {"changed": True, "added": f"permissions.deny: {rule}"}
+    return {"changed": True, "added": f"permissions.deny: {rule}",
+            "backup": str(backup) if backup else None}
 
 
 @main.command()
@@ -1295,7 +1336,7 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
             try:
                 data = json.loads(claude_json.read_text(encoding="utf-8"))
                 if "mcpServers" in data and "skillmem" in data["mcpServers"]:
-                    backup = claude_json.with_suffix(f".json.bak.{int(_time.time())}")
+                    backup = _fresh(claude_json.with_suffix(f".json.bak.{int(_time.time())}"))
                     backup.write_text(claude_json.read_text(encoding="utf-8"))
                     del data["mcpServers"]["skillmem"]
                     if not data["mcpServers"]:
@@ -1329,7 +1370,7 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
                         data["hooks"].pop(event, None)
                         changed = True
                 if changed:
-                    backup = settings_json.with_suffix(f".json.bak.{int(_time.time())}")
+                    backup = _fresh(settings_json.with_suffix(f".json.bak.{int(_time.time())}"))
                     backup.write_text(settings_json.read_text(encoding="utf-8"))
                     _atomic_write_json(settings_json, data)
                     report["removed"].append(f"hooks pointing to skillmem (backup: {backup})")
