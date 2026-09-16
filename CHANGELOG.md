@@ -137,10 +137,10 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
 - `/update` and `mem_update` mark the rewritten text `origin=agent`: an
   owner-authored row edited by an agent kept `origin=owner`, so the owner
   would re-trust words they never wrote (approval was already dropped).
-- `skillmem pack remove` soft-deletes only the rows the import wrote — the
-  ones whose slug carries the `pack-<name>-` prefix under project
-  `pack:<name>`, edited or not; a user's own note filed under `pack:<name>`
-  used to go with it.
+- `skillmem skills rm <pack>` soft-deletes only the rows the import wrote —
+  the ones whose slug carries the `pack-<name>-` prefix under project
+  `pack:<name>` and are not `origin=owner`, edited by an agent or not; a
+  user's own note filed under `pack:<name>` used to go with it.
 - Dump file names: a clean slug that already ends in `__<8 hex>` gets its own
   hash too, so it cannot share a file with the sanitised form of another slug
   (one of the two records was silently missing from the dump).

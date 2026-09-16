@@ -318,15 +318,16 @@ def list_packs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def remove_pack(conn: sqlite3.Connection, pack: str, *, reason: str) -> list[str]:
     """Soft-delete every skill imported from ``pack`` (history is kept).
 
-    Only rows the import wrote: their slug carries the pack prefix the import
-    assigns and nothing else does (a user's own note filed under the same
-    project used to be removed with the pack). The slug survives every edit
-    channel; ``agent`` does not (MCP rewrites it), so it is not the key.
+    Only rows the import wrote: project ``pack:<name>`` plus the slug prefix
+    the import assigns, and never ``origin = owner`` — a user's own note filed
+    under the same project (even one deliberately named like a pack skill)
+    stays. The slug survives every edit channel; ``agent`` does not (MCP
+    rewrites it), so it is not the key.
     """
     prefix = f"pack-{pack}-"
     rows = conn.execute(
         "SELECT slug FROM memory_items WHERE project = ? AND slug LIKE ? ESCAPE '\\' "
-        "AND deleted_at IS NULL",
+        "AND origin <> 'owner' AND deleted_at IS NULL",
         (f"pack:{pack}", prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"),
     ).fetchall()
     removed = []

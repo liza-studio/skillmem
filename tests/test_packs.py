@@ -165,3 +165,12 @@ def test_remove_pack_still_removes_a_skill_edited_over_mcp(conn, pack_dir: Path,
     S.upsert(conn, row, reason="agent edit")
     removed = P.remove_pack(conn, "somepack", reason="test")
     assert sorted(removed) == ["pack-somepack-deep", "pack-somepack-lazy"]
+
+
+def test_remove_pack_keeps_an_owner_note_even_when_it_copies_the_pack_naming(conn, pack_dir: Path):
+    S.upsert(conn, S.MemoryItem(slug="pack-somepack-mine", kind="note", title="mine", body="my own words",
+                                project="pack:somepack", agent="me", origin="owner"))
+    P.import_pack(conn, str(pack_dir))
+    removed = P.remove_pack(conn, "somepack", reason="test")
+    assert "pack-somepack-mine" not in removed and len(removed) == 2
+    assert S.get(conn, "pack-somepack-mine").deleted_at is None
