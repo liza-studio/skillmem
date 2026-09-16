@@ -122,12 +122,15 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   DB, its `-wal`/`-shm`, its namespaced body files and the legacy-named
   files it references (a second database referencing the same legacy file
   loses it — split them first).
-- HTTP `/write` with `check_conflicts` reported duplicate candidates from every
-  agent's records, private ones included — a 409 that quotes another agent's
-  private title is a read through the trust boundary. Candidates are now
-  filtered by what the writer may read (MCP is one principal; unchanged).
+- HTTP `/write` and `/learn` with `check_conflicts` reported duplicate
+  candidates from every agent's records, private ones included — a 409 that
+  quotes another agent's private title is a read through the trust boundary.
+  Candidates are now the top BM25 matches *among the records the writer may
+  read* (the window is widened before filtering, so hidden rows cannot crowd
+  out the writer's own duplicate). MCP is one principal; unchanged.
 - A same-text write that changes `ttl_days` now moves `freshness_until` with
-  it; before, the new TTL was stored and the deadline never came.
+  it, and an explicit `ttl_days: null` clears both; before, the new TTL was
+  stored and the deadline never came. Re-sending the same TTL does not renew.
 - `/update` and `mem_update` mark the rewritten text `origin=agent`: an
   owner-authored row edited by an agent kept `origin=owner`, so the owner
   would re-trust words they never wrote (approval was already dropped).

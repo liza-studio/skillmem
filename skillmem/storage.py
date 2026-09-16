@@ -1254,6 +1254,8 @@ def upsert(
         else:
             changed = {k: v for k, v in meta.items()
                        if k in explicit and v is not None and v != existing[k]}
+            if "ttl_days" in explicit and item.ttl_days is None and existing["ttl_days"] is not None:
+                changed["ttl_days"] = None    # an explicit null clears the TTL (HTTP sends it as such)
         tags, topics = _json_list(item.tags), _json_list(item.topics)
         tags_given = ("tags" in explicit) if explicit is not None else bool(item.tags)
         topics_given = ("topics" in explicit) if explicit is not None else bool(item.topics)
@@ -1948,7 +1950,10 @@ def find_conflicts(
             "JOIN memory_items m ON m.id = mem_fts_stem.rowid "
             "WHERE mem_fts_stem MATCH ? AND m.deleted_at IS NULL "
             "ORDER BY bm25(mem_fts_stem) LIMIT ?",
-            (fts_query, candidates),
+            # the filter runs in Python, so the SQL window must be wider than
+            # the candidate count: five hidden rows used to fill it and the
+            # writer's own duplicate went unscored
+            (fts_query, candidates if visible is None else max(100, candidates * 20)),
         ).fetchall()
     except sqlite3.OperationalError as exc:
         # Log so a broken FTS index isn't silently treated as "no conflicts".
@@ -1956,6 +1961,7 @@ def find_conflicts(
         return []
 
     conflicts: list[dict[str, Any]] = []
+    scored = 0
     for row in rows:
         if exclude_slug and row["slug"] == exclude_slug:
             continue
@@ -1964,6 +1970,9 @@ def find_conflicts(
             "topics": _parse_json_list(row["topics"]),
         }):
             continue
+        if scored >= candidates:          # the top-N *visible* by BM25, as before the filter
+            break
+        scored += 1
         other = _word_bag(row["title"] + "\n" + row["body"])
         if not other:
             continue

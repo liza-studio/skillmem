@@ -267,3 +267,40 @@ def test_update_by_an_agent_marks_the_text_as_agent_written(client):
     assert r.status_code == 200, r.text
     row = S.get(conn, "owner-rule")
     assert row.origin == "agent" and row.agent == "alice"
+
+
+def test_learn_conflicts_are_filtered_like_write(client):
+    write(client, "alice", "private-acq", visibility="private", body=GENERIC)
+    r = client.post("/learn", headers=auth("bob"), json={
+        "slug": "bob-skill", "title": "deployment checklist", "trigger": GENERIC,
+        "steps": GENERIC, "outcome": "success", "visibility": "private",
+    })
+    assert r.status_code == 200, r.text
+    assert "private-acq" not in r.text
+
+
+def test_hidden_rows_do_not_crowd_out_the_writers_own_duplicate(client):
+    for i in range(5):
+        r = client.post("/write", headers=auth("carol"), json={
+            "slug": f"carol-priv-{i}", "title": "deployment checklist", "body": GENERIC,
+            "kind": "note", "visibility": "private", "check_conflicts": False})
+        assert r.status_code == 200
+    assert client.post("/write", headers=auth("bob"), json={
+        "slug": "bob-note", "title": "deployment checklist", "body": GENERIC,
+        "kind": "note", "visibility": "private", "check_conflicts": True}).status_code == 200
+    r = client.post("/write", headers=auth("bob"), json={
+        "slug": "bob-note-dup", "title": "deployment checklist", "body": GENERIC,
+        "kind": "note", "visibility": "private", "check_conflicts": True})
+    assert r.status_code == 409 and "bob-note" in r.text and "carol" not in r.text
+
+
+def test_same_text_write_with_null_ttl_clears_the_deadline(client):
+    body = "the very same words every time for this record"
+    client.post("/write", headers=auth("alice"), json={
+        "slug": "ttl-clear", "title": "t", "body": body, "kind": "note", "visibility": "private", "ttl_days": 3})
+    r = client.post("/write", headers=auth("alice"), json={
+        "slug": "ttl-clear", "title": "t", "body": body, "kind": "note", "visibility": "private", "ttl_days": None})
+    assert r.status_code == 200, r.text
+    from skillmem import storage as S
+    row = S.get(S.connect(_db_of(client)), "ttl-clear")
+    assert row.ttl_days is None and row.freshness_until is None
