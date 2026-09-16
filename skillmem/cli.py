@@ -555,10 +555,10 @@ def _patch_claude_json(
 ) -> dict[str, Any]:
     """Add a ``mcpServers.skillmem`` entry to ~/.claude.json.
 
-    Reads → backups → writes atomically. If the existing JSON is corrupt,
-    logs a clear warning and refuses to overwrite (user reviews the .bak).
+    Reads → (backup only if something changes) → writes atomically. If the
+    existing JSON is corrupt, warns and refuses to touch the file — no backup,
+    nothing was written.
     """
-    import time as _time
     data: dict[str, Any] = {}
     raw = ""
     if claude_json.exists():
@@ -840,7 +840,6 @@ def _patch_codex_config(
     ``SKILLMEM_AGENT`` marks every skill Codex writes, so authorship stays
     visible in a database shared with Claude Code.
     """
-    import time as _time
     import tomllib
 
     raw = ""
@@ -911,7 +910,6 @@ def _unpatch_codex_config(config_toml: Path) -> dict[str, Any]:
     tables and their sub-tables, leave every other line (comments included)
     exactly where the user put it.
     """
-    import time as _time
     import tomllib
 
     if not config_toml.exists():
@@ -998,7 +996,6 @@ def _patch_settings_hook(
     is rewritten in place rather than doubled — a doubled Stop hook would
     recap every session twice.
     """
-    import time as _time
     data: dict[str, Any] = {}
     raw = ""
     if settings_json.exists():
@@ -1098,7 +1095,7 @@ def _prune_settings_hook(settings_json: Path, *, command_prefix: str) -> dict[st
     if not settings_json.exists():
         return {"changed": False, "reason": "no settings.json"}
     try:
-        data = json.loads(settings_json.read_text(encoding="utf-8") or "{}")
+        data = json.loads(settings_json.read_text(encoding="utf-8").strip() or "{}")
     except json.JSONDecodeError:
         return {"changed": False, "reason": "existing JSON is invalid"}
     hooks = data.get("hooks")
@@ -1128,7 +1125,6 @@ def _prune_settings_hook(settings_json: Path, *, command_prefix: str) -> dict[st
             del hooks[event]
     if not removed:
         return {"changed": False, "reason": f"no '{command_prefix}' hook present"}
-    import time as _time
     backup = _backup_file(settings_json)
     _atomic_write_json(settings_json, data)
     return {"changed": True, "removed": f"{removed} hook(s) running '{command_prefix}'",
@@ -1146,7 +1142,7 @@ def _patch_settings_deny(settings_json: Path, rule: str) -> dict[str, Any]:
     data: dict[str, Any] = {}
     if settings_json.exists():
         try:
-            data = json.loads(settings_json.read_text(encoding="utf-8") or "{}")
+            data = json.loads(settings_json.read_text(encoding="utf-8").strip() or "{}")
         except json.JSONDecodeError:
             return {"changed": False, "reason": "existing JSON is invalid"}
     perms = data.setdefault("permissions", {})
@@ -1157,7 +1153,6 @@ def _patch_settings_deny(settings_json: Path, rule: str) -> dict[str, Any]:
         return {"changed": False, "reason": f"deny rule already present: {rule}"}
     backup: Path | None = None
     if settings_json.exists():
-        import time as _time
         backup = _backup_file(settings_json)
     deny.append(rule)
     _atomic_write_json(settings_json, data)
@@ -1346,7 +1341,6 @@ def init(
 def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
                editors: bool, keep_db: bool) -> None:
     """Reverse `skillmem init`: remove MCP entry + hook. DB stays unless --purge-db."""
-    import time as _time
     report: dict[str, Any] = {"removed": [], "warnings": []}
 
     if claude_code:
