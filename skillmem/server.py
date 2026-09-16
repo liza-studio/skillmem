@@ -102,23 +102,6 @@ class TokenStore:
 # --------------------------------------------------------------------------- #
 
 
-def _visible_page(fetch: Any, agent: "AgentIdentity", limit: int) -> list[Any]:
-    """``limit`` visible rows in rank order, or every visible row if fewer.
-
-    ``fetch(n)`` returns the top-n rows of the underlying query. Filtering a
-    fixed page let hidden rows crowd visible ones out of search/list/recall
-    — 110 of another agent's records and the caller's own came back as an
-    empty 200 — so the page widens until the source is exhausted.
-    """
-    n = limit
-    while True:
-        rows = fetch(n)
-        visible = [r for r in rows if _visible_to(r, agent)]
-        if len(visible) >= limit or len(rows) < n:
-            return visible[:limit]
-        n *= 4
-
-
 def _visible_to(row: dict[str, Any] | S.MemoryItem, agent: AgentIdentity) -> bool:
     if agent.is_master:
         return True
@@ -260,10 +243,11 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
     @app.post("/search")
     def search(req: SearchRequest, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
         conn = get_conn()
-        hits = _visible_page(
-            lambda n: S.search(conn, req.query, kind=req.kind, project=req.project, limit=n),
-            agent, req.limit)
-        filtered = [frame_for_model(h, dict(h)) for h in hits]
+        # the filter runs inside the ranking: a fixed page let hidden rows
+        # crowd the caller's own record out; the post-check stays as a belt
+        hits = S.search(conn, req.query, kind=req.kind, project=req.project, limit=req.limit,
+                        visible=lambda m: _visible_to(m, agent))
+        filtered = [frame_for_model(h, dict(h)) for h in hits if _visible_to(h, agent)]
         return {"count": len(filtered), "results": filtered, "agent": agent.name}
 
     @app.get("/get/{slug}")
@@ -290,9 +274,9 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
     @app.post("/list")
     def list_(req: ListRequest, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
         conn = get_conn()
-        visible = _visible_page(
-            lambda n: S.list_items(conn, kind=req.kind, project=req.project, limit=n),
-            agent, req.limit)
+        items = S.list_items(conn, kind=req.kind, project=req.project, limit=req.limit,
+                             visible=lambda m: _visible_to(m, agent))
+        visible = [i for i in items if _visible_to(i, agent)]
         return {
             "count": len(visible),
             "items": [
@@ -461,9 +445,9 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         # Reinforce AFTER the visibility filter: bumping strength on a skill the
         # caller may not see is both a side effect they should not be able to
         # trigger and a covert channel into someone else's memory.
-        visible = _visible_page(
-            lambda n: S.recall_skills(conn, req.query, limit=n, auto_reinforce=False),
-            agent, req.limit)
+        results = S.recall_skills(conn, req.query, limit=req.limit, auto_reinforce=False,
+                                  visible=lambda m: _visible_to(m, agent))
+        visible = [r for r in results if _visible_to(r, agent)]
         if req.auto_reinforce:
             for r in visible:
                 bumped = S.reinforce(conn, r["slug"])

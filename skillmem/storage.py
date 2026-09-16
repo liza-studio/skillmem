@@ -1622,6 +1622,7 @@ def list_items(
     project: str | None = None,
     limit: int = 50,
     recent: bool = True,
+    visible: Callable[[dict[str, Any]], bool] | None = None,
 ) -> list[MemoryItem]:
     if kind:
         try:
@@ -1637,10 +1638,28 @@ def list_items(
         where.append("project = ?")
         params.append(project)
     order = "updated_at DESC" if recent else "slug ASC"
-    sql = f"SELECT * FROM memory_items WHERE {' AND '.join(where)} ORDER BY {order} LIMIT ?"
-    params.append(limit)
-    rows = conn.execute(sql, params).fetchall()
-    return [MemoryItem.from_row(r) for r in rows]
+    if visible is None:
+        sql = f"SELECT * FROM memory_items WHERE {' AND '.join(where)} ORDER BY {order} LIMIT ?"
+        rows = conn.execute(sql, [*params, limit]).fetchall()
+        return [MemoryItem.from_row(r) for r in rows]
+    # a filtered listing walks the order on narrow columns and stops at the
+    # first `limit` rows the caller may see; full rows are read only for those
+    cur = conn.execute(
+        f"SELECT id, visibility, topics, agent FROM memory_items "
+        f"WHERE {' AND '.join(where)} ORDER BY {order}", params)
+    keep: list[int] = []
+    for r in cur:
+        if visible({"visibility": r["visibility"], "agent": r["agent"],
+                    "topics": _parse_json_list(r["topics"])}):
+            keep.append(r["id"])
+            if len(keep) >= limit:
+                cur.close()
+                break
+    if not keep:
+        return []
+    fetched = {r["id"]: r for r in conn.execute(
+        f"SELECT * FROM memory_items WHERE id IN ({','.join('?' * len(keep))})", keep).fetchall()}
+    return [MemoryItem.from_row(fetched[i]) for i in keep if i in fetched]
 
 
 def _escape_fts(query: str) -> str:
@@ -1744,10 +1763,13 @@ def _bm25_ids(
     *,
     kind: str | None = None,
     project: str | None = None,
-    pool: int = _CANDIDATE_POOL,
+    pool: int | None = _CANDIDATE_POOL,
     exclude_kinds: tuple[str, ...] = (),
 ) -> list[int]:
-    """Lexical candidate ids, best-first, from the stemmed FTS5 index."""
+    """Lexical candidate ids, best-first, from the stemmed FTS5 index.
+
+    ``pool=None`` returns every match (a visibility-filtered caller ranks
+    once and takes what it may see)."""
     kind_clause = "AND m.kind = ?" if kind else ""
     project_clause = "AND m.project = ?" if project else ""
     # Excluding kinds AFTER the candidate pool would drop the answer: the pool is
@@ -1774,7 +1796,7 @@ def _bm25_ids(
     if project:
         params.append(project)
     params.extend(exclude_kinds)
-    params.append(pool)
+    params.append(-1 if pool is None else pool)
     return [row["id"] for row in conn.execute(sql, params).fetchall()]
 
 
@@ -1784,7 +1806,7 @@ def _vector_ids(
     *,
     kind: str | None = None,
     project: str | None = None,
-    pool: int = _CANDIDATE_POOL,
+    pool: int | None = _CANDIDATE_POOL,
     exclude_kinds: tuple[str, ...] = (),
 ) -> list[int]:
     """Semantic candidate ids, best-first, via brute-force cosine.
@@ -1826,8 +1848,41 @@ def _vector_ids(
     ids = [r["id"] for r in rows]
     mat = np.stack([np.frombuffer(r["embedding"], dtype="float32") for r in rows])
     sims = mat @ q                       # both sides pre-normalized -> cosine
-    order = np.argsort(-sims)[:pool]
+    order = np.argsort(-sims) if pool is None else np.argsort(-sims)[:pool]
     return [ids[int(i)] for i in order if float(sims[int(i)]) >= _MIN_COSINE]
+
+
+def _keep_visible(
+    conn: sqlite3.Connection,
+    ids: list[int],
+    visible: Callable[[dict[str, Any]], bool] | None,
+    limit: int,
+) -> list[int]:
+    """The first ``limit`` of ``ids`` (rank order kept) that ``visible`` accepts.
+
+    One narrow query per 500 ids — visibility, topics and agent only — so a
+    caller who may see nothing costs one ranking pass and no body reads. The
+    HTTP layer used to widen its page 5→20→80→… re-ranking and re-fetching
+    full rows each time; with 9k hidden rows that was ~16k rows of bodies.
+    """
+    if visible is None:
+        return ids[:limit]
+    out: list[int] = []
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        rows = conn.execute(
+            f"SELECT id, visibility, topics, agent FROM memory_items "
+            f"WHERE id IN ({','.join('?' * len(chunk))})", chunk,
+        ).fetchall()
+        meta = {r["id"]: {"visibility": r["visibility"], "agent": r["agent"],
+                          "topics": _parse_json_list(r["topics"])} for r in rows}
+        for i in chunk:
+            m = meta.get(i)
+            if m is not None and visible(m):
+                out.append(i)
+                if len(out) >= limit:
+                    return out
+    return out
 
 
 def _rrf_scores(*ranked_lists: list[int]) -> dict[int, float]:
@@ -1847,21 +1902,26 @@ def hybrid_rank_ids(
     project: str | None = None,
     limit: int = 10,
     exclude_kinds: tuple[str, ...] = (),
+    visible: Callable[[dict[str, Any]], bool] | None = None,
 ) -> list[int]:
-    """Fused id ranking. Falls back to pure BM25 when no vector signal."""
-    # each signal contributes a pool of candidates; a page larger than the
-    # pool (the HTTP layer widens its page past hidden rows) must widen the
-    # pool with it, or rows past position 50 can never be returned
-    pool = max(_CANDIDATE_POOL, limit)
+    """Fused id ranking. Falls back to pure BM25 when no vector signal.
+
+    With ``visible`` every match is ranked once and the first ``limit`` ids
+    the predicate accepts are returned — a fixed candidate pool let hidden
+    rows crowd a caller's own record out of the page entirely.
+    """
+    # unfiltered callers keep the fixed pool: RRF over a pool that grows with
+    # the limit is not prefix-stable (top-5 at limit 5 != top-5 at limit 100)
+    pool = None if visible is not None else _CANDIDATE_POOL
     bm = _bm25_ids(conn, query, kind=kind, project=project,
                    exclude_kinds=exclude_kinds, pool=pool)
     vec = _vector_ids(conn, query, kind=kind, project=project,
                       exclude_kinds=exclude_kinds, pool=pool)
     if not vec:
-        return bm[:limit]
+        return _keep_visible(conn, bm, visible, limit)
     scores = _rrf_scores(bm, vec)
     ordered = sorted(scores, key=lambda i: -scores[i])
-    return ordered[:limit]
+    return _keep_visible(conn, ordered, visible, limit)
 
 
 def search(
@@ -1872,6 +1932,7 @@ def search(
     project: str | None = None,
     limit: int = 10,
     exclude_kinds: tuple[str, ...] = (),
+    visible: Callable[[dict[str, Any]], bool] | None = None,
 ) -> list[dict[str, Any]]:
     if kind:
         try:
@@ -1879,7 +1940,7 @@ def search(
         except ValueError:
             return []                 # a filter nothing can match matches nothing
     ids = hybrid_rank_ids(conn, query, kind=kind, project=project, limit=limit,
-                          exclude_kinds=exclude_kinds)
+                          exclude_kinds=exclude_kinds, visible=visible)
     if not ids:
         return []
     placeholders = ",".join("?" * len(ids))
@@ -2416,6 +2477,7 @@ def recall_skills(
     *,
     limit: int = 5,
     auto_reinforce: bool = True,
+    visible: Callable[[dict[str, Any]], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Find relevant skills for a task, optionally reinforcing them.
 
@@ -2423,7 +2485,7 @@ def recall_skills(
     (``SKILL_STRENGTH_COEF``) so frequently-useful skills surface higher.
     Degrades to BM25-only when no embeddings are present (see hybrid_rank_ids).
     """
-    pool = max(_CANDIDATE_POOL, limit)      # a page wider than the pool must widen the pool
+    pool = None if visible is not None else _CANDIDATE_POOL
     bm = _bm25_ids(conn, query, kind="skill", pool=pool)
     vec = _vector_ids(conn, query, kind="skill", pool=pool)
     fused = _rrf_scores(bm, vec) if vec else {i: 1.0 / (RRF_K + r + 1) for r, i in enumerate(bm)}
@@ -2437,9 +2499,9 @@ def recall_skills(
             list(fused),
         ).fetchall()
     }
-    ranked_ids = sorted(
+    ranked_ids = _keep_visible(conn, sorted(
         fused, key=lambda i: -fused[i] * (1.0 + strength_by_id.get(i, 0.0) * SKILL_STRENGTH_COEF)
-    )[:limit]
+    ), visible, limit)
     placeholders = ",".join("?" * len(ranked_ids))
     fetched = {
         row["id"]: row
