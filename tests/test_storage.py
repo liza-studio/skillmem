@@ -183,3 +183,24 @@ def test_fresh_database_is_not_flagged_for_reindex(tmp_path, monkeypatch):
     conn = S.connect(tmp_path / "fresh.db")
     S.init_schema(conn)
     assert not S.lexical_reindex_pending(conn)
+
+
+def test_metadata_only_write_is_applied_not_silently_dropped(conn):
+    """Found by review: when the text was unchanged, upsert returned the old row
+    and reported success while the metadata change went nowhere. Approval must
+    survive (the words did not change), but the write has to land."""
+    S.upsert(conn, S.MemoryItem(slug="n-meta", kind="note", origin="owner",
+                                title="Заголовок", body="Тело"))
+    S.set_trust(conn, "n-meta", trusted=True)
+    conn.commit()
+
+    S.upsert(conn, S.MemoryItem(slug="n-meta", kind="note", origin="owner",
+                                title="Заголовок", body="Тело",
+                                project="liza", tags=["deploy"]),
+             reason="сменить проект")
+    conn.commit()
+
+    item = S.get(conn, "n-meta")
+    assert item.project == "liza", "metadata change was dropped"
+    assert "deploy" in item.tags
+    assert item.trusted_at is not None, "unchanged text must keep its approval"

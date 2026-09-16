@@ -282,3 +282,18 @@ def test_recall_refreshes_recency_but_never_strength(mcp, conn):
     after = S.get(conn, "skill-recency")
     assert after.strength == before, "auto_reinforce must not raise strength"
     assert after.access_count > 0, "but it should mark the skill as retrieved"
+
+
+def test_descriptions_do_not_overclaim_cross_language(mcp):
+    """Snowball stems within a language; it does not translate. Claiming that a
+    Russian query finds an English record without the semantic extra sold
+    behaviour the default install does not have."""
+    d = _desc(mcp, "mem_search")
+    assert "semantic" in d, "cross-language must be attributed to the semantic layer"
+    assert "so a query in one language finds a record written in the other" not in d
+
+
+def test_identical_rewrite_is_described_honestly(mcp):
+    """mem_write returns the existing record when the text is byte-identical
+    instead of raising — the description has to say so."""
+    assert "byte-identical" in _desc(mcp, "mem_write")

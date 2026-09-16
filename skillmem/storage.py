@@ -1028,6 +1028,30 @@ def upsert(
         return item
 
     if existing["content_hash"] == item.content_hash:
+        # Same text — no history entry, and the owner's approval survives because
+        # it was given to these words. But metadata may still have changed, and
+        # returning the old row unchanged reported success for a write that never
+        # happened.
+        meta = {
+            "project": item.project, "agent": item.agent,
+            "visibility": item.visibility, "kind": item.kind,
+            "ttl_days": item.ttl_days,
+        }
+        changed = {k: v for k, v in meta.items()
+                   if v is not None and v != existing[k]}
+        tags, topics = _json_list(item.tags), _json_list(item.topics)
+        if item.tags and tags != existing["tags"]:
+            changed["tags"] = tags
+        if item.topics and topics != existing["topics"]:
+            changed["topics"] = topics
+        if changed:
+            changed["updated_at"] = now
+            sets = ", ".join(f"{k} = ?" for k in changed)
+            conn.execute(f"UPDATE memory_items SET {sets} WHERE id = ?",
+                         (*changed.values(), existing["id"]))
+            if links is not None:
+                _replace_links_inner(conn, item.slug, links)
+            return get(conn, item.slug) or MemoryItem.from_row(existing)
         return MemoryItem.from_row(existing)
 
     if not reason and not force:

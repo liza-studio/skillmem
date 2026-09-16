@@ -1,6 +1,26 @@
 # Changelog
 
-## 0.10.7
+## 0.10.8
+
+An outside review of the last four releases found no P1 but six places where a
+description promised something the code does not do. A description that lies is
+worse than a thin one: the agent acts on it and cannot check it.
+
+- **A metadata-only write is applied instead of silently dropped.** This one was
+  a real bug, not a wording problem: when the text was byte-identical, `upsert`
+  returned the existing row and reported success while the project, tags or kind
+  change went nowhere. Approval still survives — the words did not change.
+- **Cross-language search is attributed honestly.** Snowball stems within a
+  language; it does not translate. A Russian query finding an English record is
+  the optional semantic layer's doing, and the README said otherwise.
+- **`auto_reinforce` no longer says "bump strength"** — it contradicted
+  `mem_recall`'s own description, which is the one thing about strength this
+  project insists on.
+- `mem_write` says what really happens on a byte-identical rewrite (the existing
+  record comes back untouched, keeping its approval), `mem_get` names the field
+  it actually returns (`trusted_at`), and the HTTP server reports the package
+  version rather than a hardcoded `0.1.0`.
+
 
 - **A tool description said something the tool does not do.** 0.10.6 claimed
   `mem_search` excludes session recaps by default — only the CLI does that, the

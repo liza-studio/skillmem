@@ -40,6 +40,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from . import storage as S
+from . import __version__
 
 
 # --------------------------------------------------------------------------- #
@@ -206,7 +207,7 @@ class RecallRequest(BaseModel):
 
 
 def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
-    app = FastAPI(title="skillmem", version="0.1.0")
+    app = FastAPI(title="skillmem", version=__version__)
     bearer = HTTPBearer(auto_error=True)
 
     # One connection per worker thread, reused across requests. The previous
@@ -232,7 +233,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
-        return {"ok": True, "version": "0.1.0"}
+        return {"ok": True, "version": __version__}
 
     @app.post("/whoami")
     def whoami(agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
