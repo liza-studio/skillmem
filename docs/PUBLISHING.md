@@ -122,7 +122,7 @@ The repo is **both the plugin and its own single-plugin marketplace**:
 | File | Role |
 | --- | --- |
 | `.claude-plugin/plugin.json` | Plugin manifest; declares the MCP server inline (`skillmem-mcp`) and points at the hooks file |
-| `hooks/hooks.json` | The 6 hooks + Stop→migrate, same set as `skillmem init --claude-code --hooks full` |
+| `hooks/hooks.json` | The 6 hooks, same set as `skillmem init --claude-code --hooks full` (no Stop→migrate since 0.11) |
 | `.claude-plugin/marketplace.json` | Marketplace `liza-studio` with one plugin, `source: "./"` |
 
 Nothing to upload — the plugin ships the moment the GitHub repo is public. **[owner]**

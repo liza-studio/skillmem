@@ -284,14 +284,14 @@ def import_pack(
                 if prior is not None and prior["deleted_at"] is not None:
                     # a removed pack being reinstalled: remove_pack soft-deleted
                     # the rows, and no write path clears that on its own
-                    conn.execute(
-                        "UPDATE memory_items SET deleted_at = NULL WHERE slug = ?",
-                        (slug,),
-                    )
+                    with S.tx(conn):   # commits itself, or joins an outer tx
+                        conn.execute(
+                            "UPDATE memory_items SET deleted_at = NULL WHERE slug = ?",
+                            (slug,),
+                        )
                 report.imported.append(slug)
             except Exception as exc:                      # noqa: BLE001
                 report.skipped.append((skill.rel_path, str(exc)))
-        conn.commit()
         return report
     finally:
         if tmp:

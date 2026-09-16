@@ -268,7 +268,8 @@ def _run_import(conn, root, assets_root, kind, project_override,
                 links=S.extract_wikilinks(body),
                 # a vault that carries a strength is a restore; one that
                 # doesn't must not wipe the strength the row earned since.
-                restore_strength="strength" in extras,
+                restore_strength=True,   # a vault is a restore; a dump that omitted
+                                         # strength (pre-0.11) meant the default 1.0
             )
             if existed:
                 report.updated += 1

@@ -54,6 +54,8 @@ def main(ctx: click.Context, db_path: Path | None) -> None:
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db_path
     if db_path is not None:
+        db_path = db_path.expanduser().resolve()   # a relative --db must not land in a plist
+        ctx.obj["db_path"] = db_path
         # so scheduled jobs (schedule._job_env) and anything reading
         # default_db_path() in this process see the same database
         os.environ["SKILLMEM_DB"] = str(db_path)
@@ -555,9 +557,13 @@ def _patch_claude_json(
         # must follow --db: an upgrader who re-runs init --db X used to keep
         # the old (or no) SKILLMEM_DB forever
         entry = servers["skillmem"]
-        current = (entry.get("env") or {}).get("SKILLMEM_DB") if isinstance(entry, dict) else None
-        if isinstance(entry, dict) and db_env and current != db_env:
-            entry.setdefault("env", {})["SKILLMEM_DB"] = db_env
+        if not isinstance(entry, dict):
+            return {"changed": False, "reason": "mcpServers.skillmem is not an object; fix by hand"}
+        env = entry.get("env")
+        if not isinstance(env, dict):
+            env = entry["env"] = {}   # a hand-edited null/list/string env: replace, not crash
+        if db_env and env.get("SKILLMEM_DB") != db_env:
+            env["SKILLMEM_DB"] = db_env
             _atomic_write_json(claude_json, data)
             return {"changed": True, "added": f"mcpServers.skillmem.env.SKILLMEM_DB={db_env}",
                     "backup": str(backup) if backup else None}
@@ -607,6 +613,21 @@ def _read_json_config(path: Path) -> tuple[dict[str, Any], Path | None, str | No
         return {}, backup, str(exc)
 
 
+
+def _update_env_in_place(entry: Any, env_key: str, db_env: str | None) -> str | None:
+    """An existing MCP entry keeps everything except the database it points
+    at, which follows an explicit --db. Returns a description when changed."""
+    if not db_env or not isinstance(entry, dict):
+        return None
+    env = entry.get(env_key)
+    if not isinstance(env, dict):
+        env = entry[env_key] = {}
+    if env.get("SKILLMEM_DB") == db_env:
+        return None
+    env["SKILLMEM_DB"] = db_env
+    return f"{env_key}.SKILLMEM_DB={db_env}"
+
+
 def _patch_mcp_servers_json(
     config_json: Path,
     mcp_binary: Path,
@@ -631,6 +652,11 @@ def _patch_mcp_servers_json(
 
     servers = data.setdefault("mcpServers", {})
     if "skillmem" in servers:
+        r = _update_env_in_place(servers["skillmem"], "env", db_env)
+        if r:
+            _atomic_write_json(config_json, data)
+            return {"changed": True, "added": r, "agent": agent, "path": str(config_json),
+                    "backup": str(backup) if backup else None}
         return {"changed": False, "reason": "skillmem MCP already configured",
                 "backup": str(backup) if backup else None}
 
@@ -686,6 +712,11 @@ def _patch_opencode_json(
 
     servers = data.setdefault("mcp", {})
     if "skillmem" in servers:
+        r = _update_env_in_place(servers["skillmem"], "environment", db_env)
+        if r:
+            _atomic_write_json(config_json, data)
+            return {"changed": True, "added": r, "agent": agent, "path": str(config_json),
+                    "backup": str(backup) if backup else None}
         return {"changed": False, "reason": "skillmem MCP already configured",
                 "backup": str(backup) if backup else None}
 
@@ -1072,7 +1103,7 @@ def init(
         claude_json = Path.home() / ".claude.json"
         report["claude_json"] = _patch_claude_json(
             claude_json, mcp_binary,
-            db_env=str(db_path) if db_path is not None else None,
+            db_env=str(ctx.obj["db_path"]) if ctx.obj.get("db_path") else None,
         )
 
         settings_json = Path.home() / ".claude" / "settings.json"
@@ -1120,10 +1151,10 @@ def init(
                        err=True)
         report["codex_config"] = _patch_codex_config(
             Path.home() / ".codex" / "config.toml", codex_binary,
-            db_env=str(db_path) if db_path is not None else None,
+            db_env=str(ctx.obj["db_path"]) if ctx.obj.get("db_path") else None,
         )
 
-    db_override = str(db_path) if db_path is not None else None
+    db_override = str(ctx.obj["db_path"]) if ctx.obj.get("db_path") else None
     editors = {"cursor": cursor, "windsurf": windsurf, "gemini": gemini}
     for agent, wanted in editors.items():
         if not wanted:
@@ -1769,15 +1800,16 @@ def recall(ctx: click.Context, query: str, limit: int, no_reinforce: bool, fmt: 
     """Find relevant skills for a task (Ebbinghaus-weighted BM25)."""
     conn = _conn(ctx.obj["db_path"])
     results = S.recall_skills(conn, query, limit=limit, auto_reinforce=not no_reinforce)
+    from .hooks import frame_for_model
+    for r in results:
+        frame_for_model(r, r)  # unapproved skills travel inside the frame, JSON or text
     if fmt == "json":
         click.echo(json.dumps(results, ensure_ascii=False, default=str))
         return
     if not results:
         click.echo("No skills found.")
         return
-    from .hooks import frame_for_model
     for r in results:
-        frame_for_model(r, r)  # unapproved skills print inside the frame
         strength_bar = "█" * int(r["strength"] * 5)
         click.echo(
             f"  [{r['slug']}] {r['title']}\n"

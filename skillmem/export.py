@@ -71,8 +71,7 @@ def _frontmatter(item: S.MemoryItem, *, truncated: bool = False) -> str:
         meta["freshness_until"] = item.freshness_until
     if item.visibility and item.visibility != "private":
         meta["visibility"] = item.visibility
-    if item.strength != 1.0:
-        meta["strength"] = item.strength
+    meta["strength"] = item.strength   # always: a restore must be able to say "1.0"
     if truncated:
         # The externalized body file was lost; only the excerpt follows.
         # Without this marker the dump would look complete while being partial.

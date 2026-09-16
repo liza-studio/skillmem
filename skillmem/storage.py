@@ -885,9 +885,9 @@ def _db_namespace(conn: sqlite3.Connection) -> str:
     """
     try:
         row = conn.execute("PRAGMA database_list").fetchone()
-        path = str(Path(row[2]).resolve()) if row and row[2] else ""
+        path = str(Path(row[2]).resolve()) if row and row[2] else f":memory:{id(conn)}"
     except (sqlite3.Error, OSError, TypeError):
-        path = ""
+        path = f":memory:{id(conn)}"
     # Only the canonical file keeps the empty namespace — NOT whatever
     # SKILLMEM_DB points at, or an override DB and memory.db would share it.
     canonical = str((default_data_dir() / "memory.db").resolve())
@@ -909,12 +909,15 @@ def _body_filename(slug: str, *, ns: str = "", content_hash: str = "") -> str:
     if ns:
         h += f"-{ns}"
     if content_hash:
-        h += f"+{content_hash[:8]}"
+        # 32 hex = 128 bits. Eight used to be enough to look unique and not
+        # be: two bodies sharing a prefix shared a file, and a rollback then
+        # left a row pointing at the other body's text.
+        h += f"+{content_hash[:32]}"
     return f"{safe}__{h}.md"
 
 
 _BODY_FILE_RE = _re.compile(
-    r"__[0-9a-f]{8}(?P<ns>-[0-9a-f]{8})?(?P<content>\+[0-9a-f]{8})?\.md$"
+    r"__[0-9a-f]{8}(?P<ns>-[0-9a-f]{8})?(?P<content>\+[0-9a-f]{8,64})?\.md$"
 )
 
 
@@ -1018,7 +1021,7 @@ def _valid_origin(origin: str | None) -> str:
     return origin if origin in ORIGINS else "unknown"
 
 
-_KIND_RE = _re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+_KIND_RE = _re.compile(r"[a-z0-9_-][a-z0-9_ -]{0,31}")
 
 
 def _valid_kind(kind: str) -> str:
@@ -1028,12 +1031,23 @@ def _valid_kind(kind: str) -> str:
     frontmatter and older rows keep working; only genuinely unsafe values
     ("../x", "", 40 chars) are refused.
     """
-    norm = (kind or "").strip().lower()
+    norm = _re.sub(r"\s+", " ", (kind or "").strip().lower())
     if not _KIND_RE.fullmatch(norm):
         raise ValueError(
-            f"invalid kind {kind!r}: use a-z, 0-9, '_' or '-', 1-32 chars"
+            f"invalid kind {kind!r}: use a-z, 0-9, space, '_' or '-', 1-32 chars"
         )
     return norm
+
+
+VISIBILITIES = ("public", "shared", "private")
+
+
+def _valid_visibility(visibility: str | None) -> str:
+    """One rule for every channel — HTTP validates too, MCP/CLI did not."""
+    v = (visibility or "private").strip().lower()
+    if v not in VISIBILITIES:
+        raise ValueError(f"invalid visibility {visibility!r}: one of {', '.join(VISIBILITIES)}")
+    return v
 
 
 def set_trust(conn: sqlite3.Connection, slug: str, *, trusted: bool,
@@ -1082,6 +1096,7 @@ def upsert(
     pack re-import silently reset it to 1.0.
     """
     item.kind = _valid_kind(item.kind)
+    item.visibility = _valid_visibility(item.visibility)
     item.title = scrub(item.title)
     item.body = scrub(item.body)
     item.wordcount = _wordcount(item.body)
@@ -1189,8 +1204,16 @@ def upsert(
             changed["topics"] = topics
         if "tags" in changed or "topics" in changed:
             # tags/topics are part of the lexical index — a tag added to an
-            # unchanged body must be searchable, so the stems follow.
-            changed["stemmed"] = stemmed
+            # unchanged body must be searchable, so the stems follow. Built
+            # from the MERGED metadata: an update that sends only topics must
+            # not drop the tags the row keeps.
+            eff_tags = item.tags if item.tags else _parse_json_list(existing["tags"])
+            eff_topics = item.topics if item.topics else _parse_json_list(existing["topics"])
+            changed["stemmed"] = _stem_text(
+                f"{item.title}\n{full_body}\n" + " ".join(eff_tags + eff_topics)
+            )
+        if restore_strength and item.strength != existing["strength"]:
+            changed["strength"] = item.strength   # an explicit restore applies to same text too
         if changed:
             changed["updated_at"] = now
             sets = ", ".join(f"{k} = ?" for k in changed)
@@ -1242,6 +1265,8 @@ def upsert(
     item.created_at = existing["created_at"]
     item.updated_at = now
     item.freshness_until = freshness
+    if not restore_strength:
+        item.strength = existing["strength"]   # what the row keeps, not the caller's default
     _set_embedding(conn, item.id, item.title, full_body)
     return item
 

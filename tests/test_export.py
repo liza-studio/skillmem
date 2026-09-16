@@ -91,7 +91,7 @@ def test_export_writes_per_kind_tree_with_frontmatter(conn, memhome: Path):
     # Defaults are NOT written: private/1.0 items stay clean markdown.
     meta_ru = yaml.safe_load(ru.read_text(encoding="utf-8").split("---\n")[1])
     assert "visibility" not in meta_ru
-    assert "strength" not in meta_ru
+    assert meta_ru["strength"] == 1.0   # 0.11: always written, so a restore can say "1.0"
 
     # Externalized body must be exported in FULL, not just the DB excerpt.
     assert BIG_BODY in big.read_text(encoding="utf-8")

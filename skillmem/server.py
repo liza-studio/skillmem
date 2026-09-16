@@ -260,7 +260,8 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         payload["links_out"] = S.links_from(conn, slug)
         payload["links_in"] = S.links_to(conn, slug)
         if include_history:
-            payload["history"] = S.history(conn, slug)
+            payload["history"] = [frame_for_model(item, dict(h), fields=("old_body",))
+                                  for h in S.history(conn, slug)]
         return payload
 
     @app.post("/list")

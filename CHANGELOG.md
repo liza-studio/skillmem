@@ -3,20 +3,23 @@
 ## 0.11.0
 
 Two independent reviewers (one on the Claude side, one on the GPT side) read the
-whole codebase for the first time, and then re-read every fix, four rounds deep,
-until neither could reproduce a P1 or P2. Six P1s came out of the first pass —
-none in the recap hook everyone had been staring at; all in the parts nobody had
-reviewed end to end: the HTTP server, body files, packs.
+whole codebase for the first time, then re-read every fix, five rounds deep,
+each round hunting for what the previous round's fixes broke. The first pass
+found its P1s not in the recap hook everyone had been staring at but in the
+parts nobody had reviewed end to end: the HTTP server, body files, packs.
 
-**Trust boundary — closed on every channel**
+**Trust boundary**
 - `skillmem trust` and `--untrust` refuse to run without a terminal, and
   `init --claude-code` adds `"Bash(skillmem trust*)"` to `permissions.deny`.
-  The TTY check catches accidents; the deny rule is what stops Claude Code
-  from running the command at a document's request. README says which is which.
-- Unapproved memory is framed on **every** model-facing channel now — MCP
-  `mem_get`/`mem_search`/`mem_recall`, HTTP `/get`/`/search`/`/recall`, CLI
-  `recall`, hooks — by one renderer, with the **title inside the frame**.
-  `mem_get` no longer returns a raw body next to a `trust_warning` key.
+  Both are safeguards against an agent running the command, not an owner
+  authentication: a process with write access to the database can still set
+  the columns. README says which is which.
+- Unapproved memory is framed by one renderer wherever a body, snippet or
+  history entry reaches a model — MCP `mem_get`/`mem_search`/`mem_recall`,
+  HTTP `/get`/`/search`/`/recall`, CLI `recall` (text and JSON), hooks — with
+  the **title inside the frame**. Listings (`mem_list`, `/list`) carry a
+  `trusted` flag and raw titles. `mem_get` no longer returns a raw body next
+  to a `trust_warning` key.
 - HTTP `/write` on an existing slug demands the same permission `/update`
   does: resubmitting a public rule's exact text as private used to reassign
   its author and visibility and keep the owner's approval. `/learn` requires
@@ -30,17 +33,26 @@ reviewed end to end: the HTTP server, body files, packs.
   resolve inside the vault.
 
 **Data integrity**
-- Body files are `<slug>__<hash>[-<db>][+<content>].md`: namespaced per database
-  (two databases under one home no longer share a file) and content-addressed
-  (a new body is a new file, so publish-before-commit is safe and an outer
-  rollback cannot leave a row pointing at someone else's text). Old names keep
-  working. Orphans are collected on the nightly `decay` run and HTTP `/decay`,
-  under the database write lock, with a 60 s grace.
-- `kind` is validated on write (`a-z0-9_-`, lower-cased and trimmed); export
-  refuses any path outside its destination. `kind="../../x"` used to write there.
-- Export keeps a per-database manifest and prunes only its own stale files.
-  Use **one destination per database** — two databases exporting the same
-  `kind/slug` into one directory overwrite each other.
+- Body files written from now on are `<slug>__<hash>[-<db>]+<content32>.md`:
+  namespaced per file-backed database (two databases under one home no longer
+  share a newly written file) and content-addressed with 128 bits (a new body
+  is a new file, so publish-before-commit is safe and an outer rollback cannot
+  leave a row pointing at someone else's text). Pre-0.11 files are not renamed
+  and stay shared if two databases referenced one. Orphans in a database's own
+  namespace are collected on the nightly `decay` run and HTTP `/decay`, under
+  the database write lock, with a 60 s grace; a non-lock SQLite error there
+  now propagates instead of reading as "nothing to do".
+- `kind` is validated on write — `[a-z0-9_-][a-z0-9_ -]{0,31}` after
+  lower-casing, trimming and collapsing whitespace — and existing rows are
+  normalised the same way once on the next open (a write). Filters are
+  case-insensitive; a filter nothing can match returns nothing. Export refuses
+  any path outside its destination (`kind="../../x"` used to write there).
+- Export keeps a per-database manifest and prunes the files it wrote last
+  time. Use **one destination per database**: two databases exporting the
+  same `kind/slug` into one directory overwrite each other, and the first
+  0.11 export over a pre-release manifest adopts and prunes that whole list.
+  Strength is always written to frontmatter now, so a vault restore can say
+  "1.0"; a vault import restores strength (it is a restore).
 - A metadata-only update re-indexes tags/topics; an ordinary update keeps the
   strength the row earned (vault restore is explicit); `restem` indexes full
   document bodies; `reinforce` is one relative UPDATE (concurrent confirmations
@@ -48,7 +60,8 @@ reviewed end to end: the HTTP server, body files, packs.
   retried call counts as new evidence; evidence ids are a later release.
 - Decay: a fresh skill is measured from its creation, not from "never used";
   one decay step per threshold, so a job run twice does not compound; the
-  lifecycle sweep runs even when nothing decays (nothing was ever archived).
+  lifecycle sweep runs even when nothing decays (the CLI used to skip it on
+  those runs, so skills sitting at the floor were never archived).
 - History chain: `changed_at` is clamped monotonic on every history write
   (a clock stepped back no longer reads as tampering). A row stamped in the
   future pins later stamps to it until real time catches up — by design; a
@@ -57,23 +70,35 @@ reviewed end to end: the HTTP server, body files, packs.
 
 **Hooks**
 - The Stop→`skillmem migrate` hook is gone: it imported the alphabetically
-  first project's memory directory on every turn. `init` removes an existing
-  one (backup written). `--hooks minimal` now means "deny rule only".
-  Hand-written memory: `skillmem migrate --source <dir>`.
+  first project's memory directory on every turn. `init --claude-code` with
+  any hooks mode but `none` removes an existing one (backup written) and
+  installs the deny rule; `--hooks minimal` means exactly that and nothing
+  else. Hand-written memory: `skillmem migrate --source <dir>`.
 - Recall context is budgeted per section before framing (a frame can no longer
   be cut in half) and the seen-ledger lists only what was emitted.
-- Recap: publication fails closed without its lock; one recap per session at a
-  time, the SessionEnd recap waits for an in-flight Stop recap and then
-  proceeds; Claude Code's synthetic string turns stay out of the summary.
+- Recap: publication fails closed without its lock; Stop recaps of one
+  session are serialised by a per-session lock, and the SessionEnd recap waits
+  up to 5 s for an in-flight Stop recap and then proceeds anyway (publication
+  is compare-and-swap, so neither can clobber the other); Claude Code's
+  synthetic string turns stay out of the summary.
 
 **CLI / MCP / scheduling**
-- `init --db X` writes `SKILLMEM_DB=X` into every agent's MCP entry, updating
-  an existing entry; `--db` reaches scheduled jobs; `uninstall --purge-db`
-  removes the DB, its `-wal`/`-shm` and only its own body files.
+- `skillmem --db X init ...` writes `SKILLMEM_DB=X` (absolute) into every
+  agent's MCP entry and updates an existing entry's database; without `--db`
+  an existing entry is left alone. `--db` reaches scheduled jobs (re-run
+  `schedule install` after upgrading). `uninstall --purge-db` removes the
+  DB, its `-wal`/`-shm`, its namespaced body files and the legacy-named
+  files it references (a second database referencing the same legacy file
+  loses it — split them first).
 - `skillmem skills` (strength list) was unreachable behind the `skills` pack
   group — it is `skillmem skills-top`.
 - MCP `limit` is bounded (1..100); `mem_write`/`mem_update` no longer advertise
-  an ignored `agent` field; "9 tools", not 8.
+  an ignored `agent` field; "9 tools", not 8. `visibility` is validated on
+  every channel (`public`/`shared`/`private`); HTTP omits it to mean "keep".
+- Upgrading: re-run `skillmem init --claude-code` (and `schedule install`) to
+  receive the deny rule, the hook prune and the job environment. A row whose
+  pre-0.11 `kind` still fails validation after normalisation (non-ASCII,
+  over 32 chars) rejects updates until a `kind` is supplied.
 - launchd load failures are reported; switching to systemd removes cron
   entries; Windows project-dir naming matches Claude Code's.
 

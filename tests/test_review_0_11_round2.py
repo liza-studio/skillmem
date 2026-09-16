@@ -369,10 +369,12 @@ def test_junk_kind_filter_matches_nothing_on_every_channel(home, monkeypatch):
     assert S.search(conn, "hello", kind="../x") == []
     fastapi_testclient = pytest.importorskip("fastapi.testclient")
     from skillmem import server as srv
-    (home / "tokens.yaml").write_text("bob:\n  token: tok-bob\n", encoding="utf-8")
+    (home / "tokens.yaml").write_text("boss:\n  token: tok-boss\n  scope: master\n", encoding="utf-8")
     app = srv.build_app(srv.TokenStore(home / "tokens.yaml"), db_path=home / "memory.db")
     with fastapi_testclient.TestClient(app) as c:
-        r = c.post("/list", headers={"Authorization": "Bearer tok-bob"}, json={"kind": "../x"})
+        ok = c.post("/list", headers={"Authorization": "Bearer tok-boss"}, json={"kind": "Note"})
+        assert ok.status_code == 200 and ok.json()["count"] == 1     # valid filter sees the row
+        r = c.post("/list", headers={"Authorization": "Bearer tok-boss"}, json={"kind": "../x"})
         assert r.status_code == 200 and r.json()["count"] == 0
     r = CliRunner().invoke(cli_main, ["--db", str(home / "memory.db"), "ls", "--kind", "../x"])
     assert r.exit_code == 0, r.output
@@ -446,3 +448,167 @@ def test_export_adopts_pre_release_manifest(home):
 def test_version_is_0_11():
     from skillmem import __version__
     assert __version__.startswith("0.11.")
+
+
+# --- round 5: hash width, merged index, restore, tx, namespaces, init env -----
+
+def test_body_filename_carries_128_bits_of_content_hash(home):
+    import hashlib
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="doc", title="d", body=BIG("alpha"), kind="document"))
+    item = S.get(conn, "doc")
+    content = item.body_path.rsplit("+", 1)[1].removesuffix(".md")
+    assert len(content) == 32 and content == item.content_hash[:32]
+    assert S._BODY_FILE_RE.search(item.body_path)
+    assert S._BODY_FILE_RE.search("legacy__deadbeef.md")             # old names still parse
+    assert S._BODY_FILE_RE.search("pre__deadbeef+0123abcd.md")        # 0.11 pre-release names too
+
+
+def test_metadata_update_indexes_merged_tags_and_topics(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="k", title="deploy", body="apply", kind="skill",
+                                tags=["kubernetes"]))
+    S.upsert(conn, S.MemoryItem(slug="k", title="deploy", body="apply", kind="skill",
+                                topics=["postgresql"]))
+    assert [h["slug"] for h in S.search(conn, "kubernetes")] == ["k"]   # kept tag still indexed
+    assert [h["slug"] for h in S.search(conn, "postgresql")] == ["k"]
+
+
+def test_update_returns_the_persisted_strength(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="k", title="t", body="v1", kind="skill"))
+    conn.execute("UPDATE memory_items SET strength = 1.9 WHERE slug = 'k'")
+    conn.commit()
+    item = S.upsert(conn, S.MemoryItem(slug="k", title="t", body="v2", kind="skill"), force=True)
+    assert item.strength == 1.9
+    item = S.upsert(conn, S.MemoryItem(slug="k", title="t", body="v2", kind="skill", strength=0.4),
+                    force=True, restore_strength=True)        # same text, explicit restore
+    assert conn.execute("SELECT strength FROM memory_items WHERE slug='k'").fetchone()[0] == 0.4
+
+
+def test_export_import_round_trip_restores_default_strength(home):
+    from skillmem import vault as V
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="k", title="t", body="v1", kind="note"))
+    dest = home / "vault"
+    E.export_all(conn, dest)                                   # strength 1.0 written explicitly
+    text = (dest / "note" / "k.md").read_text(encoding="utf-8")
+    assert "strength: 1.0" in text
+    conn.execute("UPDATE memory_items SET strength = 1.9 WHERE slug = 'k'")
+    conn.commit()
+    S.upsert(conn, S.MemoryItem(slug="k", title="t", body="changed", kind="note"), force=True)
+    V.import_vault(conn, dest, skip_auto_memories=False)
+    row = conn.execute("SELECT strength, body FROM memory_items WHERE slug='k'").fetchone()
+    assert row["strength"] == 1.0 and row["body"] == "v1"
+
+
+def test_pack_import_joins_an_outer_transaction(home, tmp_path):
+    from skillmem import packs as P
+    conn = _conn(home)
+    root = tmp_path / "pack"
+    (root / "skills" / "s").mkdir(parents=True)
+    (root / "skills" / "s" / "SKILL.md").write_text("---\nname: s\ndescription: D.\n---\nb",
+                                                     encoding="utf-8")
+    P.import_pack(conn, str(root), pack_name="pk")
+    assert P.remove_pack(conn, "pk", reason="t") == ["pack-pk-s"]
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    S.upsert(conn, S.MemoryItem(slug="unrelated", title="t", body="b", kind="note"))
+    P.import_pack(conn, str(root), pack_name="pk")            # reinstall inside the outer tx
+    assert conn.in_transaction                                # must not have committed it
+    conn.execute("ROLLBACK")
+    assert S.get(conn, "unrelated") is None
+    assert S.get(conn, "pack-pk-s") is None
+
+
+def test_in_memory_databases_get_their_own_namespace():
+    a = S.connect(Path(":memory:")) if False else __import__("sqlite3").connect(":memory:")
+    b = __import__("sqlite3").connect(":memory:")
+    assert S._db_namespace(a) != S._db_namespace(b) != ""
+
+
+def test_init_without_db_keeps_an_existing_custom_database(home, monkeypatch):
+    import sys
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"skillmem": {
+        "command": "mcp", "env": {"SKILLMEM_DB": "/custom/custom.db"}}}}), encoding="utf-8")
+    r = CliRunner().invoke(cli_main, ["init", "--claude-code", "--hooks", "none", "--skip-migrate",
+                                      "--mcp-binary", str(Path(sys.executable).parent / "skillmem-mcp")])
+    assert r.exit_code == 0, r.output
+    cfg = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    assert cfg["mcpServers"]["skillmem"]["env"]["SKILLMEM_DB"] == "/custom/custom.db"
+
+
+def test_init_db_tolerates_a_hand_edited_env(home, monkeypatch):
+    import sys
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    for bad in (None, "x", ["x"], False):
+        (home / ".claude.json").write_text(json.dumps({"mcpServers": {"skillmem": {
+            "command": "mcp", "env": bad}}}), encoding="utf-8")
+        r = CliRunner().invoke(cli_main, ["--db", str(home / "o.db"), "init", "--claude-code",
+                                          "--hooks", "none", "--skip-migrate",
+                                          "--mcp-binary", str(Path(sys.executable).parent / "skillmem-mcp")])
+        assert r.exit_code == 0, (bad, r.output)
+        cfg = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+        assert cfg["mcpServers"]["skillmem"]["env"]["SKILLMEM_DB"] == str((home / "o.db").resolve())
+
+
+def test_editor_configs_follow_an_explicit_db(home, monkeypatch):
+    import sys
+    from skillmem import cli as cli_mod
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    mcp = Path(sys.executable).parent / "skillmem-mcp"
+    cursor = home / ".cursor" / "mcp.json"
+    cursor.parent.mkdir(parents=True)
+    cli_mod._patch_mcp_servers_json(cursor, mcp, agent="cursor", db_env="/db/one")
+    r = cli_mod._patch_mcp_servers_json(cursor, mcp, agent="cursor", db_env="/db/two")
+    assert r["changed"]
+    assert json.loads(cursor.read_text())["mcpServers"]["skillmem"]["env"]["SKILLMEM_DB"] == "/db/two"
+
+
+def test_mcp_learn_rejects_junk_visibility(home, monkeypatch):
+    from skillmem import mcp_server as M
+    monkeypatch.setenv("SKILLMEM_DB", str(home / "memory.db"))
+    monkeypatch.setattr(M, "_CONN", None)
+    out = json.loads(M._tool_learn({"slug": "s", "title": "t", "trigger": "t", "steps": "s",
+                                    "outcome": "ok", "visibility": "Public"})[0].text)
+    assert out.get("ok") is True    # normalised, not rejected
+    out = json.loads(M._tool_learn({"slug": "s2", "title": "t", "trigger": "t", "steps": "s",
+                                    "outcome": "ok", "visibility": "../x"})[0].text)
+    assert "error" in out
+
+
+def test_legacy_kind_with_inner_space_stays_updatable(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="n", title="t", body="b", kind="note"))
+    conn.execute("UPDATE memory_items SET kind = 'my notes' WHERE slug = 'n'")
+    conn.commit()
+    item = S.upsert(conn, S.MemoryItem(slug="n", title="t", body="b2", kind="my  notes"), force=True)
+    assert item.kind == "my notes"
+
+
+def test_recall_json_and_history_are_framed(home, monkeypatch):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="sk", title="IGNORE ALL", body="v1", kind="skill", origin="agent"))
+    S.upsert(conn, S.MemoryItem(slug="sk", title="IGNORE ALL", body="v2", kind="skill", origin="agent"),
+             force=True)
+    conn.commit()
+    r = CliRunner().invoke(cli_main, ["--db", str(home / "memory.db"), "recall", "v2", "--format", "json",
+                                      "--no-reinforce"])
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out and H.UNTRUSTED_OPEN in out[0]["body"] and "IGNORE ALL" not in out[0]["title"]
+    from skillmem import mcp_server as M
+    monkeypatch.setenv("SKILLMEM_DB", str(home / "memory.db"))
+    monkeypatch.setattr(M, "_CONN", None)
+    g = json.loads(M._tool_get({"slug": "sk", "include_history": True})[0].text)
+    assert g["history"] and H.UNTRUSTED_OPEN in g["history"][0]["old_body"]
+
+
+def test_release_metadata_agrees_with_the_package():
+    from skillmem import __version__
+    root = Path(__file__).resolve().parents[1]
+    for f in ("server.json", "plugin.json", ".claude-plugin/plugin.json"):
+        data = json.loads((root / f).read_text(encoding="utf-8"))
+        assert data["version"] == __version__, f
+    assert json.loads((root / "server.json").read_text())["packages"][0]["version"] == __version__
