@@ -1245,8 +1245,11 @@ def upsert(
                        if v is not None and v != existing[k]}
             if item.agent is not None and item.agent != existing["agent"]:
                 changed["agent"] = item.agent
-            if item.origin and _valid_origin(item.origin) != existing["origin"]:
-                changed["origin"] = _valid_origin(item.origin)   # a dump restores its origin
+            if restore_strength and item.origin and _valid_origin(item.origin) != existing["origin"]:
+                # only a RESTORE (a skillmem dump) rewrites provenance on same
+                # text; an ordinary library write with the default "unknown",
+                # or a migrate of a hand-written file, must not relabel a row
+                changed["origin"] = _valid_origin(item.origin)
         else:
             changed = {k: v for k, v in meta.items()
                        if k in explicit and v is not None and v != existing[k]}

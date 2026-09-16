@@ -1067,20 +1067,23 @@ def test_learn_project_applies_and_write_ttl_error_is_a_conflict_line(home):
     assert conn.execute("SELECT project FROM memory_items WHERE slug='s'").fetchone()[0] == "new"
     r = CliRunner().invoke(cli_main, ["--db", str(home / "memory.db"), "write", "--slug", "w",
                                       "--title", "t", "--body", "b", "--ttl-days", "0"])
-    assert r.exit_code != 0 and "Traceback" not in r.output and "ttl_days" in r.output
+    assert r.exit_code == 2 and "CONFLICT: invalid ttl_days" in r.output and "Traceback" not in r.output
 
 
 def test_mcp_null_is_not_explicit_and_old_dumps_keep_pins(home, monkeypatch, tmp_path):
     from skillmem import mcp_server as M, vault as V
     conn = _conn(home)
-    S.upsert(conn, S.MemoryItem(slug="sk", title="t", body="b", kind="skill", visibility="private",
+    body = S.skill_body("x", "y", "z", None)          # what mem_learn will generate
+    S.upsert(conn, S.MemoryItem(slug="sk", title="t", body=body, kind="skill", visibility="private",
                                 origin="owner"))
     S.set_trust(conn, "sk", trusted=True); S.set_pinned(conn, "sk", True); conn.commit()
     monkeypatch.setenv("SKILLMEM_DB", str(home / "memory.db"))
     monkeypatch.setattr(M, "_CONN", None)
-    M._tool_write({"slug": "sk", "title": "t", "body": "b", "kind": None})
-    M._tool_learn({"slug": "sk", "title": "t", "trigger": "x", "steps": "y", "outcome": "z",
-                   "visibility": None})
+    out = json.loads(M._tool_write({"slug": "sk", "title": "t", "body": body, "kind": None})[0].text)
+    assert out.get("ok") is True, out
+    out = json.loads(M._tool_learn({"slug": "sk", "title": "t", "trigger": "x", "steps": "y",
+                                    "outcome": "z", "visibility": None})[0].text)
+    assert out.get("ok") is True, out
     row = conn.execute("SELECT kind, visibility FROM memory_items WHERE slug='sk'").fetchone()
     assert (row["kind"], row["visibility"]) == ("skill", "private")
     # a dump written before pins were exported must not unpin on re-import
@@ -1088,6 +1091,24 @@ def test_mcp_null_is_not_explicit_and_old_dumps_keep_pins(home, monkeypatch, tmp
     (dump / "skill").mkdir(parents=True)
     (dump / "skill" / "sk.md").write_text(
         "---\nname: sk\ndescription: t\nmetadata:\n  node_type: memory\n  type: skill\n  origin: owner\n"
-        "strength: 1.0\n---\n\nb\n", encoding="utf-8")
+        "strength: 1.0\n---\n\n" + body + "\n", encoding="utf-8")
     V.import_vault(conn, dump, skip_auto_memories=False)
     assert conn.execute("SELECT pinned, origin FROM memory_items WHERE slug='sk'").fetchone()[0] == 1
+
+
+
+# --- round 18: migrate must not relabel a trusted row on same text -------------
+
+def test_migrate_on_identical_text_keeps_provenance(home, tmp_path):
+    from skillmem import migrate as MG
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="rule-x", title="r", body="never force push", kind="skill",
+                                origin="owner"))
+    S.set_trust(conn, "rule-x", trusted=True); conn.commit()
+    src = tmp_path / "memory"
+    src.mkdir()
+    (src / "rule-x.md").write_text("---\nname: rule-x\ndescription: r\n---\n\nnever force push\n",
+                                   encoding="utf-8")
+    MG.import_dir(conn, src)
+    row = conn.execute("SELECT origin, trusted_at FROM memory_items WHERE slug='rule-x'").fetchone()
+    assert row["origin"] == "owner" and row["trusted_at"] is not None

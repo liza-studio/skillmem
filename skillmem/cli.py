@@ -260,7 +260,7 @@ def write(
                       if ctx.get_parameter_source(p) == click.core.ParameterSource.COMMANDLINE},
         )
     except (S.MemoryConflict, ValueError) as exc:
-        click.echo(str(exc), err=True)
+        click.echo(f"CONFLICT: {exc}", err=True)   # same prefix as learn; exit 2 is write's convention
         sys.exit(2)
     click.echo(f"OK: {result.slug} (id={result.id})")
 
