@@ -874,3 +874,34 @@ def test_uninstall_surfaces_the_codex_refusal_and_keeps_crlf_backup(home, monkey
     import tomllib
     assert tomllib.loads(toml.read_text(encoding="utf-8")) == {"other": {"y": 1}} or \
            tomllib.loads(toml.read_text(encoding="utf-8")) == {"mcp_servers": {}, "other": {"y": 1}}
+
+
+
+# --- round 13: the last P3s from the first clean gate --------------------------
+
+def test_uninstall_removes_skillmem_hook_from_a_mixed_group_and_warns_on_bad_toml(home, monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": "/x/bin/skillmem hook session-recap"},
+        {"type": "command", "command": "echo keep"}]}]}}), encoding="utf-8")
+    toml = home / ".codex" / "config.toml"
+    toml.parent.mkdir(parents=True)
+    toml.write_text('[mcp_servers.skillmem\ncommand = "x"\n', encoding="utf-8")   # unparseable
+    r = CliRunner().invoke(cli_main, ["uninstall", "--no-editors"])
+    assert r.exit_code == 0, r.output
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert [h["command"] for h in data["hooks"]["Stop"][0]["hooks"]] == ["echo keep"]
+    assert "could not parse" in r.output                     # the codex parse failure is a warning
+
+
+def test_idempotent_all_agents_counts_codex(home, monkeypatch):
+    import sys
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    args = ["--db", str(home / "c.db"), "init", "--all-agents", "--hooks", "none", "--skip-migrate",
+            "--mcp-binary", mcp]
+    assert CliRunner().invoke(cli_main, args).exit_code == 0
+    r = CliRunner().invoke(cli_main, args)                   # same --db again: nothing to change
+    assert r.exit_code == 0 and "6 agents" in r.output and "Codex: nothing changed" not in r.output

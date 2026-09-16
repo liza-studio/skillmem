@@ -1226,17 +1226,18 @@ def init(
         ("Claude Code", claude_code), ("Codex", codex), ("Cursor", cursor),
         ("Windsurf", windsurf), ("Gemini CLI", gemini), ("opencode", opencode),
     ) if on]
+    codex_mismatch = "by hand" in str(report.get("codex_config", {}).get("reason", ""))
     if len(wired) > 1:
-        if codex and not report.get("codex_config", {}).get("changed", True):
+        if codex and codex_mismatch:
             click.echo("Codex: nothing changed — see codex_config.reason above.", err=True)
             wired.remove("Codex")
         click.echo(f"Done. {', '.join(wired)} — one skill database, "
                    f"{len(wired)} agents.")
     elif codex:
-        if report.get("codex_config", {}).get("changed", True):
-            click.echo("Done. Open `codex` in any project — the mem_* tools will be there.")
-        else:
+        if codex_mismatch:
             click.echo("Nothing changed for Codex — see codex_config.reason above.", err=True)
+        else:
+            click.echo("Done. Open `codex` in any project — the mem_* tools will be there.")
     elif wired and not claude_code:
         click.echo(f"Done. Open {wired[0]} — the mem_* tools will be there.")
     else:
@@ -1285,18 +1286,19 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
                 for event, groups in list((data.get("hooks") or {}).items()):
                     new_groups = []
                     for grp in groups:
+                        old_hooks = grp.get("hooks") or []
                         new_hooks = [
-                            h for h in (grp.get("hooks") or [])
+                            h for h in old_hooks
                             if "skillmem" not in (h.get("command") or "")
                         ]
+                        if len(new_hooks) != len(old_hooks):
+                            changed = True   # also when the group survives (mixed group)
                         if new_hooks:
                             grp["hooks"] = new_hooks
                             new_groups.append(grp)
-                        else:
-                            changed = True
                     if new_groups:
                         data["hooks"][event] = new_groups
-                    else:
+                    elif groups:
                         data["hooks"].pop(event, None)
                         changed = True
                 if changed:
@@ -1312,8 +1314,8 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
         if r.get("changed"):
             report["removed"].append(
                 f"mcp_servers.skillmem from config.toml (backup: {r['backup']})")
-        elif r.get("reason") and "by hand" in r["reason"]:
-            report["warnings"].append(f"codex: {r['reason']}")
+        elif r.get("reason") not in (None, "no config.toml", "skillmem MCP not configured"):
+            report["warnings"].append(f"codex: {r['reason']}")   # parse failure, refusal, ...
 
     if editors:
         for agent, (parts, label) in MCP_JSON_AGENTS.items():

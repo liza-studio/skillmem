@@ -98,8 +98,9 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   database and `init` prints the one line to set by hand
   (`SKILLMEM_DB = "X"` under `[mcp_servers.skillmem.env]`). `uninstall`
   removes the Codex table only when the result provably equals the old file
-  minus that table; otherwise it leaves the file alone and says so in
-  `warnings`. Without `--db` an existing entry is left alone everywhere.
+  minus that table; otherwise (including a file it cannot parse) it leaves
+  the file alone and says so in `warnings`. `uninstall` also removes a
+  skillmem hook from a settings.json group it shares with other hooks. Without `--db` an existing entry is left alone everywhere.
   `init` and `uninstall` write config files atomically, through a symlink
   to its target, with mode kept (JSON and TOML alike). `--db` reaches scheduled jobs (re-run
   `schedule install` after upgrading). `uninstall --purge-db` removes the
