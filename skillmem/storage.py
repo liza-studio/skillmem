@@ -268,6 +268,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # v12: one decay step per threshold (see decay_stale). Self-healing too.
     if "last_decayed_at" not in live_cols:
         _add_column(conn, "last_decayed_at INTEGER")
+    # v12: kinds are normalised on write now; rows written before that as
+    # "Reference" would be invisible to a kind="reference" filter. Read first
+    # so the common case takes no write lock on open.
+    if conn.execute(
+        "SELECT 1 FROM memory_items WHERE kind != LOWER(TRIM(kind)) LIMIT 1"
+    ).fetchone():
+        conn.execute("UPDATE memory_items SET kind = LOWER(TRIM(kind)) "
+                     "WHERE kind != LOWER(TRIM(kind))")
     # v10, same self-healing reason: a DB whose version says 10 but whose ALTER
     # never landed would otherwise fail every read with "no such column: origin".
     if not {"origin", "trusted_at", "trusted_by"} <= live_cols:
@@ -619,8 +627,13 @@ def _chain_clock(conn: sqlite3.Connection, now: int) -> int:
     than its predecessor (clock stepped back) would verify as a break. Clamp
     the timestamp to the tip instead of reordering existing chains."""
     row = conn.execute("SELECT MAX(changed_at) AS t FROM memory_history").fetchone()
-    tip = row["t"] if row and row["t"] is not None else 0
-    return max(now, int(tip))
+    tip = int(row["t"]) if row and row["t"] is not None else 0
+    if tip - now > 86400:
+        # a row stamped far in the future (clock was wrong) pins every later
+        # stamp to it until real time catches up — by design (the chain
+        # must stay ordered), but worth a line in the log
+        log.warning("history clock: tip is %d s ahead of now; clamping", tip - now)
+    return max(now, tip)
 
 
 # --------------------------------------------------------------------------- #
@@ -847,6 +860,16 @@ def _make_excerpt(body: str, limit: int = DOC_EXCERPT_CHARS) -> str:
     return head + "…"
 
 
+def _db_identity(conn: sqlite3.Connection) -> str:
+    """8 hex chars of the resolved database path — no default special case."""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        path = str(Path(row[2]).resolve()) if row and row[2] else ":memory:"
+    except (sqlite3.Error, OSError, TypeError):
+        path = ":memory:"
+    return hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]
+
+
 def _db_namespace(conn: sqlite3.Connection) -> str:
     """8 hex chars naming the database a body file belongs to.
 
@@ -931,25 +954,33 @@ def gc_body_files(conn: sqlite3.Connection) -> int:
     database's files share the directory and are not ours to judge.
     """
     ns = _db_namespace(conn)
-    live = {r[0] for r in conn.execute(
-        "SELECT body_path FROM memory_items WHERE body_path IS NOT NULL")}
     removed = 0
-    for path in docs_dir().glob("*.md"):
-        m = _BODY_FILE_RE.search(path.name)
-        if m is None or path.name in live:
-            continue
-        if m.group("content") is None:
-            continue  # pre-0.11 name: no namespace, could be any database's
-        if (m.group("ns") or "") != (f"-{ns}" if ns else ""):
-            continue  # another database's file
-        # a file younger than a minute may belong to a write still committing
-        try:
-            if time.time() - path.stat().st_mtime < 60:
-                continue
-            path.unlink()
-            removed += 1
-        except OSError:
-            continue
+    # Scan and unlink under the write lock: SQLite has one writer, so an
+    # open write transaction (a vault import publishes its files as it goes,
+    # then commits at the end) blocks this run instead of losing its files.
+    # The 60 s grace covers only the pre-transaction staging window.
+    try:
+        with tx(conn):
+            live = {r[0] for r in conn.execute(
+                "SELECT body_path FROM memory_items WHERE body_path IS NOT NULL")}
+            for path in docs_dir().glob("*.md"):
+                m = _BODY_FILE_RE.search(path.name)
+                if m is None or path.name in live:
+                    continue
+                if m.group("content") is None:
+                    continue  # pre-0.11 name: no namespace, could be any database's
+                if (m.group("ns") or "") != (f"-{ns}" if ns else ""):
+                    continue  # another database's file
+                try:
+                    if time.time() - path.stat().st_mtime < 60:
+                        continue
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    continue
+    except sqlite3.OperationalError as exc:
+        log.info("gc_body_files skipped: %s", exc)  # a writer holds the lock
+        return 0
     return removed
 
 
@@ -1488,6 +1519,8 @@ def list_items(
     limit: int = 50,
     recent: bool = True,
 ) -> list[MemoryItem]:
+    if kind:
+        kind = _valid_kind(kind)  # "Reference" filters find "reference" rows
     where = ["deleted_at IS NULL"]
     params: list[Any] = []
     if kind:
@@ -1729,6 +1762,8 @@ def search(
     limit: int = 10,
     exclude_kinds: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
+    if kind:
+        kind = _valid_kind(kind)  # "Reference" filters find "reference" rows
     ids = hybrid_rank_ids(conn, query, kind=kind, project=project, limit=limit,
                           exclude_kinds=exclude_kinds)
     if not ids:

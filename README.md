@@ -238,7 +238,6 @@ rules you wrote yourself.
 | UserPromptSubmit | `auto-recall` | Relevant feedback + skills matched against the prompt |
 | PreToolUse | `tool-recall` | Skills/warnings matched against the Bash command or edited file (including notebooks) |
 | Stop | `session-recap` | Distills the session into a markdown note via `claude -p` — rate-limited (one call per session per `SKILLMEM_RECAP_MIN_INTERVAL`, default 600s), one note per session per day, and the child runs with no tools |
-| Stop | `migrate` | Indexes new session notes into the database |
 | SessionEnd | `session-recap` | The session's last word, not rate-limited, so the closing turns still reach memory |
 
 All hooks are best-effort: a broken database or missing model never blocks Claude Code. Which is

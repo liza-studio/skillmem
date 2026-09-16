@@ -245,3 +245,116 @@ def test_uninstall_purge_removes_only_this_dbs_body_files(home, monkeypatch):
     assert not (home / "other.db").exists()
     assert (home / "memory.db").exists()
     assert S.load_body(S.get(_conn(home), "doc")).startswith("a")
+
+
+# --- round 3: what round 2 broke -------------------------------------------
+
+def test_init_db_flag_lands_in_agent_configs(home, monkeypatch):
+    import sys
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    r = CliRunner().invoke(cli_main, ["--db", str(home / "other.db"), "init", "--claude-code",
+                                      "--hooks", "none", "--skip-migrate", "--mcp-binary",
+                                      str(Path(sys.executable).parent / "skillmem-mcp")])
+    assert r.exit_code == 0, r.output
+    cfg = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    assert cfg["mcpServers"]["skillmem"]["env"]["SKILLMEM_DB"] == str(home / "other.db")
+
+
+def test_gc_waits_for_an_open_write_transaction(home, monkeypatch):
+    monkeypatch.setenv("SKILLMEM_BUSY_TIMEOUT_MS", "50")
+    a = _conn(home)
+    b = _conn(home)
+    a.execute("BEGIN IMMEDIATE")
+    S.upsert(a, S.MemoryItem(slug="doc", title="d", body=BIG("slow"), kind="document"))
+    _age(home)                                   # older than the grace window
+    assert S.gc_body_files(b) == 0               # locked out, not destructive
+    a.execute("COMMIT")
+    item = S.get(a, "doc")
+    assert (S.docs_dir() / item.body_path).exists()
+
+
+def test_export_two_homes_one_destination_keep_both(tmp_path, monkeypatch):
+    dest = tmp_path / "shared"
+    for name in ("A", "B"):
+        home = tmp_path / name
+        home.mkdir()
+        monkeypatch.setenv("SKILLMEM_HOME", str(home))
+        conn = S.connect(home / "memory.db")
+        S.init_schema(conn)
+        S.upsert(conn, S.MemoryItem(slug=f"from-{name}", title="t", body="b", kind="note"))
+        E.export_all(conn, dest)
+    assert (dest / "note" / "from-A.md").exists()
+    assert (dest / "note" / "from-B.md").exists()
+
+
+def test_purge_default_db_keeps_legacy_files_of_other_dbs(home, monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    default = _conn(home)
+    other = _conn(home, "other.db")
+    S.upsert(other, S.MemoryItem(slug="leg", title="l", body=BIG("old"), kind="document"))
+    old_name = S._body_filename("leg")
+    (S.docs_dir() / old_name).write_text(BIG("old"), encoding="utf-8")
+    other.execute("UPDATE memory_items SET body_path = ? WHERE slug = 'leg'", (old_name,))
+    other.commit(); other.close(); default.close()
+    r = CliRunner().invoke(cli_main, ["uninstall", "--no-codex", "--no-editors", "--purge-db"])
+    assert r.exit_code == 0, r.output
+    assert (S.docs_dir() / old_name).exists()
+
+
+def test_prune_matches_quoted_and_exe_paths_but_not_foreign_tools(home):
+    from skillmem import cli as cli_mod
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {
+        "Stop": [{"hooks": [
+            {"type": "command", "command": "'/Users/first last/.venv/bin/skillmem' migrate"},
+            {"type": "command", "command": "/x/bin/skillmem hook session-recap"}]}],
+        "PreToolUse": [{"hooks": [{"type": "command", "command": "my-skillmem migrate"}]}],
+    }}), encoding="utf-8")
+    r = cli_mod._prune_settings_hook(settings, command_prefix="skillmem migrate")
+    assert r["changed"] and r.get("backup")
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert [h["command"] for g in data["hooks"]["Stop"] for h in g["hooks"]] == \
+        ["/x/bin/skillmem hook session-recap"]
+    assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "my-skillmem migrate"
+
+
+def test_kind_filter_is_case_insensitive_and_old_rows_are_migrated(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="r", title="t", body="b", kind="reference"))
+    conn.execute("UPDATE memory_items SET kind = 'Reference' WHERE slug = 'r'")
+    conn.commit()
+    S.init_schema(conn)   # the open-time migration lowercases it
+    assert conn.execute("SELECT kind FROM memory_items WHERE slug='r'").fetchone()[0] == "reference"
+    assert [i.slug for i in S.list_items(conn, kind="Reference")] == ["r"]
+
+
+def test_write_without_visibility_keeps_existing_and_defaults_new(home):
+    fastapi_testclient = pytest.importorskip("fastapi.testclient")
+    from skillmem import server as srv
+    (home / "tokens.yaml").write_text(
+        "alice:\n  token: tok-alice\n  permissions: [write_public]\n", encoding="utf-8")
+    app = srv.build_app(srv.TokenStore(home / "tokens.yaml"), db_path=home / "memory.db")
+    A = {"Authorization": "Bearer tok-alice"}
+    with fastapi_testclient.TestClient(app) as c:
+        assert c.post("/learn", headers=A, json={"slug": "deploy", "title": "t", "trigger": "t",
+                                                  "steps": "s", "outcome": "ok"}).status_code == 200
+        r = c.post("/write", headers=A, json={"slug": "deploy", "title": "t",
+                                               "body": "new text", "kind": "skill",
+                                               "check_conflicts": False})
+        assert r.status_code in (200, 409)  # 409 only from upsert's reason/force rule
+        assert r.status_code != 403
+        r = c.post("/write", headers=A, json={"slug": "fresh", "title": "t", "body": "b"})
+        assert r.status_code == 200
+        assert _conn(home).execute("SELECT visibility FROM memory_items WHERE slug='fresh'").fetchone()[0] == "private"
+
+
+def test_transcript_filter_drops_synthetic_turns(tmp_path):
+    t = tmp_path / "t.jsonl"
+    t.write_text("\n".join([
+        json.dumps({"type": "user", "message": {"content": "<task-notification>done</task-notification>"}}),
+        json.dumps({"type": "user", "message": {"content": "<local-command-stdout>ls</local-command-stdout>"}}),
+        json.dumps({"type": "user", "message": {"content": "a real question here"}}),
+    ]), encoding="utf-8")
+    out = H._filter_transcript(t)
+    assert "real question" in out and "task-notification" not in out and "local-command" not in out

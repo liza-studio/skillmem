@@ -160,7 +160,7 @@ class WriteRequest(BaseModel):
     project: str | None = None
     tags: list[str] = Field(default_factory=list)
     topics: list[str] = Field(default_factory=list)
-    visibility: str = "private"
+    visibility: str | None = None   # None = private for a new record, unchanged for an existing one
     ttl_days: int | None = None
     check_conflicts: bool = True
 
@@ -191,7 +191,7 @@ class LearnRequest(BaseModel):
     project: str | None = None
     tags: list[str] = Field(default_factory=list)
     topics: list[str] = Field(default_factory=list)
-    visibility: str = "public"
+    visibility: str | None = None   # None = public for a new skill, unchanged for an existing one
     ttl_days: int | None = None
     check_conflicts: bool = True
 
@@ -278,7 +278,8 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             ],
         }
 
-    def _gate_create(conn, item: S.MemoryItem, agent: AgentIdentity) -> None:
+    def _gate_create(conn, item: S.MemoryItem, agent: AgentIdentity,
+                     default_visibility: str = "private") -> None:
         """One authorization for every create path (/write, /learn).
 
         A create that lands on an existing slug is an update in disguise: it
@@ -287,17 +288,15 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         public rule's exact text as private and own it. Existing rows keep
         their author and visibility and demand the same permission /update does.
         """
-        if item.visibility == "public" and not agent.can("write_public"):
-            raise HTTPException(
-                status_code=403,
-                detail="agent lacks 'write_public' permission (or master scope)",
-            )
         # S.get() hides soft-deleted rows, upsert does not: a tombstone's slug
         # is still a record with an author and history, not free for anyone.
         row = conn.execute(
             "SELECT * FROM memory_items WHERE slug = ?", (item.slug,)
         ).fetchone()
         if row is None:
+            if item.visibility is None:
+                item.visibility = default_visibility
+            _require_visibility_perm(item.visibility, agent)
             return
         existing = S.MemoryItem.from_row(row)
         if row["deleted_at"] is not None:
@@ -311,13 +310,23 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
                 detail="slug exists and belongs to another agent or is public; "
                        "use /update with the right permission",
             )
-        if item.visibility != existing.visibility:
+        if item.visibility is None:
+            item.visibility = existing.visibility   # omitted → keep
+        elif item.visibility != existing.visibility:
             raise HTTPException(
                 status_code=409,
                 detail=f"record is {existing.visibility}; a create call cannot "
                        "change visibility",
             )
+        _require_visibility_perm(item.visibility, agent)
         item.agent = existing.agent or agent.name
+
+    def _require_visibility_perm(visibility: str, agent: AgentIdentity) -> None:
+        if visibility == "public" and not agent.can("write_public"):
+            raise HTTPException(
+                status_code=403,
+                detail="agent lacks 'write_public' permission (or master scope)",
+            )
 
     @app.post("/write")
     def write(req: WriteRequest, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
@@ -397,7 +406,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             visibility=req.visibility, agent=agent.name,
             ttl_days=req.ttl_days, origin="agent",
         )
-        _gate_create(conn, item, agent)
+        _gate_create(conn, item, agent, default_visibility="public")
         try:
             result = S.upsert(
                 conn, item,

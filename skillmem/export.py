@@ -99,7 +99,9 @@ def export_all(conn, destination: Path) -> int:
     manifest = destination / ".skillmem-export.json"
     # keyed per database: two databases exporting into one directory must
     # not delete each other's files
-    ns = S._db_namespace(conn) or "default"
+    # keyed by the database FILE, unconditionally: two homes' memory.db both
+    # have the empty body-file namespace, and would share a "default" key
+    ns = S._db_identity(conn)
     data: dict = {}
     try:
         loaded = json.loads(manifest.read_text(encoding="utf-8"))

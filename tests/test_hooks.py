@@ -546,3 +546,30 @@ def test_publish_waits_for_the_lock_then_rechecks(tmp_path: Path):
     t.join()
     assert problem.startswith("skip:stale")
     assert "FINAL" in note.read_text(encoding="utf-8")
+
+
+def test_session_end_recap_proceeds_over_a_held_session_lock(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """A Stop recap in flight holds the per-session lock; the SessionEnd recap
+    must wait briefly and then run anyway (publication is CAS-guarded), while a
+    plain Stop under the same lock is skipped."""
+    proj, payload = _recap_fixture(tmp_path)
+    from skillmem import hooks as H
+    monkeypatch.setattr(H.shutil, "which", lambda *_: "/fake/claude")
+    monkeypatch.setattr(H.time, "sleep", lambda *_: None)
+    calls = []
+
+    def fake_run(*a, **kw):
+        calls.append(1)
+        return SimpleNamespace(stdout=("## DONE\n" + "x" * 150).encode(), returncode=0, stderr=b"")
+
+    monkeypatch.setattr(H.subprocess, "run", fake_run)
+    lock = H._recap_stamp(payload["session_id"]).with_suffix(".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("held", encoding="utf-8")
+    _hook(db, "session-recap", payload)                                  # Stop: skipped
+    assert calls == []
+    _hook(db, "session-recap", {**payload, "hook_event_name": "SessionEnd"})
+    assert len(calls) == 1
+    assert list((proj / "memory").glob("session-*.md"))

@@ -764,6 +764,10 @@ def _release_recap_slot(lock: Path | None) -> None:
         pass
 
 
+_SYNTHETIC_TURN_PREFIXES = ("<task-notification>", "<local-command", "<command-",
+                            "<system-reminder>")
+
+
 def _filter_transcript(path: Path) -> str:
     """Keep only user/assistant text; skip tool_use/tool_result/thinking."""
     out: list[str] = []
@@ -777,7 +781,12 @@ def _filter_transcript(path: Path) -> str:
                 continue
             content = (rec.get("message") or {}).get("content") or []
             if isinstance(content, str):
-                text = content  # plain-string messages are real turns too
+                # plain-string messages are real turns — except Claude Code's
+                # synthetic ones (task notifications, command output), which
+                # are plumbing, not conversation
+                if content.lstrip().startswith(_SYNTHETIC_TURN_PREFIXES):
+                    continue
+                text = content
             elif isinstance(content, list):
                 text = " ".join(
                     c.get("text", "") for c in content
@@ -867,8 +876,9 @@ def run_recap(data: dict[str, Any]) -> None:
         return
     # One recap per session at a time. The debounce stamp is checked early
     # and written late, so two Stops for one session could both pass it; an
-    # exclusive per-session lock closes that window. Released at exit, so
-    # every early return below is covered without threading it through.
+    # exclusive per-session lock closes that window. Released in the finally
+    # below and on the skip:busy exit; a SIGTERM'd hook leaves it, and the
+    # stale check reclaims it after RECAP_TIMEOUT + 60 s.
     session_lock = stamp.with_suffix(".lock")
     try:
         session_lock.parent.mkdir(parents=True, exist_ok=True)
@@ -879,8 +889,24 @@ def run_recap(data: dict[str, Any]) -> None:
             pass
         os.close(os.open(session_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
     except FileExistsError:
-        _log_line("session-recap", session_id[:8], "skip:concurrent-same-session")
-        return
+        if not force:
+            _log_line("session-recap", session_id[:8], "skip:concurrent-same-session")
+            return
+        # The final recap is the session's last word and must not be lost to a
+        # Stop recap still in flight: wait a little for it, then go anyway —
+        # publication is compare-and-swap on the transcript basis, so two
+        # overlapping recaps cannot clobber each other.
+        for _ in range(25):
+            time.sleep(0.2)
+            try:
+                os.close(os.open(session_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+                break
+            except FileExistsError:
+                continue
+            except OSError:
+                break
+        else:
+            _log_line("session-recap", session_id[:8], "note:final-over-lock")
     except OSError:
         pass  # no lock dir: proceed as before rather than lose the recap
 
@@ -943,7 +969,7 @@ def run_recap(data: dict[str, Any]) -> None:
     finally:
         _release_recap_slot(slot)
         # the model call is over; publish below has its own lock. Released
-        # here explicitly — atexit alone does not fire between in-process runs.
+        # here explicitly so in-process callers (tests) see it released too.
         session_lock.unlink(missing_ok=True)
     # A non-zero exit means the text is an error message, not a recap — writing
     # it would overwrite a good note with noise.
@@ -978,7 +1004,7 @@ def run_recap(data: dict[str, Any]) -> None:
         return
     _log_line("session-recap", session_id[:8], f"wrote {outfile.name} ({len(summary)}b)")
 
-    # Index it here rather than leaving it to the separate migrate hook: hooks on
+    # Index it here — there is no separate migrate hook any more: hooks on
     # one event run in parallel, and SessionEnd registers only this one, so the
     # closing recap could sit outside the database until some later run.
     try:

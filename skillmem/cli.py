@@ -925,6 +925,23 @@ def _prune_settings_hook(settings_json: Path, *, command_prefix: str) -> dict[st
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         return {"changed": False, "reason": "no hooks"}
+    import shlex as _shlex
+    want = command_prefix.split()[1:]           # e.g. ["migrate"]
+
+    def _is_ours(cmd: str) -> bool:
+        # parse the way the command was written: shlex on POSIX, plain split
+        # on Windows (list2cmdline); match the binary by NAME, so a quoted
+        # path with a space, skillmem.exe, or any venv location all match —
+        # and "my-skillmem migrate" (a foreign tool) does not
+        try:
+            argv = _shlex.split(cmd) if sys.platform != "win32" else cmd.split()
+        except ValueError:
+            return False
+        if not argv:
+            return False
+        name = Path(argv[0]).name.lower()
+        return name in ("skillmem", "skillmem.exe") and argv[1:] == want
+
     removed = 0
     for event, groups in list(hooks.items()):
         if not isinstance(groups, list):
@@ -933,8 +950,8 @@ def _prune_settings_hook(settings_json: Path, *, command_prefix: str) -> dict[st
             hs = group.get("hooks") if isinstance(group, dict) else None
             if not isinstance(hs, list):
                 continue
-            keep = [h for h in hs if not (isinstance(h, dict) and str(h.get("command", ""))
-                                          .rstrip().endswith(command_prefix))]
+            keep = [h for h in hs
+                    if not (isinstance(h, dict) and _is_ours(str(h.get("command", ""))))]
             removed += len(hs) - len(keep)
             group["hooks"] = keep
         hooks[event] = [g for g in groups if not (isinstance(g, dict) and g.get("hooks") == [])]
@@ -942,8 +959,12 @@ def _prune_settings_hook(settings_json: Path, *, command_prefix: str) -> dict[st
             del hooks[event]
     if not removed:
         return {"changed": False, "reason": f"no '{command_prefix}' hook present"}
+    import time as _time
+    backup = settings_json.with_suffix(f".json.bak.{int(_time.time())}")
+    backup.write_text(settings_json.read_text(encoding="utf-8"), encoding="utf-8")
     _atomic_write_json(settings_json, data)
-    return {"changed": True, "removed": f"{removed} hook(s) running '{command_prefix}'"}
+    return {"changed": True, "removed": f"{removed} hook(s) running '{command_prefix}'",
+            "backup": str(backup)}
 
 
 def _patch_settings_deny(settings_json: Path, rule: str) -> dict[str, Any]:
@@ -1039,7 +1060,7 @@ def init(
         claude_json = Path.home() / ".claude.json"
         report["claude_json"] = _patch_claude_json(
             claude_json, mcp_binary,
-            db_env=str(db_path) if str(db_path) != str(S.default_db_path()) else None,
+            db_env=str(db_path) if db_path is not None else None,
         )
 
         settings_json = Path.home() / ".claude" / "settings.json"
@@ -1087,10 +1108,10 @@ def init(
                        err=True)
         report["codex_config"] = _patch_codex_config(
             Path.home() / ".codex" / "config.toml", codex_binary,
-            db_env=str(db_path) if str(db_path) != str(S.default_db_path()) else None,
+            db_env=str(db_path) if db_path is not None else None,
         )
 
-    db_override = str(db_path) if str(db_path) != str(S.default_db_path()) else None
+    db_override = str(db_path) if db_path is not None else None
     editors = {"cursor": cursor, "windsurf": windsurf, "gemini": gemini}
     for agent, wanted in editors.items():
         if not wanted:
@@ -1230,13 +1251,17 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
         try:
             conn = S.connect(db)
             ns = S._db_namespace(conn)
+            # legacy (pre-0.11) names carry no namespace: only the ones THIS
+            # database references are ours — another DB may use the rest
+            mine = {r[0] for r in conn.execute(
+                "SELECT body_path FROM memory_items WHERE body_path IS NOT NULL")}
             conn.close()
             for p in S.docs_dir().glob("*.md"):
                 m = S._BODY_FILE_RE.search(p.name)
                 if m is None:
                     continue
                 if m.group("content") is None:
-                    if ns:  # legacy names are only ours when we are the default DB
+                    if p.name not in mine:
                         continue
                 elif (m.group("ns") or "") != (f"-{ns}" if ns else ""):
                     continue
