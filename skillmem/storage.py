@@ -170,6 +170,7 @@ CREATE TABLE IF NOT EXISTS memory_items (
     origin          TEXT NOT NULL DEFAULT 'unknown', -- owner|agent|imported|derived (v10)
     trusted_at      INTEGER,                       -- set only by the owner (v10)
     trusted_by      TEXT,
+    last_decayed_at INTEGER,                       -- one decay step per threshold (v12)
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     deleted_at      INTEGER,
@@ -210,16 +211,6 @@ CREATE TABLE IF NOT EXISTS meta (
 -- skills were surfaced for which query. The raw signal a future prompt
 -- optimizer (DSPy/GEPA) needs: what got recalled, how often, and (later)
 -- whether it helped. Idempotent CREATE — no schema-version bump needed.
-CREATE TABLE IF NOT EXISTS skill_traces (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    subject_id  TEXT,
-    agent       TEXT,
-    query       TEXT,
-    recalled    TEXT NOT NULL DEFAULT '[]',   -- JSON [{slug, score}]
-    helped      INTEGER,                       -- NULL until a feedback signal sets it
-    created_at  INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_traces_created ON skill_traces(created_at);
 """
 
 
@@ -230,10 +221,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
     """Idempotent schema bootstrap. Cheap on every call after first run."""
     conn.executescript(SCHEMA)
     _migrate(conn)
-    conn.execute(
-        "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
-        (str(CURRENT_SCHEMA_VERSION),),
-    )
+    # No write here: _migrate records schema_version itself. An INSERT on every
+    # open took the write lock, so a hook opening the DB behind any writer
+    # stalled for the whole busy_timeout and then emitted nothing.
 
 
 def _current_schema_version(conn: sqlite3.Connection) -> int:
@@ -248,6 +238,20 @@ def _current_schema_version(conn: sqlite3.Connection) -> int:
         return 0
 
 
+def _add_column(conn: sqlite3.Connection, ddl: str) -> None:
+    """ALTER ... ADD COLUMN that tolerates losing the race to another process.
+
+    Two hooks opening a pre-v9 DB at once both saw the column missing and both
+    ALTERed; the loser died with "duplicate column name". v10 guarded this,
+    the older columns did not.
+    """
+    try:
+        conn.execute(f"ALTER TABLE memory_items ADD COLUMN {ddl}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Forward-only schema patches. Backfills run once, then are skipped."""
     # Self-healing guard: ensure the embedding column exists regardless of the
@@ -256,13 +260,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # strand the DB at v6 with no column. Cheap idempotent check on every open.
     live_cols = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)")}
     if "embedding" not in live_cols:
-        conn.execute("ALTER TABLE memory_items ADD COLUMN embedding BLOB")
+        _add_column(conn, "embedding BLOB")
     # v7: skill lifecycle state (active -> stale -> archived). Self-healing,
     # like embedding, so the column is guaranteed regardless of the version gate.
     if "lifecycle" not in live_cols:
-        conn.execute(
-            "ALTER TABLE memory_items ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active'"
-        )
+        _add_column(conn, "lifecycle TEXT NOT NULL DEFAULT 'active'")
+    # v12: one decay step per threshold (see decay_stale). Self-healing too.
+    if "last_decayed_at" not in live_cols:
+        _add_column(conn, "last_decayed_at INTEGER")
     # v10, same self-healing reason: a DB whose version says 10 but whose ALTER
     # never landed would otherwise fail every read with "no such column: origin".
     if not {"origin", "trusted_at", "trusted_by"} <= live_cols:
@@ -273,11 +278,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)")}
     if "body_path" not in cols:
-        conn.execute("ALTER TABLE memory_items ADD COLUMN body_path TEXT")
+        _add_column(conn, "body_path TEXT")
     if "stemmed" not in cols:
-        conn.execute(
-            "ALTER TABLE memory_items ADD COLUMN stemmed TEXT NOT NULL DEFAULT ''"
-        )
+        _add_column(conn, "stemmed TEXT NOT NULL DEFAULT ''")
 
     history_cols = {row["name"] for row in conn.execute("PRAGMA table_info(memory_history)")}
     history_needs_chain = "self_hash" not in history_cols
@@ -327,18 +330,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     # --- v5: skill learning columns ---
     if "access_count" not in cols:
-        conn.execute(
-            "ALTER TABLE memory_items ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0"
-        )
+        _add_column(conn, "access_count INTEGER NOT NULL DEFAULT 0")
     if "last_accessed_at" not in cols:
-        conn.execute("ALTER TABLE memory_items ADD COLUMN last_accessed_at INTEGER")
+        _add_column(conn, "last_accessed_at INTEGER")
 
     # --- v6: semantic embedding column ---
     # Column is added empty; backfill is a separate, optional, network-bound
     # step (`skillmem reindex-embeddings`) so the migration never blocks on a
     # model download. Recall falls back to BM25 for rows without an embedding.
     if "embedding" not in cols:
-        conn.execute("ALTER TABLE memory_items ADD COLUMN embedding BLOB")
+        _add_column(conn, "embedding BLOB")
 
     # --- v8: drop the legacy porter FTS index ---
     # mem_fts was superseded by mem_fts_stem (Snowball) and had no readers
@@ -359,17 +360,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # keep confirmations and failures apart from raw retrieval count, so a
     # skill's strength can be traced back to what actually confirmed it.
     if "pinned" not in cols:
-        conn.execute(
-            "ALTER TABLE memory_items ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
-        )
+        _add_column(conn, "pinned INTEGER NOT NULL DEFAULT 0")
     if "confirmed_count" not in cols:
-        conn.execute(
-            "ALTER TABLE memory_items ADD COLUMN confirmed_count INTEGER NOT NULL DEFAULT 0"
-        )
+        _add_column(conn, "confirmed_count INTEGER NOT NULL DEFAULT 0")
     if "failure_count" not in cols:
-        conn.execute(
-            "ALTER TABLE memory_items ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0"
-        )
+        _add_column(conn, "failure_count INTEGER NOT NULL DEFAULT 0")
 
     # --- v10: provenance, and trust as an explicit act ---
     # The loop this closes: an external text (a README, a web page) reaches a
@@ -424,13 +419,16 @@ def restem_all(conn: sqlite3.Connection) -> int:
 def _restem_all(conn: sqlite3.Connection) -> int:
     """Rebuild the stemmed column for every row. No model, no network, one pass."""
     rows = conn.execute(
-        "SELECT id, title, body, tags, topics FROM memory_items"
+        "SELECT * FROM memory_items"
     ).fetchall()
     n = 0
     with tx(conn):
         for r in rows:
+            # the DB body is only an excerpt for externalized documents; index
+            # the whole text or the tail stops matching after every reindex
+            body = load_body(MemoryItem.from_row(r)) if r["body_path"] else r["body"]
             stemmed = _stem_text(
-                f"{r['title']}\n{r['body']}\n"
+                f"{r['title']}\n{body}\n"
                 + " ".join(_parse_json_list(r["tags"]) + _parse_json_list(r["topics"]))
             )
             conn.execute("UPDATE memory_items SET stemmed = ? WHERE id = ?",
@@ -614,6 +612,15 @@ def _last_chain_hash(conn: sqlite3.Connection) -> str | None:
         "WHERE self_hash IS NOT NULL ORDER BY changed_at DESC, id DESC LIMIT 1"
     ).fetchone()
     return row["self_hash"] if row else None
+
+
+def _chain_clock(conn: sqlite3.Connection, now: int) -> int:
+    """The chain is walked in (changed_at, id) order, so a row stamped earlier
+    than its predecessor (clock stepped back) would verify as a break. Clamp
+    the timestamp to the tip instead of reordering existing chains."""
+    row = conn.execute("SELECT MAX(changed_at) AS t FROM memory_history").fetchone()
+    tip = row["t"] if row and row["t"] is not None else 0
+    return max(now, int(tip))
 
 
 # --------------------------------------------------------------------------- #
@@ -840,41 +847,109 @@ def _make_excerpt(body: str, limit: int = DOC_EXCERPT_CHARS) -> str:
     return head + "…"
 
 
-def _body_filename(slug: str) -> str:
-    """Deterministic filename: ``<safe-slug>__<hash8>.md`` — collision-proof."""
+def _db_namespace(conn: sqlite3.Connection) -> str:
+    """8 hex chars naming the database a body file belongs to.
+
+    docs/ is shared by every database under one SKILLMEM_HOME, and the file
+    name used to depend on the slug alone — so two databases with the same
+    slug read and overwrote one file. The default database keeps the empty
+    namespace so existing files stay valid; any other database gets its own.
+    """
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        path = str(Path(row[2]).resolve()) if row and row[2] else ""
+    except (sqlite3.Error, OSError, TypeError):
+        path = ""
+    if not path or path == str(default_db_path().resolve()):
+        return ""
+    return hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]
+
+
+def _body_filename(slug: str, *, ns: str = "", content_hash: str = "") -> str:
+    """``<safe-slug>__<hash8>[-<ns8>][-<content8>].md``.
+
+    Content-addressed: a new body is a NEW file, never an overwrite of the one
+    a committed row points at. So publishing before COMMIT is safe — a rollback
+    leaves an orphan, which gc_body_files() collects, and never a row whose
+    file holds someone else's text.
+    """
     safe = _re.sub(r"[^\w.\-]+", "-", slug, flags=_re.UNICODE).strip("-") or "untitled"
     h = hashlib.sha256(slug.encode("utf-8")).hexdigest()[:8]
+    if ns:
+        h += f"-{ns}"
+    if content_hash:
+        h += f"+{content_hash[:8]}"
     return f"{safe}__{h}.md"
 
 
-def _stage_body_file(slug: str, body: str) -> tuple[Path, Path]:
-    """Write the new body to a scratch file WITHOUT publishing it yet.
+_BODY_FILE_RE = _re.compile(
+    r"__[0-9a-f]{8}(?P<ns>-[0-9a-f]{8})?(?P<content>\+[0-9a-f]{8})?\.md$"
+)
 
-    The write itself was already atomic, but it happened inside the DB
-    transaction: if a later statement failed, SQLite rolled back to the old row
-    while the file on disk already held the new text — excerpt, content_hash
-    and body file silently disagreeing. Staging here and publishing after
-    COMMIT keeps the two in step.
+
+def _stage_body_file(conn: sqlite3.Connection, slug: str, body: str,
+                     content_hash: str) -> tuple[Path, Path]:
+    """Write the new body to a scratch file and publish it under its own name.
+
+    The name carries the content hash, so this never touches the file a
+    committed row references; the row is switched to it by the transaction
+    that follows. If that transaction (or an outer one wrapping it) rolls
+    back, the row keeps pointing at the old file and this one is an orphan
+    for gc_body_files() — the two can no longer disagree.
     """
-    dest = docs_dir() / _body_filename(slug)
+    dest = docs_dir() / _body_filename(slug, ns=_db_namespace(conn),
+                                       content_hash=content_hash)
     tmp = dest.with_suffix(dest.suffix + f".staged-{_uuid.uuid4().hex[:8]}")
     tmp.write_text(body, encoding="utf-8")
-    return tmp, dest
+    os.replace(tmp, dest)
+    return dest, dest
 
 
 def _publish_body_file(staged: tuple[Path, Path]) -> str:
-    tmp, dest = staged
-    os.replace(tmp, dest)
-    return dest.name
+    return staged[1].name
 
 
-def _discard_body_file(staged: tuple[Path, Path] | None) -> None:
+def _discard_body_file(conn: sqlite3.Connection,
+                       staged: tuple[Path, Path] | None) -> None:
+    """Remove a body file whose transaction failed — unless a row (say, the
+    identical concurrent write that won the slug race) references it."""
     if staged is None:
         return
+    name = staged[1].name
     try:
-        staged[0].unlink(missing_ok=True)
-    except OSError:
-        pass  # orphan scratch file is harmless; never mask the real error
+        if conn.execute("SELECT 1 FROM memory_items WHERE body_path = ? LIMIT 1",
+                        (name,)).fetchone():
+            return
+        staged[1].unlink(missing_ok=True)
+    except (sqlite3.Error, OSError):
+        pass  # an orphan is harmless (gc_body_files); never mask the real error
+
+
+def gc_body_files(conn: sqlite3.Connection) -> int:
+    """Delete body files this database no longer references. Returns count.
+
+    Only files in this database's namespace are candidates — another
+    database's files share the directory and are not ours to judge.
+    """
+    ns = _db_namespace(conn)
+    live = {r[0] for r in conn.execute(
+        "SELECT body_path FROM memory_items WHERE body_path IS NOT NULL")}
+    removed = 0
+    for path in docs_dir().glob("*.md"):
+        m = _BODY_FILE_RE.search(path.name)
+        if m is None or path.name in live:
+            continue
+        if (m.group("ns") or "") != (f"-{ns}" if ns else ""):
+            continue  # another database's file
+        # a file younger than a minute may belong to a write still committing
+        try:
+            if time.time() - path.stat().st_mtime < 60:
+                continue
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def load_body(item: "MemoryItem") -> str:
@@ -900,6 +975,18 @@ ORIGINS = ("owner", "agent", "imported", "derived", "unknown")
 def _valid_origin(origin: str | None) -> str:
     """Anything unrecognised is 'unknown' — and unknown is never trusted."""
     return origin if origin in ORIGINS else "unknown"
+
+
+_KIND_RE = _re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
+
+def _valid_kind(kind: str) -> str:
+    """kind ends up in file paths (export, vault) — keep it a plain word."""
+    if not _KIND_RE.fullmatch(kind or ""):
+        raise ValueError(
+            f"invalid kind {kind!r}: use a-z, 0-9, '_' or '-', 1-32 chars"
+        )
+    return kind
 
 
 def set_trust(conn: sqlite3.Connection, slug: str, *, trusted: bool,
@@ -932,6 +1019,7 @@ def upsert(
     force: bool = False,
     check_conflicts: bool = False,
     links: Iterable[str] | None = None,
+    restore_strength: bool = False,
 ) -> MemoryItem:
     """Insert or update ``item`` by slug; returns the same (mutated) object.
 
@@ -940,7 +1028,13 @@ def upsert(
     replaced with the short excerpt (``item.body_path`` then points at the
     full text; use ``load_body`` to read it back). Keep your own copy of the
     original body if you need it after the call.
+
+    ``strength`` is evidence the row earned; an ordinary update keeps it. Only
+    an explicit restore (vault import carrying a strength) passes
+    ``restore_strength=True`` — before that, every force-overwrite and every
+    pack re-import silently reset it to 1.0.
     """
+    _valid_kind(item.kind)
     item.title = scrub(item.title)
     item.body = scrub(item.body)
     item.wordcount = _wordcount(item.body)
@@ -952,7 +1046,8 @@ def upsert(
     full_body = item.body
     externalize = _should_externalize(item)
     if externalize:
-        item.body_path = _body_filename(item.slug)
+        item.body_path = _body_filename(item.slug, ns=_db_namespace(conn),
+                                        content_hash=item.content_hash)
         item.body = _make_excerpt(full_body)
     else:
         item.body_path = None
@@ -980,7 +1075,8 @@ def upsert(
             item.created_at = now
         item.updated_at = now
 
-        staged = _stage_body_file(item.slug, full_body) if externalize else None
+        staged = (_stage_body_file(conn, item.slug, full_body, item.content_hash)
+                  if externalize else None)
         try:
             with tx(conn):
                 cur = conn.execute(
@@ -1009,7 +1105,7 @@ def upsert(
                 if links is not None:
                     _replace_links_inner(conn, item.slug, links)
         except sqlite3.IntegrityError as exc:
-            _discard_body_file(staged)
+            _discard_body_file(conn, staged)
             # Another writer inserted this slug between our existence check and
             # this INSERT. That is the same situation the pre-check reports as a
             # conflict, so callers should see the same exception — not a raw
@@ -1020,7 +1116,7 @@ def upsert(
                 ) from exc
             raise
         except BaseException:
-            _discard_body_file(staged)
+            _discard_body_file(conn, staged)
             raise
         if staged is not None:
             _publish_body_file(staged)
@@ -1044,6 +1140,10 @@ def upsert(
             changed["tags"] = tags
         if item.topics and topics != existing["topics"]:
             changed["topics"] = topics
+        if "tags" in changed or "topics" in changed:
+            # tags/topics are part of the lexical index — a tag added to an
+            # unchanged body must be searchable, so the stems follow.
+            changed["stemmed"] = stemmed
         if changed:
             changed["updated_at"] = now
             sets = ", ".join(f"{k} = ?" for k in changed)
@@ -1073,30 +1173,23 @@ def upsert(
     if item.ttl_days and not freshness:
         freshness = now + item.ttl_days * 86400
 
-    # Staged, not published: if the transaction below rolls back, the old body
-    # file must survive untouched (see _stage_body_file).
-    staged = _stage_body_file(item.slug, full_body) if externalize else None
+    # Content-addressed: the new file has its own name, the old one survives
+    # any rollback untouched (see _stage_body_file).
+    staged = (_stage_body_file(conn, item.slug, full_body, item.content_hash)
+              if externalize else None)
     try:
         _upsert_update_tx(
             conn, item=item, existing=existing, now=now, reason=reason,
             stemmed=stemmed, freshness=freshness, old_body=old_body, links=links,
+            strength=item.strength if restore_strength else None,
         )
     except BaseException:
-        _discard_body_file(staged)
+        _discard_body_file(conn, staged)
         raise
 
-    if staged is not None:
-        _publish_body_file(staged)
-
-    # Clean up the previous body file *after* the commit succeeded — failure
-    # to delete just leaves an orphan, not a corrupted record.
-    if old_path and old_path != item.body_path:
-        old_file = docs_dir() / old_path
-        if old_file.exists():
-            try:
-                old_file.unlink()
-            except OSError as exc:
-                log.warning("orphan body file remains at %s: %s", old_file, exc)
+    # The previous body file is NOT deleted here: an outer transaction (vault
+    # import) may still roll this update back, and then the row needs it.
+    # gc_body_files() removes unreferenced files on the nightly run.
 
     item.id = existing["id"]
     item.created_at = existing["created_at"]
@@ -1109,10 +1202,11 @@ def upsert(
 def _upsert_update_tx(
     conn: sqlite3.Connection, *, item: "MemoryItem", existing: Any, now: int,
     reason: str | None, stemmed: str, freshness: int | None, old_body: str,
-    links: list[str] | None,
+    links: list[str] | None, strength: float | None = None,
 ) -> None:
     with tx(conn):
         prev_hash = _last_chain_hash(conn)
+        now = _chain_clock(conn, now)
         history_payload = {
             "slug": existing["slug"], "old_title": existing["title"],
             "old_body": old_body, "changed_at": now,
@@ -1138,7 +1232,8 @@ def _upsert_update_tx(
                 kind = ?, title = ?, body = ?, body_path = ?, stemmed = ?, project = ?,
                 tags = ?, topics = ?, visibility = ?, agent = ?, source_session = ?,
                 attachments = ?, ttl_days = ?, freshness_until = ?, wordcount = ?,
-                content_hash = ?, supersedes_id = ?, confidence = ?, strength = ?,
+                content_hash = ?, supersedes_id = ?, confidence = ?,
+                strength = COALESCE(?, strength),
                 origin = ?,
                 -- We only get here when title/body actually changed (an
                 -- identical write returns early), and approval belongs to the
@@ -1153,7 +1248,7 @@ def _upsert_update_tx(
                 item.visibility, item.agent, item.source_session,
                 _json_list(item.attachments),
                 item.ttl_days, freshness, item.wordcount, item.content_hash,
-                item.supersedes_id, item.confidence, item.strength,
+                item.supersedes_id, item.confidence, strength,
                 _valid_origin(item.origin), now,
                 existing["id"],
             ),
@@ -1903,22 +1998,29 @@ def reinforce(
         return None
 
     now = _now()
-    confirmed = row["confirmed_count"]
-    failures = row["failure_count"]
+    # One statement, relative arithmetic: two confirmations landing together
+    # used to read the same counters and one overwrote the other.
     if evidence == "failure":
-        new_strength = max(DECAY_FLOOR, row["strength"] * FAILURE_FACTOR)
-        failures += 1
+        conn.execute(
+            "UPDATE memory_items SET strength = MAX(?, strength * ?), "
+            "access_count = access_count + 1, last_accessed_at = ?, "
+            "failure_count = failure_count + 1 WHERE id = ?",
+            (DECAY_FLOOR, FAILURE_FACTOR, now, row["id"]),
+        )
     else:
-        new_strength = min(STRENGTH_CAP, row["strength"] + EVIDENCE_WEIGHTS[evidence])
-        if EVIDENCE_WEIGHTS[evidence] > 0:
-            confirmed += 1
-    new_count = row["access_count"] + 1
-
-    conn.execute(
-        "UPDATE memory_items SET strength = ?, access_count = ?, last_accessed_at = ?, "
-        "confirmed_count = ?, failure_count = ? WHERE id = ?",
-        (new_strength, new_count, now, confirmed, failures, row["id"]),
-    )
+        boost = EVIDENCE_WEIGHTS[evidence]
+        conn.execute(
+            "UPDATE memory_items SET strength = MIN(?, strength + ?), "
+            "access_count = access_count + 1, last_accessed_at = ?, "
+            "confirmed_count = confirmed_count + ? WHERE id = ?",
+            (STRENGTH_CAP, boost, now, 1 if boost > 0 else 0, row["id"]),
+        )
+    fresh = conn.execute(
+        "SELECT strength, access_count, confirmed_count, failure_count "
+        "FROM memory_items WHERE id = ?", (row["id"],),
+    ).fetchone()
+    new_strength, new_count = fresh["strength"], fresh["access_count"]
+    confirmed, failures = fresh["confirmed_count"], fresh["failure_count"]
     return {"slug": slug, "strength": round(new_strength, 3),
             "access_count": new_count, "evidence": evidence,
             "confirmed_count": confirmed, "failure_count": failures}
@@ -1953,19 +2055,25 @@ def decay_stale(
     kind: str = "skill",
 ) -> list[dict[str, Any]]:
     """Ebbinghaus decay: reduce strength of skills not accessed recently."""
-    cutoff = _now() - days_threshold * 86400
+    now = _now()
+    cutoff = now - days_threshold * 86400
+    # A skill nobody has recalled yet is measured from its birth, not from
+    # "never" — otherwise the first nightly run hits a day-old skill. And one
+    # decay step per elapsed threshold: running the job twice in a night, or
+    # by hand after it, used to compound 0.85 each time.
     rows = conn.execute(
-        "SELECT id, slug, strength, last_accessed_at FROM memory_items "
+        "SELECT id, slug, strength FROM memory_items "
         "WHERE kind = ? AND deleted_at IS NULL AND strength > ? AND pinned = 0 "
-        "AND (last_accessed_at IS NULL OR last_accessed_at < ?)",
-        (kind, DECAY_FLOOR, cutoff),
+        "AND COALESCE(last_accessed_at, created_at) <= ? "
+        "AND COALESCE(last_decayed_at, 0) <= ?",
+        (kind, DECAY_FLOOR, cutoff, cutoff),
     ).fetchall()
     decayed: list[dict[str, Any]] = []
     for r in rows:
         new_strength = max(DECAY_FLOOR, r["strength"] * DECAY_FACTOR)
         conn.execute(
-            "UPDATE memory_items SET strength = ? WHERE id = ?",
-            (new_strength, r["id"]),
+            "UPDATE memory_items SET strength = ?, last_decayed_at = ? WHERE id = ?",
+            (new_strength, now, r["id"]),
         )
         decayed.append({
             "slug": r["slug"],

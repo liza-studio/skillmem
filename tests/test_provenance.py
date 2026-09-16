@@ -254,7 +254,22 @@ def test_export_import_roundtrip_keeps_origin_and_drops_trust(tmp_path: Path):
 
 
 # trust command
-def test_trust_command_grants_and_withdraws(tmp_path: Path):
+def test_trust_command_refuses_without_a_terminal(tmp_path: Path):
+    """An agent running `skillmem trust` from Bash has no TTY — and must get
+    a refusal, not an approval. One command used to undo the whole boundary."""
+    db = _db(tmp_path)
+    conn = S.connect(db)
+    S.upsert(conn, S.MemoryItem(slug="skill-y", kind="skill", origin="agent",
+                                title="Скилл", body="тело"))
+    conn.commit()
+    r = CliRunner().invoke(cli_main, ["--db", str(db), "trust", "skill-y"])
+    assert r.exit_code != 0 and "no TTY" in r.output
+    assert S.get(S.connect(db), "skill-y").trusted_at is None
+
+
+def test_trust_command_grants_and_withdraws(tmp_path: Path, monkeypatch):
+    import skillmem.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_owner_trust", lambda: (1_700_000_000, "cli-tty"))
     db = _db(tmp_path)
     conn = S.connect(db)
     S.upsert(conn, S.MemoryItem(slug="skill-y", kind="skill", origin="agent",

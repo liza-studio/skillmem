@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field
 
 from . import storage as S
 from . import __version__
+from .hooks import frame_for_model
 
 
 # --------------------------------------------------------------------------- #
@@ -243,7 +244,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
     def search(req: SearchRequest, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
         conn = get_conn()
         hits = S.search(conn, req.query, kind=req.kind, project=req.project, limit=req.limit)
-        filtered = [h for h in hits if _visible_to(h, agent)]
+        filtered = [frame_for_model(h, dict(h)) for h in hits if _visible_to(h, agent)]
         return {"count": len(filtered), "results": filtered, "agent": agent.name}
 
     @app.get("/get/{slug}")
@@ -255,6 +256,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="not found")
         payload = item.to_dict()
         payload["body"] = S.load_body(item)
+        frame_for_model(item, payload)
         payload["links_out"] = S.links_from(conn, slug)
         payload["links_in"] = S.links_to(conn, slug)
         if include_history:
@@ -276,19 +278,42 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             ],
         }
 
-    @app.post("/write")
-    def write(req: WriteRequest, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
-        if req.visibility == "public" and not agent.can("write_public"):
+    def _gate_create(conn, item: S.MemoryItem, agent: AgentIdentity) -> None:
+        """One authorization for every create path (/write, /learn).
+
+        A create that lands on an existing slug is an update in disguise: it
+        used to reach the same-hash branch of upsert, which rewrote agent and
+        visibility before any permission check — so any reader could resubmit a
+        public rule's exact text as private and own it. Existing rows keep
+        their author and visibility and demand the same permission /update does.
+        """
+        if item.visibility == "public" and not agent.can("write_public"):
             raise HTTPException(
                 status_code=403,
                 detail="agent lacks 'write_public' permission (or master scope)",
             )
+        existing = S.get(conn, item.slug)
+        if existing is None:
+            return
+        if not _may_write(existing, agent):
+            raise HTTPException(
+                status_code=403,
+                detail="slug exists and belongs to another agent or is public; "
+                       "use /update with the right permission",
+            )
+        item.agent = existing.agent or agent.name
+        item.visibility = existing.visibility
+
+    @app.post("/write")
+    def write(req: WriteRequest, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
         conn = get_conn()
         item = S.MemoryItem(
             slug=req.slug, kind=req.kind, title=req.title, body=req.body,
             project=req.project, tags=list(req.tags), topics=list(req.topics),
             visibility=req.visibility, agent=agent.name, ttl_days=req.ttl_days,
+            origin="agent",
         )
+        _gate_create(conn, item, agent)
         try:
             result = S.upsert(
                 conn, item,
@@ -351,8 +376,9 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             project=req.project,
             tags=list(req.tags), topics=list(req.topics),
             visibility=req.visibility, agent=agent.name,
-            ttl_days=req.ttl_days,
+            ttl_days=req.ttl_days, origin="agent",
         )
+        _gate_create(conn, item, agent)
         try:
             result = S.upsert(
                 conn, item,
@@ -377,6 +403,8 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
                 if bumped:
                     r["strength"] = bumped["strength"]
                     r["access_count"] = bumped["access_count"]
+        for r in visible:
+            frame_for_model(r, r)
         return {"count": len(visible), "skills": visible, "agent": agent.name}
 
     @app.post("/reinforce/{slug}")
@@ -402,7 +430,8 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="master scope required")
         conn = get_conn()
         decayed = S.decay_stale(conn, days_threshold=days)
-        return {"decayed": len(decayed), "details": decayed}
+        sweep = S.sweep_lifecycle(conn)  # same maintenance the CLI run does
+        return {"decayed": len(decayed), "details": decayed, "lifecycle": sweep}
 
     @app.post("/reload-tokens")
     def reload_tokens(agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:

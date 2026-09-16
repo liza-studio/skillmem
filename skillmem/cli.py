@@ -211,7 +211,7 @@ def ls_cmd(ctx: click.Context, kind: str | None, project: str | None, limit: int
 @click.option("--reason", default=None, help="Required when overwriting an existing slug")
 @click.option("--force", is_flag=True)
 @click.option("--check-conflicts/--no-check-conflicts", default=True,
-              help="Refuse near-duplicates (Jaccard > 0.7)")
+              help="Refuse near-duplicates (word overlap > 0.7)")
 @click.pass_context
 def write(
     ctx: click.Context,
@@ -236,11 +236,14 @@ def write(
     else:
         body_text = sys.stdin.read()
 
+    trusted_at, trusted_by = _owner_trust()
     item = S.MemoryItem(
         slug=slug, kind=kind, title=title, body=body_text,
         project=project, agent=agent, ttl_days=ttl_days,
-        origin="owner",  # typed at a terminal by a person
-        **dict(zip(("trusted_at", "trusted_by"), _owner_trust())),
+        # Provenance follows the channel: a terminal means a person typed it;
+        # no terminal means an agent ran the CLI, and "owner" would be a lie.
+        origin="owner" if trusted_at else "agent",
+        trusted_at=trusted_at, trusted_by=trusted_by,
     )
     try:
         result = S.upsert(
@@ -327,6 +330,16 @@ def trust_cmd(ctx: click.Context, slug: str, untrust: bool) -> None:
     document it was reading, so what an agent wrote arrives unapproved — as data.
     Editing an approved memory's text drops the approval with it.
     """
+    # The same signal write/learn use: no terminal, no owner. An agent that is
+    # talked into `skillmem trust <slug>` from Bash must get a refusal, not an
+    # approval — otherwise one command undoes the whole trust boundary. This is
+    # accident protection, not a wall: `init --claude-code` also installs a
+    # permission deny rule for the command, and README says so.
+    if _owner_trust()[0] is None and not untrust:
+        raise click.ClickException(
+            "refusing: `trust` needs a person at a terminal (no TTY). "
+            "Run it yourself, not through an agent."
+        )
     conn = _conn(ctx.obj["db_path"])
     item = S.set_trust(conn, slug, trusted=not untrust)
     conn.commit()
@@ -892,9 +905,34 @@ def _patch_settings_hook(
             "backup": str(backup) if backup else None}
 
 
+def _patch_settings_deny(settings_json: Path, rule: str) -> dict[str, Any]:
+    """Add a permission deny rule to ~/.claude/settings.json (idempotent).
+
+    `skillmem trust` refuses to run without a TTY, but a TTY can be faked
+    (`script -q /dev/null skillmem trust x`). The deny rule is what actually
+    stops Claude Code from running the command at an injected document's
+    request; the TTY check only catches the accidental case.
+    """
+    data: dict[str, Any] = {}
+    if settings_json.exists():
+        try:
+            data = json.loads(settings_json.read_text(encoding="utf-8") or "{}")
+        except json.JSONDecodeError:
+            return {"changed": False, "reason": "existing JSON is invalid"}
+    perms = data.setdefault("permissions", {})
+    if not isinstance(perms, dict):
+        return {"changed": False, "reason": "permissions is not an object"}
+    deny = perms.setdefault("deny", [])
+    if rule in deny:
+        return {"changed": False, "reason": f"deny rule already present: {rule}"}
+    deny.append(rule)
+    _atomic_write_json(settings_json, data)
+    return {"changed": True, "added": f"permissions.deny: {rule}"}
+
+
 @main.command()
 @click.option("--claude-code", is_flag=True,
-              help="Configure MCP entry in ~/.claude.json and add Stop hook")
+              help="Configure MCP entry in ~/.claude.json and add hooks")
 @click.option("--codex", is_flag=True,
               help="Configure MCP entry in ~/.codex/config.toml (Codex CLI)")
 @click.option("--cursor", is_flag=True,
@@ -971,8 +1009,14 @@ def init(
                                         event=event, args=args, **kw)
 
         hook_reports: list[dict[str, Any]] = []
+        # No Stop→`skillmem migrate` hook any more: with no --source it
+        # imported the alphabetically-first project's memory dir on every
+        # turn (not this project's), holding a write lock while doing it, and
+        # session-recap already indexes the note it writes. Hand-written
+        # memory files are a `skillmem migrate --source <dir>` job.
         if hooks_mode != "none":
-            hook_reports.append(_hook("Stop", ["migrate"]))
+            hook_reports.append(_patch_settings_deny(
+                settings_json, "Bash(skillmem trust*)"))
         if hooks_mode == "full":
             hook_reports += [
                 _hook("SessionStart", ["hook", "mcp-guard"]),
@@ -1588,13 +1632,14 @@ def learn(
 ) -> None:
     """Record an after-action skill from task experience."""
     conn = _conn(ctx.obj["db_path"])
+    trusted_at, trusted_by = _owner_trust()
     item = S.MemoryItem(
         slug=slug,
         kind="skill",
         title=title,
         body=S.skill_body(trigger, steps, outcome, lessons),
-        origin="owner",
-        **dict(zip(("trusted_at", "trusted_by"), _owner_trust())),
+        origin="owner" if trusted_at else "agent",
+        trusted_at=trusted_at, trusted_by=trusted_by,
         project=project,
         tags=[t.strip() for t in tags.split(",")] if tags else [],
         visibility="public",
@@ -1629,7 +1674,9 @@ def recall(ctx: click.Context, query: str, limit: int, no_reinforce: bool, fmt: 
     if not results:
         click.echo("No skills found.")
         return
+    from .hooks import frame_for_model
     for r in results:
+        frame_for_model(r, r)  # unapproved skills print inside the frame
         strength_bar = "█" * int(r["strength"] * 5)
         click.echo(
             f"  [{r['slug']}] {r['title']}\n"
@@ -1637,16 +1684,19 @@ def recall(ctx: click.Context, query: str, limit: int, no_reinforce: bool, fmt: 
             f"access={r['access_count']}  {r['freshness']}"
         )
         if r.get("body"):
-            for line in r["body"].split("\n")[:4]:
+            lines = r["body"].split("\n")
+            # a framed body must keep both markers, or the frame is decapitated
+            for line in (lines if r.get("trusted") is False else lines[:4]):
                 click.echo(f"    {line}")
         click.echo()
 
 
-@main.command()
+@main.command("skills-top")
 @click.option("--limit", "-n", default=50, type=int)
 @click.pass_context
 def skills(ctx: click.Context, limit: int) -> None:
-    """List all skills with strength and access count."""
+    """List skills with strength and access count (was `skills`, which the
+    `skills` pack group shadowed — the command was unreachable)."""
     conn = _conn(ctx.obj["db_path"])
     items = S.list_items(conn, kind="skill", limit=limit)
     if not items:
@@ -1676,12 +1726,18 @@ def decay(ctx: click.Context, days: int) -> None:
     decayed = S.decay_stale(conn, days_threshold=days)
     if not decayed:
         click.echo("Nothing to decay.")
-        return
     for d in decayed:
         click.echo(f"  {d['slug']}: {d['old_strength']:.3f} → {d['new_strength']:.3f}")
-    click.echo(f"Decayed {len(decayed)} skills.")
+    if decayed:
+        click.echo(f"Decayed {len(decayed)} skills.")
     # Lifecycle sweep rides on the same scheduled run (active -> stale -> archived).
+    # It runs whether or not anything decayed: once idle skills sit at the
+    # floor there is nothing left to decay, and that is exactly when they
+    # should be archived — an early return here meant nothing ever was.
     sweep = S.sweep_lifecycle(conn)
+    gc = S.gc_body_files(conn)
+    if gc:
+        click.echo(f"Removed {gc} orphaned body files.")
     if sweep["staled"]:
         click.echo(f"Marked stale: {', '.join(sweep['staled'])}")
     if sweep["archived"]:

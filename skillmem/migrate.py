@@ -202,7 +202,7 @@ def _source_session(meta: dict[str, Any]) -> str | None:
 
 
 def import_file(conn, path: Path, *, force: bool = True,
-                default_origin: str = "owner") -> str:
+                default_origin: str = "agent") -> str:
     """Import a single .md file. Returns 'inserted' | 'updated'."""
     meta, body = parse_file(path)
     slug = _slug_from(meta, path)
@@ -236,7 +236,7 @@ def import_dir(
     source: Path = DEFAULT_SOURCE_DIR,
     *,
     skip_index: bool = True,
-    default_origin: str = "owner",
+    default_origin: str = "agent",
 ) -> ImportReport:
     report = ImportReport()
     if not source.exists():

@@ -54,6 +54,17 @@ def _jobs() -> dict[str, list[str]]:
     }
 
 
+def _job_env() -> dict[str, str]:
+    """The data-dir/database overrides the install ran under.
+
+    A job scheduled from a shell with SKILLMEM_HOME or SKILLMEM_DB set used to
+    run without them at 04:15 — maintaining a different database than the one
+    the user meant. Persist exactly those two; never the whole environment.
+    """
+    return {k: v for k, v in os.environ.items()
+            if k in ("SKILLMEM_HOME", "SKILLMEM_DB") and v}
+
+
 def _log_dir() -> Path:
     d = S.default_data_dir() / "backups"
     d.mkdir(parents=True, exist_ok=True)
@@ -86,11 +97,20 @@ def _launchd_install() -> list[str]:
             "StandardOutPath": str(_log_dir() / f"{name}.log"),
             "StandardErrorPath": str(_log_dir() / f"{name}.err"),
         }
+        if _job_env():
+            plist["EnvironmentVariables"] = _job_env()
         path = _launchd_plist_path(label)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(plistlib.dumps(plist))
+        # unload may legitimately fail (nothing loaded yet); load may not
         subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
-        subprocess.run(["launchctl", "load", str(path)], capture_output=True)
+        proc = subprocess.run(["launchctl", "load", str(path)],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise click.ClickException(
+                f"launchctl load {path} failed (rc={proc.returncode}): "
+                f"{(proc.stderr or proc.stdout).strip()}"
+            )
         done.append(f"{label} -> {path}")
     return done
 
@@ -100,7 +120,14 @@ def _launchd_remove() -> list[str]:
     for label in _LAUNCHD_LABELS.values():
         path = _launchd_plist_path(label)
         if path.exists():
-            subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
+            proc = subprocess.run(["launchctl", "unload", str(path)],
+                                  capture_output=True, text=True)
+            if proc.returncode != 0:
+                # keep the plist: deleting the only config while the job is
+                # still loaded would leave a ghost launchd entry with no file
+                done.append(f"WARN {label}: unload failed, plist kept: "
+                            f"{(proc.stderr or proc.stdout).strip()}")
+                continue
             path.unlink()
             done.append(f"removed {label}")
     return done
@@ -203,10 +230,11 @@ def _cron_install() -> list[str]:
     def q(argv: list[str]) -> str:
         return " ".join(f'"{a}"' if " " in a else a for a in argv)
 
+    env = "".join(f"{k}={shlex.quote(v)} " for k, v in _job_env().items())
     entries = [
-        f"{DECAY_TIME[1]} {DECAY_TIME[0]} * * * {q(jobs['decay'])} "
+        f"{DECAY_TIME[1]} {DECAY_TIME[0]} * * * {env}{q(jobs['decay'])} "
         f">> {_log_dir() / 'decay.log'} 2>&1 {_CRON_MARK}decay",
-        f"{EXPORT_TIME[1]} {EXPORT_TIME[0]} * * {EXPORT_WEEKDAY} {q(jobs['export'])} "
+        f"{EXPORT_TIME[1]} {EXPORT_TIME[0]} * * {EXPORT_WEEKDAY} {env}{q(jobs['export'])} "
         f">> {_log_dir() / 'export.log'} 2>&1 {_CRON_MARK}export",
     ]
     kept = [l for l in _cron_read() if _CRON_MARK not in l]
@@ -270,7 +298,8 @@ def _systemd_unit_texts(name: str, argv: list[str]) -> tuple[str, str]:
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f"ExecStart={shlex.join(argv)}\n"
+        + "".join(f"Environment={k}={shlex.quote(v)}\n" for k, v in _job_env().items())
+        + f"ExecStart={shlex.join(argv)}\n"
         f"StandardOutput=append:{log}\n"
         f"StandardError=append:{log}\n"
     )
@@ -296,6 +325,10 @@ def _systemd_install() -> list[str]:
     unit_dir = _systemd_unit_dir()
     unit_dir.mkdir(parents=True, exist_ok=True)
     done = []
+    # A box first scheduled over SSH (no user bus → cron) and re-installed
+    # from a desktop session would otherwise run decay twice a night.
+    if shutil.which("crontab"):
+        done += _cron_remove()
     for name, argv in _jobs().items():
         unit = _SYSTEMD_UNITS[name]
         service, timer = _systemd_unit_texts(name, argv)

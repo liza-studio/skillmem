@@ -159,9 +159,18 @@ def _collect_attachments(root: Path, current_dir: Path, body: str) -> list[Path]
         if not target:
             continue
         # Obsidian resolves attachments either next to the note or anywhere
-        # in the vault; we try both, prefer adjacent.
+        # in the vault; we try both, prefer adjacent. A note is untrusted
+        # text: "../../outside.pdf" or a symlink must not pull files from
+        # beyond the vault into the assets store.
+        vault_root = root.resolve()
         for candidate in (current_dir / target, *root.rglob(target)):
-            if candidate.exists() and candidate.suffix.lower() in ASSET_EXTS:
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            try:
+                candidate.resolve().relative_to(vault_root)
+            except ValueError:
+                continue
+            if candidate.suffix.lower() in ASSET_EXTS:
                 out.append(candidate)
                 break
     return out
@@ -257,6 +266,9 @@ def _run_import(conn, root, assets_root, kind, project_override,
                 reason="vault import" if existed else None,
                 force=True,
                 links=S.extract_wikilinks(body),
+                # a vault that carries a strength is a restore; one that
+                # doesn't must not wipe the strength the row earned since.
+                restore_strength="strength" in extras,
             )
             if existed:
                 report.updated += 1

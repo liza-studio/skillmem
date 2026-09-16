@@ -28,8 +28,7 @@
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "skillmem hook session-recap", "timeout": 95 },
-          { "type": "command", "command": "skillmem migrate", "timeout": 10 }
+          { "type": "command", "command": "skillmem hook session-recap", "timeout": 95 }
         ]
       }
     ]

@@ -9,6 +9,7 @@ via ``vault.import_vault`` yields the same slug/kind/title/body plus metadata
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 import time
 from pathlib import Path
@@ -90,15 +91,39 @@ def export_all(conn, destination: Path) -> int:
     """Write every memory as ``<destination>/<kind>/<slug>.md``. Returns count."""
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
+    # Files this exporter wrote last time. The weekly job exports into one
+    # fixed directory; without a manifest a deleted memory's file lived on
+    # forever and a restore resurrected it. Only manifest-listed files are
+    # ever removed — anything else in the directory is not ours.
+    manifest = destination / ".skillmem-export.json"
+    previous: set[str] = set()
+    try:
+        previous = set(json.loads(manifest.read_text(encoding="utf-8")).get("files", []))
+    except (OSError, ValueError):
+        pass
+    written: list[str] = []
     count = 0
     for item in _iter_all(conn):
-        folder = destination / item.kind
-        folder.mkdir(parents=True, exist_ok=True)
+        # kind is writer-controlled text; _safe_filename keeps "..", so a kind
+        # of "../../x" used to walk out of the destination. Sanitise it and
+        # refuse anything that still resolves outside — belt and braces.
+        folder = destination / _safe_filename(item.kind).replace("..", "-")
         path = folder / f"{_safe_filename(item.slug)}.md"
+        if not path.resolve().is_relative_to(root):
+            raise ValueError(f"refusing to export {item.slug!r} outside {root}")
+        folder.mkdir(parents=True, exist_ok=True)
         truncated = bool(item.body_path) and not (S.docs_dir() / item.body_path).exists()
         body = S.load_body(item)  # full body even for externalized docs
         content = ("---\n" + _frontmatter(item, truncated=truncated)
                    + "\n---\n\n" + body.strip() + "\n")
         path.write_text(content, encoding="utf-8")
+        written.append(path.relative_to(destination).as_posix())
         count += 1
+    for rel in previous - set(written):
+        stale = destination / rel
+        if stale.resolve().is_relative_to(root):
+            stale.unlink(missing_ok=True)
+    manifest.write_text(json.dumps({"files": sorted(written)}, indent=1),
+                        encoding="utf-8")
     return count

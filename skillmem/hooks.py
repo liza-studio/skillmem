@@ -188,17 +188,32 @@ def _is_untrusted(row: dict[str, Any] | Any) -> bool:
     An agent can be talked into storing a rule by the very document it was
     reading, so `origin=agent` is no safer than `imported` until a human says so.
     """
-    if _row_field(row, "trusted_at") is not None:
-        return False
-    tags = _row_field(row, "tags")
-    if isinstance(tags, str):
-        try:
-            tags = json.loads(tags)
-        except Exception:
-            tags = [tags]
-    if tags and "untrusted-origin" in tags:
-        return True
-    return True  # unapproved is untrusted, including origin='unknown'
+    return _row_field(row, "trusted_at") is None
+
+
+def frame_for_model(row: Any, payload: dict[str, Any],
+                    fields: tuple[str, ...] = ("body", "snippet")) -> dict[str, Any]:
+    """The one place model-facing text from an unapproved row gets its frame.
+
+    Storage keeps bodies raw (exports, hashes and read-modify-write callers
+    need them that way); every channel that hands text to a model — MCP,
+    HTTP, CLI recall, hooks — runs its payload through here. The title goes
+    inside the frame too: a title is read first and was the one string that
+    used to escape it.
+    """
+    if not _is_untrusted(row):
+        payload["trusted"] = True
+        return payload
+    payload["trusted"] = False
+    title = payload.get("title")
+    for f in fields:
+        if payload.get(f):
+            text = f"{title}\n\n{payload[f]}" if title else str(payload[f])
+            payload[f] = render_untrusted(text)
+            title = None  # once inside a frame, do not repeat it
+    if payload.get("title"):
+        payload["title"] = "(unapproved memory — title inside the framed body)"
+    return payload
 
 
 def _row_field(row: Any, name: str) -> Any:
@@ -599,7 +614,9 @@ RECAP_MAX_TRANSCRIPT_FINAL = 20_480
 def newest_transcript_for_cwd(cwd: Path | None = None) -> Path | None:
     """Claude Code names a project dir after the path, with separators as dashes."""
     here = (cwd or Path.cwd()).resolve()
-    slug = "-" + str(here).strip("/").replace("/", "-")
+    # Claude Code names the project dir by replacing every path separator
+    # (and the drive colon on Windows) with "-"; "/" alone left C:\... intact.
+    slug = "-" + re.sub(r"[/\\:]", "-", str(here)).strip("-")
     d = Path.home() / ".claude" / "projects" / slug
     try:
         files = [f for f in d.glob("*.jsonl") if f.is_file()]
@@ -672,7 +689,7 @@ def _publish_note(outfile: Path, basis: int, text: str) -> str:
     """
     lock = outfile.with_name(outfile.name + ".publock")
     got = False
-    for _ in range(50):  # ~1s worth of tries, then publish anyway
+    for _ in range(50):  # ~1s worth of tries
         try:
             if lock.exists() and time.time() - lock.stat().st_mtime > 30:
                 lock.unlink()  # a writer that died mid-publish
@@ -687,6 +704,11 @@ def _publish_note(outfile: Path, basis: int, text: str) -> str:
             time.sleep(0.02)
         except OSError:
             break
+    if not got:
+        # Fail closed. Publishing anyway turned the compare-and-swap into a
+        # race: a stalled writer read the old basis, waited out the lock, and
+        # replaced the newer note. Losing one recap is cheaper than that.
+        return "skip:no-lock"
     try:
         written = _note_basis(outfile)
         if written > basis:

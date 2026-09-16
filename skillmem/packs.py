@@ -134,6 +134,14 @@ def iter_skill_files(root: Path) -> Iterator[Path]:
     for path in sorted(root.rglob("SKILL.md"), key=rank):
         if any(part in SKIP_DIRS for part in path.relative_to(root).parts):
             continue
+        # a symlink named SKILL.md would import whatever it points at
+        # (~/.ssh/id_rsa fits under the size cap); only real files in-tree
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            path.resolve().relative_to(root.resolve())
+        except ValueError:
+            continue
         yield path
 
 
@@ -170,9 +178,10 @@ def _detect_license(root: Path) -> str | None:
     """First line of the licence file that names the licence, if any."""
     for name in LICENSE_FILES:
         path = root / name
-        if not path.exists():
+        if not path.is_file() or path.is_symlink():
             continue
-        head = path.read_text(encoding="utf-8", errors="replace")[:400]
+        with path.open("rb") as fh:  # bounded read: a 2 GB LICENSE is not our problem
+            head = fh.read(400).decode("utf-8", errors="replace")
         for line in head.splitlines():
             line = line.strip()
             if line and not line.lower().startswith("copyright"):
@@ -221,7 +230,7 @@ def import_pack(
         else:
             tmp = Path(tempfile.mkdtemp(prefix="skillmem-pack-"))
             root = tmp / "src"
-            _git(["clone", "--depth", "1", "--quiet", url, str(root)])
+            _git(["clone", "--depth", "1", "--quiet", "--", url, str(root)])
             commit = _git(["rev-parse", "HEAD"], cwd=root)
 
         report = PackReport(pack=pack, source=source, commit=commit,
@@ -249,11 +258,32 @@ def import_pack(
                 topics=[pack],
             )
             try:
+                # force=True must only ever replace THIS pack's own rows. A
+                # slug that belongs to the owner (or another pack) is not ours
+                # to overwrite — an approved rule used to be silently replaced
+                # by whatever a repo shipped under a colliding name.
+                prior = conn.execute(
+                    "SELECT origin, project, deleted_at FROM memory_items WHERE slug = ?",
+                    (slug,),
+                ).fetchone()
+                if prior is not None and (prior["origin"] != "imported"
+                                          or prior["project"] != f"pack:{pack}"):
+                    raise PackError(
+                        f"slug '{slug}' exists and is not from pack '{pack}' — not overwritten"
+                    )
                 S.upsert(conn, item, reason=f"import from {source}",
                          force=True, check_conflicts=False)
+                if prior is not None and prior["deleted_at"] is not None:
+                    # a removed pack being reinstalled: remove_pack soft-deleted
+                    # the rows, and no write path clears that on its own
+                    conn.execute(
+                        "UPDATE memory_items SET deleted_at = NULL WHERE slug = ?",
+                        (slug,),
+                    )
                 report.imported.append(slug)
             except Exception as exc:                      # noqa: BLE001
                 report.skipped.append((skill.rel_path, str(exc)))
+        conn.commit()
         return report
     finally:
         if tmp:
