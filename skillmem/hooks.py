@@ -43,7 +43,7 @@ _STOPWORDS = re.compile(
     r"\b(claude|code|file|system|user|message|hook|prompt|tool|command)\b",
     re.IGNORECASE,
 )
-_SLUG_LINE = re.compile(r"^- \[([a-zа-я0-9-]+)\]", re.MULTILINE)
+_SLUG_LINE = re.compile(r"^- \[([^\]\s]+)\]", re.MULTILINE)   # any slug storage accepts
 
 HOOK_LOG_MAX_BYTES = 2_000_000
 HOOK_LOG_KEEP_LINES = 2000

@@ -35,7 +35,7 @@ from typing import Any, Literal
 
 import uvicorn
 import yaml
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -345,6 +345,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
                 conn, item,
                 check_conflicts=req.check_conflicts,
                 links=S.extract_wikilinks(req.body),
+                explicit=set(req.model_fields_set) & {"kind", "project", "tags", "topics", "ttl_days"},
             )
         except S.MemoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
@@ -390,6 +391,8 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             result = S.upsert(
                 conn, existing, reason=req.reason,
                 links=S.extract_wikilinks(req.body),
+                explicit={k for k in ("kind", "project", "tags", "topics")
+                          if getattr(req, k) is not None},
             )
         except S.MemoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
@@ -414,6 +417,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
                 conn, item,
                 check_conflicts=req.check_conflicts,
                 links=S.extract_wikilinks(item.body),
+                explicit=set(req.model_fields_set) & {"project", "tags", "topics", "ttl_days"},
             )
         except S.MemoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
@@ -457,7 +461,8 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         return result
 
     @app.post("/decay")
-    def decay(days: int = 14, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
+    def decay(days: int = Query(14, ge=1, le=3650),
+              agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
         if not agent.is_master:
             raise HTTPException(status_code=403, detail="master scope required")
         conn = get_conn()

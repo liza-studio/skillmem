@@ -279,16 +279,9 @@ def import_pack(
                     raise PackError(
                         f"slug '{slug}' exists and is not from pack '{pack}' — not overwritten"
                     )
+                # revive: a removed pack being reinstalled comes back visible
                 S.upsert(conn, item, reason=f"import from {source}",
-                         force=True, check_conflicts=False)
-                if prior is not None and prior["deleted_at"] is not None:
-                    # a removed pack being reinstalled: remove_pack soft-deleted
-                    # the rows, and no write path clears that on its own
-                    with S.tx(conn):   # commits itself, or joins an outer tx
-                        conn.execute(
-                            "UPDATE memory_items SET deleted_at = NULL WHERE slug = ?",
-                            (slug,),
-                        )
+                         force=True, check_conflicts=False, revive=True)
                 report.imported.append(slug)
             except Exception as exc:                      # noqa: BLE001
                 report.skipped.append((skill.rel_path, str(exc)))

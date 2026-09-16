@@ -256,6 +256,8 @@ def write(
             conn, item, reason=reason, force=force,
             check_conflicts=check_conflicts,
             links=S.extract_wikilinks(body_text),
+            explicit={p for p in ("kind", "project", "ttl_days")
+                      if ctx.get_parameter_source(p) == click.core.ParameterSource.COMMANDLINE},
         )
     except S.MemoryConflict as exc:
         click.echo(str(exc), err=True)
@@ -1840,7 +1842,8 @@ def learn(
         visibility="public",
     )
     try:
-        result = S.upsert(conn, item, links=S.extract_wikilinks(item.body))
+        result = S.upsert(conn, item, links=S.extract_wikilinks(item.body),
+                          explicit={"tags"} if tags else set())   # never flip visibility on same text
     except (S.MemoryConflict, ValueError) as exc:
         click.echo(f"CONFLICT: {exc}", err=True)
         sys.exit(1)
@@ -1909,7 +1912,8 @@ def skills(ctx: click.Context, limit: int) -> None:
 
 
 @main.command()
-@click.option("--days", default=14, type=int, help="Threshold in days for decay.")
+@click.option("--days", default=14, type=click.IntRange(min=1, max=3650),
+              help="Threshold in days for decay.")
 @click.pass_context
 def decay(ctx: click.Context, days: int) -> None:
     """Run Ebbinghaus decay on unused skills."""

@@ -938,3 +938,115 @@ def test_init_codex_does_not_say_done_after_a_refused_write(home, monkeypatch):
         assert r.exit_code == 0
         assert "Done. Open `codex`" not in r.output and "Nothing changed for Codex" in r.output
         assert toml.read_text(encoding="utf-8") == text
+
+
+
+# --- round 16: four pre-0.11 P2s found by the fresh-eyes core pass -------------
+
+def test_same_text_write_only_applies_fields_the_caller_sent(home, monkeypatch):
+    from skillmem import mcp_server as M
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="sk1", title="deploy", body="steps", kind="skill",
+                                visibility="public", agent="alice", origin="owner"))
+    S.set_trust(conn, "sk1", trusted=True)
+    conn.commit()
+    monkeypatch.setenv("SKILLMEM_DB", str(home / "memory.db"))
+    monkeypatch.setattr(M, "_CONN", None)
+    out = json.loads(M._tool_write({"slug": "sk1", "title": "deploy", "body": "steps"})[0].text)
+    assert out.get("ok") is True
+    row = conn.execute("SELECT kind, visibility, agent, trusted_at FROM memory_items WHERE slug='sk1'").fetchone()
+    assert (row["kind"], row["visibility"], row["agent"]) == ("skill", "public", "alice")
+    assert row["trusted_at"] is not None
+    # a private trusted skill stays private through a same-text mem_learn
+    S.upsert(conn, S.MemoryItem(slug="skp", title="t", body=S.skill_body("tr", "st", "ok", None),
+                                kind="skill", visibility="private", origin="owner"))
+    S.set_trust(conn, "skp", trusted=True); conn.commit()
+    M._tool_learn({"slug": "skp", "title": "t", "trigger": "tr", "steps": "st", "outcome": "ok"})
+    assert conn.execute("SELECT visibility FROM memory_items WHERE slug='skp'").fetchone()[0] == "private"
+    # CLI write without --kind on a trusted public skill keeps it a public skill
+    r = CliRunner().invoke(cli_main, ["--db", str(home / "memory.db"), "write", "--slug", "sk1",
+                                      "--title", "deploy", "--body", "steps"])
+    assert r.exit_code == 0, r.output
+    row = conn.execute("SELECT kind, visibility, trusted_at FROM memory_items WHERE slug='sk1'").fetchone()
+    assert (row["kind"], row["visibility"]) == ("skill", "public") and row["trusted_at"] is not None
+
+
+def test_explicit_empty_topics_revoke_shared_access(home, monkeypatch):
+    fastapi_testclient = pytest.importorskip("fastapi.testclient")
+    from skillmem import server as srv
+    (home / "tokens.yaml").write_text(
+        "alice:\n  token: tok-alice\n  topics: [team]\nbob:\n  token: tok-bob\n  topics: [team]\n",
+        encoding="utf-8")
+    app = srv.build_app(srv.TokenStore(home / "tokens.yaml"), db_path=home / "memory.db")
+    A = {"Authorization": "Bearer tok-alice"}; B = {"Authorization": "Bearer tok-bob"}
+    with fastapi_testclient.TestClient(app) as c:
+        c.post("/write", headers=A, json={"slug": "shared", "title": "t", "body": "same",
+                                            "visibility": "shared", "topics": ["team"], "tags": ["rm"]})
+        assert c.get("/get/shared", headers=B).status_code == 200
+        r = c.post("/update/shared", headers=A, json={"body": "same", "reason": "revoke",
+                                                      "topics": [], "tags": []})
+        assert r.status_code == 200
+        assert c.get("/get/shared", headers=B).status_code == 404
+    conn = _conn(home)
+    row = conn.execute("SELECT topics, tags, stemmed FROM memory_items WHERE slug='shared'").fetchone()
+    assert json.loads(row["topics"]) == [] and json.loads(row["tags"]) == []
+    assert "rm" not in row["stemmed"].split()          # lexical index rebuilt without the tag
+    # the FTS table follows the column (trigger); the vector layer, when
+    # installed, returns nearest neighbours for any query, so assert on FTS
+    assert conn.execute("SELECT rowid FROM mem_fts_stem WHERE mem_fts_stem MATCH 'rm'").fetchall() == []
+
+
+def test_write_onto_a_tombstone_is_refused_not_lost(home, monkeypatch):
+    from skillmem import mcp_server as M
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="dead", title="d", body="d1", kind="note"))
+    assert S.soft_delete(conn, "dead", "gone"); conn.commit()
+    r = CliRunner().invoke(cli_main, ["--db", str(home / "memory.db"), "write", "--slug", "dead",
+                                      "--title", "d", "--body", "d2", "--reason", "again"])
+    assert r.exit_code != 0 and "deleted record" in r.output
+    monkeypatch.setenv("SKILLMEM_DB", str(home / "memory.db"))
+    monkeypatch.setattr(M, "_CONN", None)
+    out = json.loads(M._tool_write({"slug": "dead", "title": "d", "body": "d1"})[0].text)
+    assert "error" in out and "deleted record" in out["error"]
+    assert S.get(conn, "dead") is None
+
+
+def test_dump_round_trip_keeps_exact_slugs_whitespace_trust_pin_counters_origin(home, tmp_path):
+    from skillmem import vault as V
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="a-b", title="t", body="hyphen body", kind="note"))
+    S.upsert(conn, S.MemoryItem(slug="a_b", title="t", body="underscore body", kind="note"))
+    S.upsert(conn, S.MemoryItem(slug="rule-1", title="r", body="never force push\n", kind="feedback",
+                                origin="owner"))
+    S.set_trust(conn, "rule-1", trusted=True)
+    S.upsert(conn, S.MemoryItem(slug="sk", title="s", body="b", kind="skill", origin="unknown"))
+    S.set_pinned(conn, "sk", True)
+    S.reinforce(conn, "sk", evidence="test_passed")
+    S.upsert(conn, S.MemoryItem(slug="gone", title="g", body="g", kind="note"))
+    assert S.soft_delete(conn, "gone", "x")
+    conn.commit()
+    dest = tmp_path / "dump"
+    E.export_all(conn, dest)
+    fresh = _conn(home, "fresh.db")
+    V.import_vault(fresh, dest, skip_auto_memories=False)
+    assert S.load_body(S.get(fresh, "a-b")) == "hyphen body"
+    assert S.load_body(S.get(fresh, "a_b")) == "underscore body"
+    row = fresh.execute("SELECT pinned, access_count, confirmed_count, origin FROM memory_items "
+                        "WHERE slug='sk'").fetchone()
+    assert (row["pinned"], row["access_count"], row["confirmed_count"], row["origin"]) == (1, 1, 1, "unknown")
+    # same-DB re-import: body whitespace and approval survive
+    V.import_vault(conn, dest, skip_auto_memories=False)
+    row = conn.execute("SELECT body, trusted_at FROM memory_items WHERE slug='rule-1'").fetchone()
+    assert row["body"] == "never force push\n" and row["trusted_at"] is not None
+
+
+def test_seen_ledger_accepts_any_slug_and_decay_days_are_clamped(home):
+    ctx = "- [skill_Under.Score] title\n- [feedback-ok] t\n"
+    assert set(H._extract_slugs(ctx)) == {"skill_Under.Score", "feedback-ok"}
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="s", title="t", body="b", kind="skill"))
+    conn.execute("UPDATE memory_items SET created_at = created_at - 5 * 86400"); conn.commit()
+    assert len(S.decay_stale(conn, days_threshold=0)) == 1
+    assert S.decay_stale(conn, days_threshold=0) == []          # no compounding
+    r = CliRunner().invoke(cli_main, ["--db", str(home / "memory.db"), "decay", "--days", "0"])
+    assert r.exit_code != 0

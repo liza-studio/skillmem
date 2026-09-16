@@ -56,17 +56,25 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   time. Use **one destination per database**: two databases exporting the
   same `kind/slug` into one directory overwrite each other, and the first
   0.11 export over a pre-release manifest adopts and prunes that whole list.
-  Strength is always written to frontmatter now, so a restore can say "1.0".
-  Importing a skillmem dump restores strength (a pre-0.11 dump that omitted it
-  meant 1.0); importing a plain Obsidian note keeps what the row earned.
-- A metadata-only update re-indexes tags/topics (merged with what the row
-  keeps); an ordinary update keeps the strength the row earned (only a
+  Strength, pin and the access/confirmed/failure counters are written to
+  frontmatter now, and a body is written verbatim, so a dump→restore keeps
+  exact slugs (`a_b` and `a-b` no longer merge), whitespace (and with it the
+  owner's approval), counters, pins and a recorded `origin` — `unknown`
+  included. Importing a plain Obsidian note keeps what the row earned.
+- A same-text write applies only the metadata the caller actually sent: a
+  retried `mem_write` without a `kind` no longer turns a trusted skill into a
+  note, a same-text `mem_learn` no longer flips a private skill public, and an
+  explicit `topics: []` really revokes a shared audience (the lexical index
+  follows). A write onto a soft-deleted slug is refused on every channel (it
+  used to say OK and stay invisible); a dump restore or a pack reinstall
+  revives it. An ordinary update keeps the strength the row earned (only a
   restore — a skillmem dump, or a file carrying `strength:` — sets it); `restem` indexes full
   document bodies; `reinforce` is one relative UPDATE (concurrent confirmations
   no longer lose each other). Known: `reinforce` is **not idempotent** — a
   retried call counts as new evidence; evidence ids are a later release.
 - Decay: a fresh skill is measured from its creation, not from "never used";
-  one decay step per threshold, so a job run twice does not compound; the
+  one decay step per threshold (the threshold is at least one day), so a job
+  run twice does not compound; the
   lifecycle sweep runs even when nothing decays (the CLI used to skip it on
   those runs, so skills sitting at the floor were never archived).
 - History chain: `changed_at` is clamped monotonic on every history write
@@ -82,7 +90,8 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   installs the deny rule; `--hooks minimal` means exactly that and nothing
   else. Hand-written memory: `skillmem migrate --source <dir>`.
 - Recall context is budgeted per section before framing (a frame can no longer
-  be cut in half) and the seen-ledger lists only what was emitted.
+  be cut in half) and the seen-ledger lists exactly what was emitted, whatever
+  characters the slug uses.
 - Recap: publication fails closed without its lock; Stop recaps of one
   session are serialised by a per-session lock, and the SessionEnd recap waits
   up to 5 s for an in-flight Stop recap and then proceeds anyway (publication

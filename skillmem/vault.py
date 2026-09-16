@@ -40,6 +40,8 @@ _SLUG_TRIM = re.compile(r"[^a-z0-9а-яё\-]+", re.IGNORECASE)
 def _slug_from_meta_or_path(meta: dict, root: Path, path: Path) -> str:
     """Prefer frontmatter ``name:`` so an export/import round-trip is lossless."""
     raw = meta.get("name")
+    if raw and _is_auto_memory(meta):
+        return str(raw)          # a skillmem dump: the slug is exact, or a_b and a-b merge
     if raw:
         slug = _SLUG_TRIM.sub("-", str(raw).lower())
     else:
@@ -69,8 +71,17 @@ def _parse_md(text: str) -> tuple[dict, str]:
         meta = {}
     if not isinstance(meta, dict):
         meta = {}
+    if _is_auto_memory(meta):
+        # a skillmem dump wrote "\n---\n\n<body>\n": undo exactly that, keep the
+        # body's own whitespace so its content hash (and approval) survives
+        if body.startswith("\n"):
+            body = body[1:]
+        if body.endswith("\n"):
+            body = body[:-1]
+    else:
+        body = body.strip()
     # Same surrogate hazard as migrate.parse_file — see migrate.desurrogate.
-    return desurrogate(meta), desurrogate(body.strip())
+    return desurrogate(meta), desurrogate(body)
 
 
 def _str_list(value) -> list[str]:
@@ -97,6 +108,7 @@ def _restore_meta(meta: dict) -> dict:
         out["agent"] = str(meta["agent"])
     for key, cast in (
         ("strength", float), ("ttl_days", int), ("freshness_until", int),
+        ("access_count", int), ("confirmed_count", int), ("failure_count", int),
         # created_at: keep the record's original birth date on re-import so a
         # dump→restore does not make every memory look freshly created.
         # (updated_at is deliberately NOT restored: the import IS an update.)
@@ -241,15 +253,21 @@ def _run_import(conn, root, assets_root, kind, project_override,
             extras = _restore_meta(meta)
             if isinstance(md, dict) and md.get("originSessionId"):
                 extras["source_session"] = str(md["originSessionId"])
+            pinned = bool(meta.get("pinned")) if _is_auto_memory(meta) else None
 
             attachments: list[str] = []
             for asset in _collect_attachments(root, path.parent, body):
                 attachments.append(_store_asset(asset, assets_root))
 
+            dump_origin = (str((meta.get("metadata") or {}).get("origin") or "")
+                           if _is_auto_memory(meta) else "")
             item = S.MemoryItem(
                 # A file may lower its own origin (a pack stays a pack across an
                 # export/import) but never raise it — see migrate._origin_from.
-                origin=_migrate_origin(meta, item_kind, default_origin),
+                # A skillmem dump restores its recorded origin exactly, "unknown"
+                # included (the importer's default used to relabel it "owner").
+                origin=(dump_origin if dump_origin in S.ORIGINS
+                        else _migrate_origin(meta, item_kind, default_origin)),
                 slug=slug,
                 kind=item_kind,
                 title=title,
@@ -271,7 +289,19 @@ def _run_import(conn, root, assets_root, kind, project_override,
                 # A plain Obsidian note carries no strength to restore — an
                 # ordinary sync must keep what the row earned.
                 restore_strength="strength" in extras or _is_auto_memory(meta),
+                revive=_is_auto_memory(meta),   # a dump restores a deleted slug too
+                explicit=None,
             )
+            if pinned is not None:
+                S.set_pinned(conn, slug, pinned)
+            counters = {k: extras[k] for k in ("access_count", "confirmed_count", "failure_count")
+                        if k in extras}
+            if counters and _is_auto_memory(meta):
+                # upsert never writes the counters (they are earned, not set);
+                # a restore of a dump is the one place that puts them back
+                sets = ", ".join(f"{k} = ?" for k in counters)
+                conn.execute(f"UPDATE memory_items SET {sets} WHERE slug = ?",
+                             (*counters.values(), slug))
             if existed:
                 report.updated += 1
             else:

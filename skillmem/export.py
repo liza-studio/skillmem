@@ -72,6 +72,11 @@ def _frontmatter(item: S.MemoryItem, *, truncated: bool = False) -> str:
     if item.visibility and item.visibility != "private":
         meta["visibility"] = item.visibility
     meta["strength"] = item.strength   # always: a restore must be able to say "1.0"
+    # the rest of what a row earned, so a restore is a restore
+    meta["pinned"] = bool(item.pinned)
+    meta["access_count"] = item.access_count
+    meta["confirmed_count"] = item.confirmed_count
+    meta["failure_count"] = item.failure_count
     if truncated:
         # The externalized body file was lost; only the excerpt follows.
         # Without this marker the dump would look complete while being partial.
@@ -131,8 +136,10 @@ def export_all(conn, destination: Path) -> int:
         folder.mkdir(parents=True, exist_ok=True)
         truncated = bool(item.body_path) and not (S.docs_dir() / item.body_path).exists()
         body = S.load_body(item)  # full body even for externalized docs
+        # body verbatim (plus the one newline the file needs): stripping it
+        # changed the content hash on re-import and dropped the owner's approval
         content = ("---\n" + _frontmatter(item, truncated=truncated)
-                   + "\n---\n\n" + body.strip() + "\n")
+                   + "\n---\n\n" + body + "\n")
         path.write_text(content, encoding="utf-8")
         written.append(path.relative_to(destination).as_posix())
         count += 1

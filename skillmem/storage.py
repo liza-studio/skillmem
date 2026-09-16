@@ -1105,6 +1105,8 @@ def upsert(
     check_conflicts: bool = False,
     links: Iterable[str] | None = None,
     restore_strength: bool = False,
+    explicit: set[str] | None = None,
+    revive: bool = False,
 ) -> MemoryItem:
     """Insert or update ``item`` by slug; returns the same (mutated) object.
 
@@ -1118,9 +1120,21 @@ def upsert(
     an explicit restore passes ``restore_strength=True`` (a vault import of a
     skillmem dump, or a file carrying a strength) — before that, every
     force-overwrite and every pack re-import silently reset it to 1.0.
+
+    ``explicit`` names the metadata fields the caller actually supplied
+    (``{"kind", "visibility", "tags", ...}``). On a same-text write only those
+    are applied — so a retried ``mem_write`` without a ``kind`` no longer turns
+    a trusted skill into a note, and an explicit ``topics=[]`` really clears
+    the audience. ``None`` keeps the library-level behaviour (every non-empty
+    field applies); ``agent`` is never applied to an existing row by a create.
+
+    A soft-deleted slug is refused unless ``revive=True`` (a restore or a pack
+    reinstall), so a write is never acknowledged and then invisible.
     """
     item.kind = _valid_kind(item.kind)
     item.visibility = _valid_visibility(item.visibility)
+    if item.ttl_days is not None and not (1 <= int(item.ttl_days) <= 3650):
+        raise ValueError(f"invalid ttl_days {item.ttl_days!r}: 1..3650")
     item.title = scrub(item.title)
     item.body = scrub(item.body)
     item.wordcount = _wordcount(item.body)
@@ -1145,6 +1159,14 @@ def upsert(
     existing = conn.execute(
         "SELECT * FROM memory_items WHERE slug = ?", (item.slug,)
     ).fetchone()
+
+    if existing is not None and existing["deleted_at"] is not None and not revive:
+        # A tombstone is still a record. Writing onto it used to be acknowledged
+        # ("OK: slug") while the row stayed invisible to every reader.
+        raise MemoryConflict(
+            f"slug '{item.slug}' belongs to a deleted record; restore it "
+            f"(revive) or pick another slug"
+        )
 
     if existing is None:
         # Conflict check runs BEFORE the transaction so we hold no write lock
@@ -1215,24 +1237,33 @@ def upsert(
         # returning the old row unchanged reported success for a write that never
         # happened.
         meta = {
-            "project": item.project, "agent": item.agent,
-            "visibility": item.visibility, "kind": item.kind,
-            "ttl_days": item.ttl_days,
+            "project": item.project, "visibility": item.visibility,
+            "kind": item.kind, "ttl_days": item.ttl_days,
         }
-        changed = {k: v for k, v in meta.items()
-                   if v is not None and v != existing[k]}
+        if explicit is None:
+            changed = {k: v for k, v in meta.items()
+                       if v is not None and v != existing[k]}
+            if item.agent is not None and item.agent != existing["agent"]:
+                changed["agent"] = item.agent
+        else:
+            changed = {k: v for k, v in meta.items()
+                       if k in explicit and v is not None and v != existing[k]}
         tags, topics = _json_list(item.tags), _json_list(item.topics)
-        if item.tags and tags != existing["tags"]:
+        tags_given = ("tags" in explicit) if explicit is not None else bool(item.tags)
+        topics_given = ("topics" in explicit) if explicit is not None else bool(item.topics)
+        if tags_given and tags != existing["tags"]:
             changed["tags"] = tags
-        if item.topics and topics != existing["topics"]:
+        if topics_given and topics != existing["topics"]:
             changed["topics"] = topics
+        if revive and existing["deleted_at"] is not None:
+            changed["deleted_at"] = None
         if "tags" in changed or "topics" in changed:
             # tags/topics are part of the lexical index — a tag added to an
             # unchanged body must be searchable, so the stems follow. Built
-            # from the MERGED metadata: an update that sends only topics must
-            # not drop the tags the row keeps.
-            eff_tags = item.tags if item.tags else _parse_json_list(existing["tags"])
-            eff_topics = item.topics if item.topics else _parse_json_list(existing["topics"])
+            # from the RESULTING metadata: a field not supplied keeps the
+            # row's value, one supplied (even empty) replaces it.
+            eff_tags = item.tags if tags_given else _parse_json_list(existing["tags"])
+            eff_topics = item.topics if topics_given else _parse_json_list(existing["topics"])
             changed["stemmed"] = _stem_text(
                 f"{item.title}\n{full_body}\n" + " ".join(eff_tags + eff_topics)
             )
@@ -1276,6 +1307,7 @@ def upsert(
             conn, item=item, existing=existing, now=now, reason=reason,
             stemmed=stemmed, freshness=freshness, old_body=old_body, links=links,
             strength=item.strength if restore_strength else None,
+            revive=revive,
         )
     except BaseException:
         _discard_body_file(conn, staged)
@@ -1298,7 +1330,7 @@ def upsert(
 def _upsert_update_tx(
     conn: sqlite3.Connection, *, item: "MemoryItem", existing: Any, now: int,
     reason: str | None, stemmed: str, freshness: int | None, old_body: str,
-    links: list[str] | None, strength: float | None = None,
+    links: list[str] | None, strength: float | None = None, revive: bool = False,
 ) -> None:
     with tx(conn):
         prev_hash = _last_chain_hash(conn)
@@ -1335,6 +1367,7 @@ def _upsert_update_tx(
                 -- identical write returns early), and approval belongs to the
                 -- text that was approved, not to the slug.
                 trusted_at = NULL, trusted_by = NULL,
+                deleted_at = CASE WHEN ? THEN NULL ELSE deleted_at END,
                 updated_at = ?
             WHERE id = ?
             """,
@@ -1345,7 +1378,7 @@ def _upsert_update_tx(
                 _json_list(item.attachments),
                 item.ttl_days, freshness, item.wordcount, item.content_hash,
                 item.supersedes_id, item.confidence, strength,
-                _valid_origin(item.origin), now,
+                _valid_origin(item.origin), 1 if revive else 0, now,
                 existing["id"],
             ),
         )
@@ -2163,6 +2196,7 @@ def decay_stale(
 ) -> list[dict[str, Any]]:
     """Ebbinghaus decay: reduce strength of skills not accessed recently."""
     now = _now()
+    days_threshold = max(1, int(days_threshold))   # 0 or negative compounded on every run
     cutoff = now - days_threshold * 86400
     # A skill nobody has recalled yet is measured from its birth, not from
     # "never" — otherwise the first nightly run hits a day-old skill. And one

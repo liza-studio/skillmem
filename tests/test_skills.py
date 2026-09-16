@@ -90,7 +90,10 @@ def test_pinned_skill_never_decays_or_archives(three_skills):
 
     conn.execute("UPDATE memory_items SET strength = ?, last_accessed_at = 0 "
                  "WHERE slug = ?", (S.DECAY_FLOOR, "skill-nginx"))
-    decayed = [d["slug"] for d in S.decay_stale(conn, days_threshold=0)]
+    # 0.11: the threshold is clamped to >= 1 day (0 compounded on every run),
+    # so age every row past it instead
+    conn.execute("UPDATE memory_items SET created_at = created_at - 3 * 86400")
+    decayed = [d["slug"] for d in S.decay_stale(conn, days_threshold=1)]
     assert "skill-nginx" not in decayed        # pinned: sat out the sweep
     assert decayed                             # the unpinned ones still decayed
 

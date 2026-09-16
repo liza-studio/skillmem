@@ -199,6 +199,8 @@ def _tool_write(args: dict[str, Any]) -> list[TextContent]:
             conn, item,
             check_conflicts=bool(args.get("check_conflicts", True)),
             links=S.extract_wikilinks(item.body),
+            # only what the client actually sent may change an existing row
+            explicit={k for k in ("kind", "project", "tags", "topics", "ttl_days") if k in args},
         )
     except (S.MemoryConflict, ValueError) as exc:
         return _err(str(exc))
@@ -230,10 +232,14 @@ def _tool_update(args: dict[str, Any]) -> list[TextContent]:
     if args.get("topics") is not None:
         existing.topics = list(args["topics"])
 
-    result = S.upsert(
-        conn, existing, reason=reason,
-        links=S.extract_wikilinks(body),
-    )
+    try:
+        result = S.upsert(
+            conn, existing, reason=reason,
+            links=S.extract_wikilinks(body),
+            explicit={k for k in ("kind", "project", "tags", "topics") if args.get(k) is not None},
+        )
+    except (S.MemoryConflict, ValueError) as exc:
+        return _err(str(exc))
     return _ok({"ok": True, "slug": result.slug, "history_entries": len(S.history(conn, slug))})
 
 
@@ -265,6 +271,7 @@ def _tool_learn(args: dict[str, Any]) -> list[TextContent]:
             conn, item,
             check_conflicts=bool(args.get("check_conflicts", True)),
             links=S.extract_wikilinks(item.body),
+            explicit={k for k in ("visibility", "project", "tags", "topics", "ttl_days") if k in args},
         )
     except (S.MemoryConflict, ValueError) as exc:
         return _err(str(exc))
