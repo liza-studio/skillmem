@@ -136,4 +136,5 @@ def test_codex_backup_is_the_original_bytes_even_without_trailing_newline(fakeho
     assert code == 0
     backups = list(cfg_path.parent.glob("config.toml.bak.*"))
     assert len(backups) == 1 and backups[0].read_bytes() == original
-    assert (backups[0].stat().st_mode & 0o777) == 0o600
+    if sys.platform != "win32":                     # st_mode bits are POSIX; Windows reports 0666
+        assert (backups[0].stat().st_mode & 0o777) == 0o600

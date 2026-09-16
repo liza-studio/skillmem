@@ -78,7 +78,7 @@ def test_init_hooks_full_registers_all_events(fakehome: Path):
 
 
 def test_init_refuses_corrupted_existing_config(fakehome: Path):
-    """If ~/.claude.json is invalid JSON, init must NOT overwrite — only back it up."""
+    """If ~/.claude.json is invalid JSON, init must NOT overwrite — and leaves no backup either."""
     bad = fakehome / ".claude.json"
     bad.write_text("{this is not valid json")
     code, out = _run(["init", "--claude-code", "--mcp-binary",
@@ -307,5 +307,7 @@ def test_backups_are_private_and_only_written_on_change(fakehome: Path):
     settings_json.chmod(0o600)
     _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
     backups = list(settings_json.parent.glob("settings.json.bak.*"))
-    assert backups and all((b.stat().st_mode & 0o777) == 0o600 for b in backups)
-    assert (settings_json.stat().st_mode & 0o777) == 0o600
+    assert backups
+    if sys.platform != "win32":                     # st_mode bits are POSIX; Windows reports 0666
+        assert all((b.stat().st_mode & 0o777) == 0o600 for b in backups)
+        assert (settings_json.stat().st_mode & 0o777) == 0o600

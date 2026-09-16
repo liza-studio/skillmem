@@ -135,7 +135,7 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   are the same scope. The `mcpServers.skillmem` command follows the venv too
   (Claude Code only, when it is named `skillmem-mcp` and the new binary exists).
   Config backups (every agent's file, Claude Code to opencode) are byte-exact,
-  mode 0600 (`~/.claude.json` carries the OAuth account), taken only when a
+  mode 0600 on POSIX (`~/.claude.json` carries the OAuth account), taken only when a
   file is actually rewritten — a no-op re-run leaves none, a refusal (invalid
   JSON/TOML) leaves the file untouched and none — and named exclusively
   (`.bak.<sec>`, `.bak.<sec>.1`, …), so helpers running within one second
