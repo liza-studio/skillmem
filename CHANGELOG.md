@@ -65,8 +65,9 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   Obsidian note keeps what the row earned.
 - A same-text write through HTTP, MCP or the CLI applies only the metadata the
   caller actually sent (library callers such as pack and vault imports keep
-  their file-is-authoritative behaviour; provenance is rewritten on same text
-  only by a dump restore): a
+  their file-is-authoritative behaviour — a migrated file still sets kind and
+  visibility; same-text provenance changes only when restoration is
+  explicitly enabled, i.e. a skillmem dump or a file carrying `strength:`): a
   retried `mem_write` without a `kind` no longer turns a trusted skill into a
   note, a same-text `mem_learn` no longer flips a private skill public, and an
   explicit `topics: []` really revokes a shared audience (the lexical index
