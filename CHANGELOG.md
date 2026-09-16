@@ -45,8 +45,8 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
 - `kind` is validated on write — `[a-z0-9_-][a-z0-9_ -]{0,31}` after
   lower-casing, trimming and collapsing whitespace — and existing rows are
   normalised the same way once on the next open (a write); a pre-0.11
-  `visibility` outside `public`/`shared`/`private` is repaired to `private`
-  then too, so old rows stay updatable. Filters are
+  `visibility` is case/space-normalised, and one outside
+  `public`/`shared`/`private` becomes `private`, so old rows stay updatable. Filters are
   case-insensitive; a filter nothing can match returns nothing. Export refuses
   any path outside its destination (`kind="../../x"` used to write there).
 - Export keeps a per-database manifest and prunes the files it wrote last
@@ -58,7 +58,7 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   meant 1.0); importing a plain Obsidian note keeps what the row earned.
 - A metadata-only update re-indexes tags/topics (merged with what the row
   keeps); an ordinary update keeps the strength the row earned (only a
-  skillmem-dump restore sets it); `restem` indexes full
+  restore — a skillmem dump, or a file carrying `strength:` — sets it); `restem` indexes full
   document bodies; `reinforce` is one relative UPDATE (concurrent confirmations
   no longer lose each other). Known: `reinforce` is **not idempotent** — a
   retried call counts as new evidence; evidence ids are a later release.
@@ -89,8 +89,10 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
 **CLI / MCP / scheduling**
 - `skillmem --db X init ...` writes `SKILLMEM_DB=X` (absolute) into every
   agent's MCP entry — Claude Code, Codex, Cursor, Windsurf, Gemini CLI,
-  opencode — and updates an existing entry's database in place; without
-  `--db` an existing entry is left alone. `--db` reaches scheduled jobs (re-run
+  opencode — and updates an existing entry's database in place (Codex: one
+  line inside `[mcp_servers.skillmem.env]`, written atomically; an inline
+  `env = {...}` table is refused with "edit by hand"); without `--db` an
+  existing entry is left alone. `--db` reaches scheduled jobs (re-run
   `schedule install` after upgrading). `uninstall --purge-db` removes the
   DB, its `-wal`/`-shm`, its namespaced body files and the legacy-named
   files it references (a second database referencing the same legacy file

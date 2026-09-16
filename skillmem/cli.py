@@ -777,16 +777,21 @@ def _codex_set_db(raw: str, db_env: str) -> str:
     """Set SKILLMEM_DB inside [mcp_servers.skillmem.env] of a TOML text."""
     import re as _re2
     line = f"SKILLMEM_DB = {_toml_str(db_env)}"
-    m = _re2.search(r"^\[mcp_servers\.skillmem\.env\]\s*$", raw, _re2.M)
+    m = _re2.search(r"^\[mcp_servers\.skillmem\.env\][ \t]*\r?$", raw, _re2.M)
     if m is None:
         if raw and not raw.endswith("\n"):
             raw += "\n"
         return raw + "\n[mcp_servers.skillmem.env]\n" + line + "\n"
     head, tail = raw[:m.end()], raw[m.end():]
-    nxt = _re2.search(r"^\[", tail, _re2.M)          # end of this table
+    nxt = _re2.search(r"^[ \t]*\[", tail, _re2.M)    # end of this table
     block, rest = (tail[:nxt.start()], tail[nxt.start():]) if nxt else (tail, "")
-    if _re2.search(r"^\s*SKILLMEM_DB\s*=", block, _re2.M):
-        block = _re2.sub(r"^\s*SKILLMEM_DB\s*=.*$", line, block, count=1, flags=_re2.M)
+    # horizontal whitespace only: `\s*` used to swallow the newline before a
+    # first-line key and glue it to the header (invalid TOML → refused).
+    # Keep an inline comment; replace via a lambda so backslash paths survive.
+    key = _re2.compile(r"^[ \t]*SKILLMEM_DB[ \t]*=[ \t]*(?P<val>\"(?:[^\"\\\\]|\\\\.)*\"|'[^']*'|[^#\r\n]*?)(?P<rest>[ \t]*(?:#.*)?)\r?$",
+                      _re2.M)
+    if key.search(block):
+        block = key.sub(lambda mm: line + mm.group("rest"), block, count=1)
     else:
         block = "\n" + line + block
     return head + block + rest
@@ -844,7 +849,7 @@ def _patch_codex_config(
                     return {"changed": False, "reason": "could not update SKILLMEM_DB in "
                             "place; edit [mcp_servers.skillmem.env] by hand",
                             "backup": str(backup)}
-                config_toml.write_text(new_raw, encoding="utf-8")
+                _atomic_write_text(config_toml, new_raw)   # never a truncated config on ENOSPC
                 return {"changed": True, "added": f"mcp_servers.skillmem.env.SKILLMEM_DB={db_env}",
                         "backup": str(backup)}
             return {"changed": False, "reason": "skillmem MCP already configured",

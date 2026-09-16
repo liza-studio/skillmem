@@ -698,3 +698,65 @@ def test_db_memory_is_not_turned_into_a_file(home, monkeypatch):
     r = CliRunner().invoke(cli_main, ["--db", ":memory:", "ls"])
     assert r.exit_code == 0, r.output
     assert not (home / ":memory:").exists()
+
+
+# --- round 7: Codex in-place update hardened; repair guards ----------------
+
+def test_codex_db_can_change_twice_and_keeps_inline_comments(home):
+    import sys, tomllib
+    from skillmem import cli as cli_mod
+    toml = home / ".codex" / "config.toml"
+    toml.parent.mkdir(parents=True)
+    toml.write_text('model = "x"\n', encoding="utf-8")
+    mcp = Path(sys.executable).parent / "skillmem-mcp"
+    cli_mod._patch_codex_config(toml, mcp)                         # no --db
+    assert cli_mod._patch_codex_config(toml, mcp, db_env="/db/A")["changed"]
+    assert cli_mod._patch_codex_config(toml, mcp, db_env="/db/B")["changed"]   # second change
+    assert tomllib.loads(toml.read_text())["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == "/db/B"
+    # first-line key, inline comment, CRLF, backslash path
+    toml.write_text('[mcp_servers.skillmem]\r\ncommand = "mcp"\r\n[mcp_servers.skillmem.env]\r\n'
+                    'SKILLMEM_DB = "/old" # keep me\r\nSKILLMEM_AGENT = "codex"\r\n', encoding="utf-8")
+    r = cli_mod._patch_codex_config(toml, mcp, db_env="C:\\db\\x")
+    assert r["changed"], r
+    text = toml.read_text(encoding="utf-8")
+    assert "# keep me" in text
+    assert tomllib.loads(text)["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == "C:\\db\\x"
+
+
+def test_codex_update_is_atomic_on_write_failure(home, monkeypatch):
+    import sys
+    from skillmem import cli as cli_mod
+    toml = home / ".codex" / "config.toml"
+    toml.parent.mkdir(parents=True)
+    mcp = Path(sys.executable).parent / "skillmem-mcp"
+    cli_mod._patch_codex_config(toml, mcp, db_env="/db/A")
+    before = toml.read_text(encoding="utf-8")
+
+    def boom(path, text):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(cli_mod, "_atomic_write_text", boom)
+    with pytest.raises(OSError):
+        cli_mod._patch_codex_config(toml, mcp, db_env="/db/B")
+    assert toml.read_text(encoding="utf-8") == before       # untouched, not truncated
+
+
+def test_visibility_case_only_is_repaired_without_an_off_enum_sibling(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="p", title="t", body="b", kind="note"))
+    conn.execute("UPDATE memory_items SET visibility = 'Public' WHERE slug = 'p'")
+    conn.commit()
+    S.init_schema(conn)
+    assert conn.execute("SELECT visibility FROM memory_items WHERE slug='p'").fetchone()[0] == "public"
+
+
+def test_kind_repair_catches_newlines_and_nbsp(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="n", title="t", body="b", kind="note"))
+    conn.execute("UPDATE memory_items SET kind = 'my\nnotes' WHERE slug = 'n'")
+    conn.commit()
+    S.init_schema(conn)
+    assert conn.execute("SELECT kind FROM memory_items WHERE slug='n'").fetchone()[0] == "my notes"
+    conn.execute("UPDATE memory_items SET kind = 'my\u00a0notes' WHERE slug = 'n'")
+    conn.commit()
+    S.init_schema(conn)
+    assert conn.execute("SELECT kind FROM memory_items WHERE slug='n'").fetchone()[0] == "my notes"

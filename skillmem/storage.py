@@ -274,7 +274,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # so the common case takes no write lock on open.
     odd = conn.execute(
         "SELECT id, kind FROM memory_items WHERE kind != LOWER(TRIM(kind, ' \t\r\n')) "
-        "OR kind LIKE '%  %' OR kind LIKE '%' || char(9) || '%'"
+        "OR kind LIKE '%  %' OR kind LIKE '%' || char(9) || '%' "
+        "OR kind LIKE '%' || char(10) || '%' OR kind LIKE '%' || char(13) || '%' "
+        "OR kind LIKE '%' || char(160) || '%'"
     ).fetchall()
     for r in odd:
         # the same normalisation writes get (case, trim, whitespace collapse);
@@ -286,8 +288,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # value ("team", "../x") could no longer be updated at all. Repair to the
     # safe default — private — once, on open.
     bad = conn.execute(
-        "SELECT id, visibility FROM memory_items WHERE LOWER(TRIM(visibility)) "
-        "NOT IN ('public', 'shared', 'private') LIMIT 1"
+        "SELECT id FROM memory_items WHERE LOWER(TRIM(visibility)) "
+        "NOT IN ('public', 'shared', 'private') "
+        "OR visibility != LOWER(TRIM(visibility)) LIMIT 1"   # same test as the UPDATE
     ).fetchone()
     if bad is not None:
         conn.execute(
