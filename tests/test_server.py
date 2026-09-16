@@ -332,22 +332,34 @@ def test_backlinks_name_only_sources_the_caller_may_read(client):
     assert sorted(g["links_in"]) == ["acquisition-secret", "bob-note"]
 
 
-def test_master_search_ranks_exactly_like_the_cli(client):
+def test_master_search_ranks_exactly_like_the_cli(client, monkeypatch):
     """Master takes the unfiltered path: same pool, same order as S.search."""
     from skillmem import storage as S
-    for i in range(80):
-        client.post("/write", headers=auth("alice"), json={
-            "slug": f"a-{i}", "title": f"deploy note {i}", "body": f"deploy release rollback {'x' * (i % 7)} {i}",
-            "kind": "note", "visibility": "private", "check_conflicts": False})
+    monkeypatch.setenv("MEM_SEMANTIC", "0")   # BM25 only: the pool is exactly 50 ids
+    conn = S.connect(_db_of(client)); S.init_schema(conn)
+    for i in range(130):                     # past the fixed candidate pool of 50
+        S.upsert(conn, S.MemoryItem(slug=f"a-{i}", kind="note", title=f"deploy note {i}",
+                                    body=f"deploy release rollback {'x' * (i % 7)} {i}",
+                                    visibility="private", agent="alice"), check_conflicts=False)
     http = [r["slug"] for r in client.post("/search", headers=auth("boss"),
-                                            json={"query": "deploy release", "limit": 20}).json()["results"]]
-    conn = S.connect(_db_of(client))
-    cli = [h["slug"] for h in S.search(conn, "deploy release", limit=20)]
-    assert http == cli and len(http) == 20
+                                            json={"query": "deploy release", "limit": 100}).json()["results"]]
+    cli = [h["slug"] for h in S.search(conn, "deploy release", limit=100)]
+    assert http == cli                       # same pool, same order, same page size (the pool, not 100)
+    assert len(http) == len(cli) == 50
 
 
-def test_filtered_pages_cross_the_500_id_chunk_boundary(client):
+def test_filtered_pages_cross_the_500_id_chunk_boundary(client, monkeypatch):
+    """Every filtered lookup binds ids in chunks of 500 — pinned under the
+    999-variable limit of SQLite < 3.32, where one IN (...) over 1 201 ids raised."""
+    import sqlite3
     from skillmem import storage as S
+    real_connect = S.connect
+
+    def capped_connect(*a, **k):
+        c = real_connect(*a, **k)
+        c.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        return c
+    monkeypatch.setattr(S, "connect", capped_connect)
     conn = S.connect(_db_of(client)); S.init_schema(conn)
     for i in range(1201):
         S.upsert(conn, S.MemoryItem(slug=f"pub-{i}", kind="skill", title="common word skill", body="common word " * 4,

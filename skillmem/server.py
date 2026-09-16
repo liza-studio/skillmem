@@ -365,7 +365,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             result = S.upsert(
                 conn, item,
                 check_conflicts=req.check_conflicts,
-                conflict_filter=lambda row: _visible_to(row, agent),
+                conflict_filter=_predicate(agent),
                 links=S.extract_wikilinks(req.body),
                 explicit=set(req.model_fields_set) & {"kind", "project", "tags", "topics", "ttl_days"},
             )
@@ -442,7 +442,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             result = S.upsert(
                 conn, item,
                 check_conflicts=req.check_conflicts,
-                conflict_filter=lambda row: _visible_to(row, agent),
+                conflict_filter=_predicate(agent),
                 links=S.extract_wikilinks(item.body),
                 explicit=set(req.model_fields_set) & {"project", "tags", "topics", "ttl_days"},
             )
