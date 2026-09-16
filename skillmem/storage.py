@@ -272,11 +272,31 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # 0.11: kinds are normalised on write now; rows written before that as
     # "Reference" would be invisible to a kind="reference" filter. Read first
     # so the common case takes no write lock on open.
-    if conn.execute(
-        "SELECT 1 FROM memory_items WHERE kind != LOWER(TRIM(kind, ' \t\r\n')) LIMIT 1"
-    ).fetchone():
-        conn.execute("UPDATE memory_items SET kind = LOWER(TRIM(kind, ' \t\r\n')) "
-                     "WHERE kind != LOWER(TRIM(kind, ' \t\r\n'))")
+    odd = conn.execute(
+        "SELECT id, kind FROM memory_items WHERE kind != LOWER(TRIM(kind, ' \t\r\n')) "
+        "OR kind LIKE '%  %' OR kind LIKE '%' || char(9) || '%'"
+    ).fetchall()
+    for r in odd:
+        # the same normalisation writes get (case, trim, whitespace collapse);
+        # a value that still fails validation is left for the owner to fix
+        norm = _re.sub(r"\s+", " ", str(r["kind"]).strip().lower())
+        if norm != r["kind"]:
+            conn.execute("UPDATE memory_items SET kind = ? WHERE id = ?", (norm, r["id"]))
+    # 0.11: visibility is validated on write; a pre-0.11 row with an off-enum
+    # value ("team", "../x") could no longer be updated at all. Repair to the
+    # safe default — private — once, on open.
+    bad = conn.execute(
+        "SELECT id, visibility FROM memory_items WHERE LOWER(TRIM(visibility)) "
+        "NOT IN ('public', 'shared', 'private') LIMIT 1"
+    ).fetchone()
+    if bad is not None:
+        conn.execute(
+            "UPDATE memory_items SET visibility = CASE "
+            "WHEN LOWER(TRIM(visibility)) IN ('public','shared','private') "
+            "THEN LOWER(TRIM(visibility)) ELSE 'private' END "
+            "WHERE LOWER(TRIM(visibility)) NOT IN ('public','shared','private') "
+            "OR visibility != LOWER(TRIM(visibility))"
+        )
     # v10, same self-healing reason: a DB whose version says 10 but whose ALTER
     # never landed would otherwise fail every read with "no such column: origin".
     if not {"origin", "trusted_at", "trusted_by"} <= live_cols:
@@ -897,7 +917,7 @@ def _db_namespace(conn: sqlite3.Connection) -> str:
 
 
 def _body_filename(slug: str, *, ns: str = "", content_hash: str = "") -> str:
-    """``<safe-slug>__<hash8>[-<ns8>][-<content8>].md``.
+    """``<safe-slug>__<hash8>[-<ns8>][+<content32>].md``.
 
     Content-addressed: a new body is a NEW file, never an overwrite of the one
     a committed row points at. So publishing before COMMIT is safe — a rollback
@@ -1091,9 +1111,9 @@ def upsert(
     original body if you need it after the call.
 
     ``strength`` is evidence the row earned; an ordinary update keeps it. Only
-    an explicit restore (vault import carrying a strength) passes
-    ``restore_strength=True`` — before that, every force-overwrite and every
-    pack re-import silently reset it to 1.0.
+    an explicit restore passes ``restore_strength=True`` (a vault import of a
+    skillmem dump, or a file carrying a strength) — before that, every
+    force-overwrite and every pack re-import silently reset it to 1.0.
     """
     item.kind = _valid_kind(item.kind)
     item.visibility = _valid_visibility(item.visibility)

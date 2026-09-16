@@ -53,7 +53,7 @@ from . import __version__
 def main(ctx: click.Context, db_path: Path | None) -> None:
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db_path
-    if db_path is not None:
+    if db_path is not None and str(db_path) != ":memory:":
         db_path = db_path.expanduser().resolve()   # a relative --db must not land in a plist
         ctx.obj["db_path"] = db_path
         # so scheduled jobs (schedule._job_env) and anything reading
@@ -772,6 +772,26 @@ def _toml_str(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+
+def _codex_set_db(raw: str, db_env: str) -> str:
+    """Set SKILLMEM_DB inside [mcp_servers.skillmem.env] of a TOML text."""
+    import re as _re2
+    line = f"SKILLMEM_DB = {_toml_str(db_env)}"
+    m = _re2.search(r"^\[mcp_servers\.skillmem\.env\]\s*$", raw, _re2.M)
+    if m is None:
+        if raw and not raw.endswith("\n"):
+            raw += "\n"
+        return raw + "\n[mcp_servers.skillmem.env]\n" + line + "\n"
+    head, tail = raw[:m.end()], raw[m.end():]
+    nxt = _re2.search(r"^\[", tail, _re2.M)          # end of this table
+    block, rest = (tail[:nxt.start()], tail[nxt.start():]) if nxt else (tail, "")
+    if _re2.search(r"^\s*SKILLMEM_DB\s*=", block, _re2.M):
+        block = _re2.sub(r"^\s*SKILLMEM_DB\s*=.*$", line, block, count=1, flags=_re2.M)
+    else:
+        block = "\n" + line + block
+    return head + block + rest
+
+
 def _patch_codex_config(
     config_toml: Path,
     mcp_binary: Path,
@@ -809,6 +829,24 @@ def _patch_codex_config(
             return {"changed": False, "reason": "existing TOML is invalid",
                     "backup": str(backup)}
         if "skillmem" in (parsed.get("mcp_servers") or {}):
+            # an existing table keeps everything but the database, which
+            # follows an explicit --db: one line replaced or appended, the
+            # user's comments untouched, the result parsed before it is written
+            current = ((parsed["mcp_servers"]["skillmem"] or {}).get("env") or {}).get("SKILLMEM_DB")
+            if db_env and current != db_env:
+                new_raw = _codex_set_db(raw, db_env)
+                try:
+                    check = tomllib.loads(new_raw)
+                    ok = check["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == db_env
+                except (tomllib.TOMLDecodeError, KeyError, TypeError):
+                    ok = False
+                if not ok:
+                    return {"changed": False, "reason": "could not update SKILLMEM_DB in "
+                            "place; edit [mcp_servers.skillmem.env] by hand",
+                            "backup": str(backup)}
+                config_toml.write_text(new_raw, encoding="utf-8")
+                return {"changed": True, "added": f"mcp_servers.skillmem.env.SKILLMEM_DB={db_env}",
+                        "backup": str(backup)}
             return {"changed": False, "reason": "skillmem MCP already configured",
                     "backup": str(backup)}
 

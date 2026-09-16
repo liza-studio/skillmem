@@ -192,7 +192,8 @@ def _is_untrusted(row: dict[str, Any] | Any) -> bool:
 
 
 def frame_for_model(row: Any, payload: dict[str, Any],
-                    fields: tuple[str, ...] = ("body", "snippet")) -> dict[str, Any]:
+                    fields: tuple[str, ...] = ("body", "snippet"),
+                    title_field: str = "title") -> dict[str, Any]:
     """The one place model-facing text from an unapproved row gets its frame.
 
     Storage keeps bodies raw (exports, hashes and read-modify-write callers
@@ -205,7 +206,7 @@ def frame_for_model(row: Any, payload: dict[str, Any],
         payload["trusted"] = True
         return payload
     payload["trusted"] = False
-    title = payload.get("title")
+    title = payload.get(title_field)
     for f in fields:
         if payload.get(f):
             text = f"{title}\n\n{payload[f]}" if title else str(payload[f])
@@ -215,8 +216,8 @@ def frame_for_model(row: Any, payload: dict[str, Any],
         # nothing to carry the title (empty body): frame the title itself
         payload[fields[0]] = render_untrusted(str(title))
         title = None
-    if payload.get("title"):
-        payload["title"] = "(unapproved memory — title inside the framed body)"
+    if payload.get(title_field):
+        payload[title_field] = "(unapproved memory — title inside the framed body)"
     return payload
 
 

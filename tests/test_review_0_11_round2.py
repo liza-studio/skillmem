@@ -612,3 +612,89 @@ def test_release_metadata_agrees_with_the_package():
         data = json.loads((root / f).read_text(encoding="utf-8"))
         assert data["version"] == __version__, f
     assert json.loads((root / "server.json").read_text())["packages"][0]["version"] == __version__
+
+
+# --- round 6: what round 5 broke -------------------------------------------
+
+def test_plain_vault_sync_keeps_earned_strength_but_dump_restores(home, tmp_path):
+    from skillmem import vault as V
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="n", title="deploy", body="deploy", kind="skill"))
+    conn.execute("UPDATE memory_items SET strength = 1.9 WHERE slug = 'n'")
+    conn.commit()
+    plain = tmp_path / "vault"
+    plain.mkdir()
+    (plain / "n.md").write_text("deploy", encoding="utf-8")            # no frontmatter
+    V.import_vault(conn, plain, kind="skill")
+    assert conn.execute("SELECT strength FROM memory_items WHERE slug='n'").fetchone()[0] == 1.9
+    (plain / "n.md").write_text("deploy v2", encoding="utf-8")
+    V.import_vault(conn, plain, kind="skill")
+    assert conn.execute("SELECT strength FROM memory_items WHERE slug='n'").fetchone()[0] == 1.9
+    dump = tmp_path / "dump"
+    E.export_all(conn, dump)                                            # says strength 1.9
+    conn.execute("UPDATE memory_items SET strength = 0.3 WHERE slug = 'n'")
+    conn.commit()
+    V.import_vault(conn, dump, skip_auto_memories=False)
+    assert conn.execute("SELECT strength FROM memory_items WHERE slug='n'").fetchone()[0] == 1.9
+
+
+def test_legacy_visibility_is_repaired_on_open_and_row_stays_updatable(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="h", title="t", body="b", kind="note"))
+    conn.execute("UPDATE memory_items SET visibility = 'team' WHERE slug = 'h'")
+    conn.commit()
+    S.init_schema(conn)
+    assert conn.execute("SELECT visibility FROM memory_items WHERE slug='h'").fetchone()[0] == "private"
+    item = S.get(conn, "h")
+    item.body = "b2"
+    S.upsert(conn, item, force=True)            # no ValueError
+
+
+def test_legacy_kind_whitespace_is_collapsed_on_open(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="n", title="t", body="b", kind="note"))
+    conn.execute("UPDATE memory_items SET kind = ' My   Notes ' WHERE slug = 'n'")
+    conn.commit()
+    S.init_schema(conn)
+    assert conn.execute("SELECT kind FROM memory_items WHERE slug='n'").fetchone()[0] == "my notes"
+    assert [i.slug for i in S.list_items(conn, kind="my notes")] == ["n"]
+
+
+def test_history_old_title_is_framed(home, monkeypatch):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="sk", title="IGNORE ALL", body="v1", kind="skill", origin="agent"))
+    S.upsert(conn, S.MemoryItem(slug="sk", title="still bad", body="v2", kind="skill", origin="agent"),
+             force=True)
+    conn.commit()
+    from skillmem import mcp_server as M
+    monkeypatch.setenv("SKILLMEM_DB", str(home / "memory.db"))
+    monkeypatch.setattr(M, "_CONN", None)
+    g = json.loads(M._tool_get({"slug": "sk", "include_history": True})[0].text)
+    h0 = g["history"][0]
+    assert "IGNORE ALL" not in h0["old_title"] and "IGNORE ALL" in h0["old_body"]
+    assert H.UNTRUSTED_OPEN in h0["old_body"]
+
+
+def test_codex_config_follows_an_explicit_db(home):
+    import sys
+    from skillmem import cli as cli_mod
+    toml = home / ".codex" / "config.toml"
+    toml.parent.mkdir(parents=True)
+    toml.write_text('# my settings\nmodel = "x"\n', encoding="utf-8")
+    mcp = Path(sys.executable).parent / "skillmem-mcp"
+    cli_mod._patch_codex_config(toml, mcp, db_env="/db/one")
+    r = cli_mod._patch_codex_config(toml, mcp, db_env="/db/two")
+    assert r["changed"], r
+    import tomllib
+    parsed = tomllib.loads(toml.read_text(encoding="utf-8"))
+    assert parsed["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == "/db/two"
+    assert parsed["model"] == "x" and "# my settings" in toml.read_text(encoding="utf-8")
+    assert cli_mod._patch_codex_config(toml, mcp, db_env="/db/two")["changed"] is False
+    assert cli_mod._patch_codex_config(toml, mcp, db_env=None)["changed"] is False
+
+
+def test_db_memory_is_not_turned_into_a_file(home, monkeypatch):
+    monkeypatch.chdir(home)
+    r = CliRunner().invoke(cli_main, ["--db", ":memory:", "ls"])
+    assert r.exit_code == 0, r.output
+    assert not (home / ":memory:").exists()

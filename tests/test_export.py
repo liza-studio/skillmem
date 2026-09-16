@@ -88,7 +88,7 @@ def test_export_writes_per_kind_tree_with_frontmatter(conn, memhome: Path):
     assert meta["strength"] == 1.5
     assert "truncated" not in meta
 
-    # Defaults are NOT written: private/1.0 items stay clean markdown.
+    # Default visibility is not written; strength always is (0.11: a restore must be able to say 1.0).
     meta_ru = yaml.safe_load(ru.read_text(encoding="utf-8").split("---\n")[1])
     assert "visibility" not in meta_ru
     assert meta_ru["strength"] == 1.0   # 0.11: always written, so a restore can say "1.0"

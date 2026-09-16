@@ -266,10 +266,11 @@ def _run_import(conn, root, assets_root, kind, project_override,
                 reason="vault import" if existed else None,
                 force=True,
                 links=S.extract_wikilinks(body),
-                # a vault that carries a strength is a restore; one that
-                # doesn't must not wipe the strength the row earned since.
-                restore_strength=True,   # a vault is a restore; a dump that omitted
-                                         # strength (pre-0.11) meant the default 1.0
+                # A skillmem dump (export.py stamps metadata.node_type) is a
+                # restore, and a pre-0.11 dump that omitted strength meant 1.0.
+                # A plain Obsidian note carries no strength to restore — an
+                # ordinary sync must keep what the row earned.
+                restore_strength="strength" in extras or _is_auto_memory(meta),
             )
             if existed:
                 report.updated += 1
