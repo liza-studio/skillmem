@@ -754,14 +754,27 @@ def _unpatch_opencode_json(config_json: Path) -> dict[str, Any]:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Atomic write for plain text: tempfile in same dir + os.replace."""
-    import os as _os, tempfile as _tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = _tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    """Atomic write for plain text: tempfile next to the TARGET + os.replace.
+
+    A dotfile-managed config is often a symlink; replacing the link with a
+    regular file silently forked it from the repo. Write through to the real
+    file, keep its mode, and keep its bytes as given (no newline translation).
+    """
+    import os as _os, stat as _stat, tempfile as _tempfile
+    target = path.resolve() if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    mode = None
     try:
-        with _os.fdopen(fd, "w", encoding="utf-8") as f:
+        mode = _stat.S_IMODE(target.stat().st_mode)
+    except OSError:
+        pass
+    fd, tmp = _tempfile.mkstemp(prefix=target.name + ".", dir=str(target.parent))
+    try:
+        with _os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(text)
-        _os.replace(tmp, path)
+        if mode is not None:
+            _os.chmod(tmp, mode)
+        _os.replace(tmp, target)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -788,7 +801,7 @@ def _codex_set_db(raw: str, db_env: str) -> str:
     # horizontal whitespace only: `\s*` used to swallow the newline before a
     # first-line key and glue it to the header (invalid TOML → refused).
     # Keep an inline comment; replace via a lambda so backslash paths survive.
-    key = _re2.compile(r"^[ \t]*SKILLMEM_DB[ \t]*=[ \t]*(?P<val>\"(?:[^\"\\\\]|\\\\.)*\"|'[^']*'|[^#\r\n]*?)(?P<rest>[ \t]*(?:#.*)?)\r?$",
+    key = _re2.compile(r"^[ \t]*SKILLMEM_DB[ \t]*=[ \t]*(?P<val>\"(?:[^\"\\]|\\.)*\"|'[^']*'|[^#\r\n]*?)(?P<rest>[ \t]*(?:#.*)?)\r?$",
                       _re2.M)
     if key.search(block):
         block = key.sub(lambda mm: line + mm.group("rest"), block, count=1)
@@ -820,7 +833,7 @@ def _patch_codex_config(
     raw = ""
     backup: Path | None = None
     if config_toml.exists():
-        raw = config_toml.read_text(encoding="utf-8")
+        raw = config_toml.read_bytes().decode("utf-8")   # keep CRLF as is
         backup = config_toml.with_suffix(f".toml.bak.{int(_time.time())}")
         backup.write_text(raw, encoding="utf-8")
         try:
@@ -843,7 +856,14 @@ def _patch_codex_config(
                 try:
                     check = tomllib.loads(new_raw)
                     ok = check["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == db_env
-                except (tomllib.TOMLDecodeError, KeyError, TypeError):
+                    # a line-level edit of a text config can only be trusted if
+                    # NOTHING else moved: a multi-line string value, a comment
+                    # boundary, anything — compare the whole parsed documents
+                    expect = json.loads(json.dumps(parsed, default=str))
+                    expect.setdefault("mcp_servers", {}).setdefault("skillmem", {}) \
+                          .setdefault("env", {})["SKILLMEM_DB"] = db_env
+                    ok = ok and json.loads(json.dumps(check, default=str)) == expect
+                except (tomllib.TOMLDecodeError, KeyError, TypeError, AttributeError):
                     ok = False
                 if not ok:
                     return {"changed": False, "reason": "could not update SKILLMEM_DB in "

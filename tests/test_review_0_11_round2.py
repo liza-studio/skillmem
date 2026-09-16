@@ -760,3 +760,44 @@ def test_kind_repair_catches_newlines_and_nbsp(home):
     conn.commit()
     S.init_schema(conn)
     assert conn.execute("SELECT kind FROM memory_items WHERE slug='n'").fetchone()[0] == "my notes"
+
+
+# --- round 8: Codex edit must change nothing but SKILLMEM_DB ---------------
+
+def test_codex_update_refuses_when_anything_else_would_change(home):
+    import sys, tomllib
+    from skillmem import cli as cli_mod
+    toml = home / ".codex" / "config.toml"
+    toml.parent.mkdir(parents=True)
+    mcp = Path(sys.executable).parent / "skillmem-mcp"
+    # a multi-line value whose continuation looks like a key: a line-level
+    # replacement would turn it into a live PATH setting
+    toml.write_text('[mcp_servers.skillmem]\ncommand = "mcp"\n[mcp_servers.skillmem.env]\n'
+                    'SKILLMEM_DB = """/old\nPATH = "/unexpected/bin"\n#"""\nSKILLMEM_AGENT = "codex"\n',
+                    encoding="utf-8")
+    before = toml.read_bytes()
+    r = cli_mod._patch_codex_config(toml, mcp, db_env="/new")
+    assert r["changed"] is False and "by hand" in r["reason"]
+    assert toml.read_bytes() == before
+    # an escaped quote before '#' inside the value: comment stays a comment
+    toml.write_text('[mcp_servers.skillmem]\ncommand = "mcp"\n[mcp_servers.skillmem.env]\n'
+                    'SKILLMEM_DB = "/old\\"#part" # keep\n', encoding="utf-8")
+    r = cli_mod._patch_codex_config(toml, mcp, db_env="/new")
+    text = toml.read_text(encoding="utf-8")
+    parsed = tomllib.loads(text)
+    assert parsed["mcp_servers"]["skillmem"]["env"] == {"SKILLMEM_DB": "/new"}
+    assert "# keep" in text and "#part" not in text.split("# keep")[0].replace('"/new"', "")
+
+
+def test_atomic_write_follows_symlink_and_keeps_mode_and_crlf(home):
+    import os, stat
+    from skillmem import cli as cli_mod
+    target = home / "dotfiles" / "config.toml"
+    target.parent.mkdir()
+    target.write_bytes(b'model = "x"\r\n')
+    os.chmod(target, 0o644)
+    link = home / "config.toml"
+    link.symlink_to(target)
+    cli_mod._atomic_write_text(link, 'model = "y"\r\n')
+    assert link.is_symlink() and target.read_bytes() == b'model = "y"\r\n'
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
