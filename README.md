@@ -285,7 +285,7 @@ skillmem schedule install        # decay daily 04:15, export weekly Sun 04:30
 ## Uninstall
 
 ```bash
-skillmem uninstall               # removes MCP entries (both agents), hooks, scheduled jobs; keeps the DB
+skillmem uninstall               # removes MCP entries (both agents), hooks, the trust deny rule, scheduled jobs; keeps the DB
 skillmem uninstall --purge-db    # ...and deletes the database
 ```
 

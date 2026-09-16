@@ -516,15 +516,22 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 
+_TRUST_DENY_RULE = "Bash(skillmem trust*)"
+
+
 def _fresh(path: Path) -> Path:
-    """``path`` if free, else ``path.1``, ``path.2``…: init runs several helpers
-    within one second and each used to name its backup by the second — the
-    last one silently overwrote the only copy of the original."""
+    """Create and return ``path`` if free, else ``path.1``, ``path.2``…: init
+    runs several helpers within one second and each used to name its backup
+    by the second — the last one silently overwrote the only copy of the
+    original. Exclusive create, so two inits racing cannot pick one name."""
     cand, n = path, 1
-    while cand.exists():
-        cand = path.with_name(f"{path.name}.{n}")
-        n += 1
-    return cand
+    while True:
+        try:
+            cand.touch(exist_ok=False)
+            return cand
+        except FileExistsError:
+            cand = path.with_name(f"{path.name}.{n}")
+            n += 1
 
 def _patch_claude_json(
     claude_json: Path,
@@ -539,21 +546,25 @@ def _patch_claude_json(
     """
     import time as _time
     data: dict[str, Any] = {}
-    backup: Path | None = None
+    raw = ""
     if claude_json.exists():
         raw = claude_json.read_text(encoding="utf-8")
-        backup = _fresh(claude_json.with_suffix(f".json.bak.{int(_time.time())}"))
-        backup.write_text(raw, encoding="utf-8")
         try:
             data = json.loads(raw) if raw.strip() else {}
         except json.JSONDecodeError as exc:
             click.echo(
                 f"warn: {claude_json} contains invalid JSON ({exc}); refusing to "
-                f"overwrite. Inspect backup at {backup} and re-run init after fixing.",
+                f"overwrite. Fix it and re-run init.",
                 err=True,
             )
-            return {"changed": False, "reason": "existing JSON is invalid",
-                    "backup": str(backup)}
+            return {"changed": False, "reason": "existing JSON is invalid"}
+
+    def _backup() -> Path | None:      # only a write earns a backup: a no-op init left copies behind
+        if not raw:
+            return None
+        b = _fresh(claude_json.with_suffix(f".json.bak.{int(_time.time())}"))
+        b.write_text(raw, encoding="utf-8")
+        return b
 
     servers = data.setdefault("mcpServers", {})
     if "skillmem" in servers:
@@ -571,21 +582,22 @@ def _patch_claude_json(
             env["SKILLMEM_DB"] = db_env
             added.append(f"env.SKILLMEM_DB={db_env}")
         cmd = entry.get("command")
-        if (isinstance(cmd, str) and cmd != str(mcp_binary)
+        if (isinstance(cmd, str) and cmd != str(mcp_binary) and mcp_binary.exists()
                 and Path(cmd.strip('"')).name.lower() in ("skillmem-mcp", "skillmem-mcp.exe")):
             entry["command"] = str(mcp_binary)   # the hooks follow the venv; so must the server
             added.append(f"command={mcp_binary}")
         if added:
+            backup = _backup()
             _atomic_write_json(claude_json, data)
             return {"changed": True, "added": "mcpServers.skillmem." + ", ".join(added),
                     "backup": str(backup) if backup else None}
-        return {"changed": False, "reason": "skillmem MCP already configured",
-                "backup": str(backup) if backup else None}
+        return {"changed": False, "reason": "skillmem MCP already configured"}
 
     entry: dict[str, Any] = {"command": str(mcp_binary), "args": []}
     if db_env:
         entry["env"] = {"SKILLMEM_DB": db_env}
     servers["skillmem"] = entry
+    backup = _backup()
     _atomic_write_json(claude_json, data)
     return {"changed": True, "added": "mcpServers.skillmem",
             "backup": str(backup) if backup else None}
@@ -820,25 +832,20 @@ def _patch_codex_config(
     import tomllib
 
     raw = ""
-    backup: Path | None = None
     if config_toml.exists():
         raw = config_toml.read_bytes().decode("utf-8")   # keep CRLF as is
-        backup = _fresh(config_toml.with_suffix(f".toml.bak.{int(_time.time())}"))
-        backup.write_bytes(raw.encode("utf-8"))           # byte-exact, no newline translation
         try:
             parsed = tomllib.loads(raw)
         except tomllib.TOMLDecodeError as exc:
             click.echo(
                 f"warn: {config_toml} contains invalid TOML ({exc}); refusing to "
-                f"touch it. Inspect backup at {backup} and re-run init after fixing.",
+                f"touch it. Fix it and re-run init.",
                 err=True,
             )
-            return {"changed": False, "reason": "existing TOML is invalid",
-                    "backup": str(backup)}
+            return {"changed": False, "reason": "existing TOML is invalid"}
         servers = parsed.get("mcp_servers")
         if servers is not None and not isinstance(servers, dict):
-            return {"changed": False, "reason": "mcp_servers is not a table; edit it by hand",
-                    "backup": str(backup)}
+            return {"changed": False, "reason": "mcp_servers is not a table; edit it by hand"}
         if "skillmem" in (servers or {}):
             # An existing table is left exactly as it is — including the
             # database it points at. Editing a hand-written TOML in place was
@@ -851,14 +858,12 @@ def _patch_codex_config(
             if isinstance(entry, dict) and isinstance(entry.get("env"), dict):
                 current = entry["env"].get("SKILLMEM_DB")
             if db_env and current != db_env:
-                return {"changed": False, "backup": str(backup),
+                return {"changed": False,
                         "reason": f"skillmem MCP already configured for "
                                   f"{current or 'the default database'}; to point Codex at "
                                   f"{db_env}, set SKILLMEM_DB = {_toml_str(db_env)} under "
                                   f"[mcp_servers.skillmem.env] in {config_toml} by hand"}
-            return {"changed": False, "reason": "skillmem MCP already configured",
-                    "backup": str(backup)}
-
+            return {"changed": False, "reason": "skillmem MCP already configured"}
 
     env: dict[str, str] = {"SKILLMEM_AGENT": agent}
     if db_env:
@@ -878,9 +883,12 @@ def _patch_codex_config(
     try:
         tomllib.loads(new_raw)
     except tomllib.TOMLDecodeError as exc:
-        return {"changed": False, "reason": f"appending would break the file: {exc}",
-                "backup": str(backup) if backup else None}
+        return {"changed": False, "reason": f"appending would break the file: {exc}"}
 
+    backup: Path | None = None
+    if raw:                                                # only a write earns a backup
+        backup = _fresh(config_toml.with_suffix(f".toml.bak.{int(_time.time())}"))
+        backup.write_bytes(raw.encode("utf-8"))           # byte-exact, no newline translation
     _atomic_write_text(config_toml, new_raw)
     return {"changed": True, "added": "mcp_servers.skillmem",
             "agent": agent,
@@ -984,21 +992,28 @@ def _patch_settings_hook(
     """
     import time as _time
     data: dict[str, Any] = {}
-    backup: Path | None = None
+    raw = ""
     if settings_json.exists():
         raw = settings_json.read_text(encoding="utf-8")
-        backup = _fresh(settings_json.with_suffix(f".json.bak.{int(_time.time())}"))
-        backup.write_text(raw, encoding="utf-8")
         try:
             data = json.loads(raw) if raw.strip() else {}
         except json.JSONDecodeError as exc:
             click.echo(
                 f"warn: {settings_json} contains invalid JSON ({exc}); "
-                f"refusing to overwrite. Inspect backup at {backup}.",
+                f"refusing to overwrite. Fix it and re-run init.",
                 err=True,
             )
-            return {"changed": False, "reason": "existing JSON is invalid",
-                    "backup": str(backup)}
+            return {"changed": False, "reason": "existing JSON is invalid"}
+
+    def _backup() -> Path | None:      # only a write earns a backup
+        if not raw:
+            return None
+        b = _fresh(settings_json.with_suffix(f".json.bak.{int(_time.time())}"))
+        b.write_text(raw, encoding="utf-8")
+        return b
+
+    def _scope(m: Any) -> Any:         # Claude Code reads missing, "" and "*" as match-all
+        return None if m in (None, "", "*") else m
 
     hooks = data.setdefault("hooks", {})
     event_hooks = hooks.setdefault(event, [])
@@ -1006,7 +1021,7 @@ def _patch_settings_hook(
     want = list(args)
     matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for group in event_hooks:
-        if not isinstance(group, dict) or (group.get("matcher") or None) != (matcher or None):
+        if not isinstance(group, dict) or _scope(group.get("matcher")) != _scope(matcher):
             continue                       # a differently scoped hook is not this one
         for h in group.get("hooks", []) or []:
             if not isinstance(h, dict) or not isinstance(h.get("command"), str):
@@ -1022,11 +1037,12 @@ def _patch_settings_hook(
             keep["timeout"] = timeout
         for group, h in matches[1:]:       # the same hook wired twice runs twice
             group["hooks"].remove(h)
-        event_hooks[:] = [g for g in event_hooks if not isinstance(g, dict) or g.get("hooks")]
+            if not group["hooks"] and group in event_hooks:
+                event_hooks.remove(group)  # only a group we emptied; foreign empties stay
         if not repointed and len(matches) == 1:
             return {"changed": False,
-                    "reason": f"{event} hook already present: {' '.join(args)}",
-                    "backup": str(backup) if backup else None}
+                    "reason": f"{event} hook already present: {' '.join(args)}"}
+        backup = _backup()
         _atomic_write_json(settings_json, data)
         what = f"runs {binary}" if repointed else "kept"
         if len(matches) > 1:
@@ -1039,6 +1055,7 @@ def _patch_settings_hook(
     if matcher:
         group["matcher"] = matcher
     event_hooks.append(group)
+    backup = _backup()
     _atomic_write_json(settings_json, data)
     return {"changed": True, "added": f"hooks.{event}: {' '.join(args) or 'migrate'}",
             "backup": str(backup) if backup else None}
@@ -1232,7 +1249,7 @@ def init(
         # memory files are a `skillmem migrate --source <dir>` job.
         if hooks_mode != "none":
             hook_reports.append(_patch_settings_deny(
-                settings_json, "Bash(skillmem trust*)"))
+                settings_json, _TRUST_DENY_RULE))
             hook_reports.append(_prune_settings_hook(
                 settings_json, command_prefix="skillmem migrate"))
         if hooks_mode == "full":
@@ -1357,7 +1374,8 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
                         old_hooks = grp.get("hooks") or []
                         new_hooks = [
                             h for h in old_hooks
-                            if _skillmem_argv(h.get("command") or "") is None
+                            if not isinstance(h, dict)
+                            or _skillmem_argv(h.get("command") if isinstance(h.get("command"), str) else "") is None
                         ]
                         if len(new_hooks) != len(old_hooks):
                             changed = True   # also when the group survives (mixed group)
@@ -1369,6 +1387,10 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
                     elif groups:
                         data["hooks"].pop(event, None)
                         changed = True
+                deny = (data.get("permissions") or {}).get("deny")
+                if isinstance(deny, list) and _TRUST_DENY_RULE in deny:
+                    deny.remove(_TRUST_DENY_RULE)   # init added it; uninstall reverses init
+                    changed = True
                 if changed:
                     backup = _fresh(settings_json.with_suffix(f".json.bak.{int(_time.time())}"))
                     backup.write_text(settings_json.read_text(encoding="utf-8"))

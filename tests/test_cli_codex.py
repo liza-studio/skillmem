@@ -95,7 +95,7 @@ def test_init_codex_refuses_broken_toml(fakehome: Path):
     assert code == 0
     assert cfg_path.read_text(encoding="utf-8") == broken
     assert "invalid TOML" in out
-    assert list(cfg_path.parent.glob("config.toml.bak.*"))
+    assert not list(cfg_path.parent.glob("config.toml.bak.*"))   # untouched file, no backup
 
 
 def test_uninstall_codex_removes_only_skillmem(fakehome: Path):

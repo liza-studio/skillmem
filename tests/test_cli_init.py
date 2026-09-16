@@ -91,8 +91,8 @@ def test_init_refuses_corrupted_existing_config(fakehome: Path):
     assert report["claude_json"]["changed"] is False
     # Original corrupt content preserved
     assert bad.read_text().startswith("{this is not")
-    # A .bak file exists somewhere alongside
-    assert list(fakehome.glob(".claude.json.bak.*"))
+    # Nothing was written, so nothing to back up: a refusal leaves no litter
+    assert not list(fakehome.glob(".claude.json.bak.*"))
 
 
 def test_uninstall_restores_clean_config(fakehome: Path):
@@ -251,3 +251,48 @@ def test_settings_backups_do_not_overwrite_each_other_within_a_second(fakehome: 
     backups = sorted(settings_json.parent.glob("settings.json.bak.*"))
     assert len(backups) == 3
     assert backups[0].read_text() == original
+
+
+def _bak_count(fakehome: Path) -> int:
+    return len(list((fakehome / ".claude").glob("settings.json.bak.*"))) + len(list(fakehome.glob(".claude.json.bak.*")))
+
+
+def test_noop_init_rerun_leaves_no_backups(fakehome: Path):
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
+    n = _bak_count(fakehome)
+    before = (fakehome / ".claude" / "settings.json").read_bytes()
+    _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
+    assert (fakehome / ".claude" / "settings.json").read_bytes() == before
+    assert _bak_count(fakehome) == n
+
+
+def test_dedup_keeps_a_foreign_empty_group_and_merges_star_matcher(fakehome: Path):
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    settings_json = fakehome / ".claude" / "settings.json"
+    settings_json.parent.mkdir(parents=True, exist_ok=True)
+    settings_json.write_text(json.dumps({"hooks": {"Stop": [
+        {"matcher": "", "hooks": []},
+        {"matcher": "*", "hooks": [{"type": "command", "command": "/old/venv/bin/skillmem hook session-recap"}]},
+        {"hooks": [{"type": "command", "command": "/old2/venv/bin/skillmem hook session-recap"}]}]}}))
+    _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
+    stop = json.loads(settings_json.read_text())["hooks"]["Stop"]
+    assert {"matcher": "", "hooks": []} in stop                       # foreign, untouched
+    recaps = [h["command"] for g in stop for h in g["hooks"] if h["command"].endswith("hook session-recap")]
+    assert len(recaps) == 1 and "/old" not in recaps[0]
+
+
+def test_mcp_entry_is_not_repointed_to_a_missing_binary(fakehome: Path):
+    claude_json = fakehome / ".claude.json"
+    claude_json.write_text(json.dumps({"mcpServers": {"skillmem": {"command": "/old/venv/bin/skillmem-mcp", "args": []}}}))
+    _run(["init", "--claude-code", "--mcp-binary", "/nonexistent/skillmem-mcp", "--skip-migrate"])
+    assert json.loads(claude_json.read_text())["mcpServers"]["skillmem"]["command"] == "/old/venv/bin/skillmem-mcp"
+
+
+def test_uninstall_removes_the_trust_deny_rule(fakehome: Path):
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
+    settings_json = fakehome / ".claude" / "settings.json"
+    assert "Bash(skillmem trust*)" in json.loads(settings_json.read_text())["permissions"]["deny"]
+    _run(["uninstall", "--claude-code"])
+    assert "Bash(skillmem trust*)" not in json.loads(settings_json.read_text()).get("permissions", {}).get("deny", [])

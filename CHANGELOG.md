@@ -128,11 +128,17 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   an ignored `agent` field; "9 tools", not 8. `visibility` is validated on
   every channel (`public`/`shared`/`private`); HTTP omits it to mean "keep".
 - `init --claude-code` run from a new venv (a moved install, pip → pipx) repoints
-  the hooks it already wired and the `mcpServers.skillmem` command instead of
-  adding a second copy, and collapses an install that is already doubled to one
-  hook per event — two copies of the Stop hook recapped every session twice. A
-  hook the user scoped to another matcher is left alone. Backups written within
-  one second no longer overwrite each other (`.bak.<sec>`, `.bak.<sec>.1`, …).
+  the hooks it already wired instead of adding a second copy, and collapses an
+  install that is already doubled to one copy of each hook (per event, matcher
+  and arguments) — two copies of the Stop hook recapped every session twice. A
+  hook the user scoped to another matcher is left alone; missing, `""` and `"*"`
+  are the same scope. The `mcpServers.skillmem` command follows the venv too
+  (Claude Code only, when it is named `skillmem-mcp` and the new binary exists).
+  Config backups are taken only when a file is actually rewritten — a no-op
+  re-run leaves none, a refusal (invalid JSON/TOML) leaves the file untouched
+  and none — and are named exclusively (`.bak.<sec>`, `.bak.<sec>.1`, …), so
+  helpers running within one second cannot overwrite each other's copy.
+  `uninstall --claude-code` also removes the `Bash(skillmem trust*)` deny rule.
 - Upgrading: re-run `skillmem init --claude-code` (and `schedule install`) to
   receive the deny rule, the hook prune and the job environment. A row whose
   pre-0.11 `kind` still fails validation after normalisation (non-ASCII,
