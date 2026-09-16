@@ -115,3 +115,20 @@ def test_skip_auto_memories_flag(conn, tmp_path: Path):
     report = import_vault(conn, root, skip_auto_memories=False)
     assert report.inserted == 1
     assert S.get(conn, "auto-note").kind == "feedback"  # metadata.type wins over default
+
+
+def test_import_vault_ignores_a_symlinked_note_pointing_outside(tmp_path, monkeypatch):
+    import os
+    from skillmem import vault as V, storage as S
+    monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SKILLMEM_DB", raising=False)
+    vault = tmp_path / "vault"; vault.mkdir()
+    (vault / "real.md").write_text("# real\n\na real note with enough words to import\n")
+    outside = tmp_path / "outside"; outside.mkdir()
+    (outside / "secret.txt").write_text("PRIVATE KEY MATERIAL abcd1234\n")
+    os.symlink(outside / "secret.txt", vault / "leak.md")
+    conn = S.connect(tmp_path / "home" / "memory.db"); S.init_schema(conn)
+    rep = V.import_vault(conn, vault)
+    slugs = {r.slug for r in S.list_items(conn, limit=50)}
+    assert "real" in slugs and not any("leak" in s for s in slugs)
+    assert not any("PRIVATE KEY" in (S.get(conn, s).body or "") for s in slugs)

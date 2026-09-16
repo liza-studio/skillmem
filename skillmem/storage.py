@@ -1849,10 +1849,14 @@ def hybrid_rank_ids(
     exclude_kinds: tuple[str, ...] = (),
 ) -> list[int]:
     """Fused id ranking. Falls back to pure BM25 when no vector signal."""
+    # each signal contributes a pool of candidates; a page larger than the
+    # pool (the HTTP layer widens its page past hidden rows) must widen the
+    # pool with it, or rows past position 50 can never be returned
+    pool = max(_CANDIDATE_POOL, limit)
     bm = _bm25_ids(conn, query, kind=kind, project=project,
-                   exclude_kinds=exclude_kinds)
+                   exclude_kinds=exclude_kinds, pool=pool)
     vec = _vector_ids(conn, query, kind=kind, project=project,
-                      exclude_kinds=exclude_kinds)
+                      exclude_kinds=exclude_kinds, pool=pool)
     if not vec:
         return bm[:limit]
     scores = _rrf_scores(bm, vec)
@@ -2419,8 +2423,9 @@ def recall_skills(
     (``SKILL_STRENGTH_COEF``) so frequently-useful skills surface higher.
     Degrades to BM25-only when no embeddings are present (see hybrid_rank_ids).
     """
-    bm = _bm25_ids(conn, query, kind="skill")
-    vec = _vector_ids(conn, query, kind="skill")
+    pool = max(_CANDIDATE_POOL, limit)      # a page wider than the pool must widen the pool
+    bm = _bm25_ids(conn, query, kind="skill", pool=pool)
+    vec = _vector_ids(conn, query, kind="skill", pool=pool)
     fused = _rrf_scores(bm, vec) if vec else {i: 1.0 / (RRF_K + r + 1) for r, i in enumerate(bm)}
     if not fused:
         return []

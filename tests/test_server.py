@@ -304,3 +304,29 @@ def test_same_text_write_with_null_ttl_clears_the_deadline(client):
     from skillmem import storage as S
     row = S.get(S.connect(_db_of(client)), "ttl-clear")
     assert row.ttl_days is None and row.freshness_until is None
+
+
+def test_hidden_rows_do_not_crowd_the_callers_own_out_of_search_list_recall(client):
+    write(client, "bob", "bob-procedure", visibility="private", kind="skill",
+          body="quartz calibration procedure for the bench")
+    for i in range(110):
+        client.post("/write", headers=auth("alice"), json={
+            "slug": f"alice-q-{i}", "title": "quartz calibration quartz calibration",
+            "body": "quartz calibration quartz calibration quartz " * 3,
+            "kind": "skill", "visibility": "private", "check_conflicts": False})
+    s = client.post("/search", headers=auth("bob"), json={"query": "quartz calibration", "limit": 5}).json()
+    assert [r["slug"] for r in s["results"]] == ["bob-procedure"]
+    l = client.post("/list", headers=auth("bob"), json={"kind": "skill", "limit": 5}).json()
+    assert [i["slug"] for i in l["items"]] == ["bob-procedure"]
+    r = client.post("/recall", headers=auth("bob"), json={"query": "quartz calibration", "limit": 5}).json()
+    assert [x["slug"] for x in r["skills"]] == ["bob-procedure"]
+
+
+def test_backlinks_name_only_sources_the_caller_may_read(client):
+    write(client, "alice", "team-handbook", visibility="public", body="handbook text")
+    write(client, "alice", "acquisition-secret", visibility="private", body="see [[team-handbook]]")
+    write(client, "bob", "bob-note", visibility="private", body="also [[team-handbook]]")
+    g = client.get("/get/team-handbook", headers=auth("bob")).json()
+    assert g["links_in"] == ["bob-note"]
+    g = client.get("/get/team-handbook", headers=auth("boss")).json()
+    assert sorted(g["links_in"]) == ["acquisition-secret", "bob-note"]

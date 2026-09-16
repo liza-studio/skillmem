@@ -201,9 +201,21 @@ class VaultReport:
 
 
 def _iter_md(root: Path) -> Iterable[Path]:
+    # The same rule attachments and packs follow: a symlink, or anything that
+    # resolves outside the vault, is not a note — a cloned vault could carry
+    # `zshrc.md -> ~/.zshrc` and the import used to store the target's text.
+    base = root.resolve()
     for path in sorted(root.rglob("*")):
-        if path.is_file() and path.suffix.lower() in SUPPORTED_TEXT:
-            yield path
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.suffix.lower() not in SUPPORTED_TEXT:
+            continue
+        try:
+            if not path.resolve().is_relative_to(base):
+                continue
+        except OSError:
+            continue
+        yield path
 
 
 def import_vault(

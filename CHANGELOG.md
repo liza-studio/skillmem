@@ -137,6 +137,15 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
 - `/update` and `mem_update` mark the rewritten text `origin=agent`: an
   owner-authored row edited by an agent kept `origin=owner`, so the owner
   would re-trust words they never wrote (approval was already dropped).
+- HTTP `/search`, `/list` and `/recall` used to cut the page *before* the
+  visibility filter, so another agent's records could crowd the caller's own
+  out of the answer (an empty 200 while `/get` found the row); the page now
+  widens until `limit` visible rows are found or the source is exhausted.
+  `/get` lists in `links_in` only the backlink sources the caller may read —
+  a private record's slug used to show on the public record it linked to.
+- `import-vault` no longer follows a symlinked note out of the vault (the
+  rule attachments and packs already had): `zshrc.md -> ~/.zshrc` in a
+  cloned vault used to land the real file's text in the database.
 - `skillmem skills rm <pack>` soft-deletes only the rows the import wrote —
   the ones whose slug carries the `pack-<name>-` prefix under project
   `pack:<name>` and are not `origin=owner`, edited by an agent or not; a
