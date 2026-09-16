@@ -675,23 +675,6 @@ def test_history_old_title_is_framed(home, monkeypatch):
     assert H.UNTRUSTED_OPEN in h0["old_body"]
 
 
-def test_codex_config_follows_an_explicit_db(home):
-    import sys
-    from skillmem import cli as cli_mod
-    toml = home / ".codex" / "config.toml"
-    toml.parent.mkdir(parents=True)
-    toml.write_text('# my settings\nmodel = "x"\n', encoding="utf-8")
-    mcp = Path(sys.executable).parent / "skillmem-mcp"
-    cli_mod._patch_codex_config(toml, mcp, db_env="/db/one")
-    r = cli_mod._patch_codex_config(toml, mcp, db_env="/db/two")
-    assert r["changed"], r
-    import tomllib
-    parsed = tomllib.loads(toml.read_text(encoding="utf-8"))
-    assert parsed["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == "/db/two"
-    assert parsed["model"] == "x" and "# my settings" in toml.read_text(encoding="utf-8")
-    assert cli_mod._patch_codex_config(toml, mcp, db_env="/db/two")["changed"] is False
-    assert cli_mod._patch_codex_config(toml, mcp, db_env=None)["changed"] is False
-
 
 def test_db_memory_is_not_turned_into_a_file(home, monkeypatch):
     monkeypatch.chdir(home)
@@ -702,42 +685,6 @@ def test_db_memory_is_not_turned_into_a_file(home, monkeypatch):
 
 # --- round 7: Codex in-place update hardened; repair guards ----------------
 
-def test_codex_db_can_change_twice_and_keeps_inline_comments(home):
-    import sys, tomllib
-    from skillmem import cli as cli_mod
-    toml = home / ".codex" / "config.toml"
-    toml.parent.mkdir(parents=True)
-    toml.write_text('model = "x"\n', encoding="utf-8")
-    mcp = Path(sys.executable).parent / "skillmem-mcp"
-    cli_mod._patch_codex_config(toml, mcp)                         # no --db
-    assert cli_mod._patch_codex_config(toml, mcp, db_env="/db/A")["changed"]
-    assert cli_mod._patch_codex_config(toml, mcp, db_env="/db/B")["changed"]   # second change
-    assert tomllib.loads(toml.read_text())["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == "/db/B"
-    # first-line key, inline comment, CRLF, backslash path
-    toml.write_text('[mcp_servers.skillmem]\r\ncommand = "mcp"\r\n[mcp_servers.skillmem.env]\r\n'
-                    'SKILLMEM_DB = "/old" # keep me\r\nSKILLMEM_AGENT = "codex"\r\n', encoding="utf-8")
-    r = cli_mod._patch_codex_config(toml, mcp, db_env="C:\\db\\x")
-    assert r["changed"], r
-    text = toml.read_text(encoding="utf-8")
-    assert "# keep me" in text
-    assert tomllib.loads(text)["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == "C:\\db\\x"
-
-
-def test_codex_update_is_atomic_on_write_failure(home, monkeypatch):
-    import sys
-    from skillmem import cli as cli_mod
-    toml = home / ".codex" / "config.toml"
-    toml.parent.mkdir(parents=True)
-    mcp = Path(sys.executable).parent / "skillmem-mcp"
-    cli_mod._patch_codex_config(toml, mcp, db_env="/db/A")
-    before = toml.read_text(encoding="utf-8")
-
-    def boom(path, text):
-        raise OSError(28, "No space left on device")
-    monkeypatch.setattr(cli_mod, "_atomic_write_text", boom)
-    with pytest.raises(OSError):
-        cli_mod._patch_codex_config(toml, mcp, db_env="/db/B")
-    assert toml.read_text(encoding="utf-8") == before       # untouched, not truncated
 
 
 def test_visibility_case_only_is_repaired_without_an_off_enum_sibling(home):
@@ -764,30 +711,6 @@ def test_kind_repair_catches_newlines_and_nbsp(home):
 
 # --- round 8: Codex edit must change nothing but SKILLMEM_DB ---------------
 
-def test_codex_update_refuses_when_anything_else_would_change(home):
-    import sys, tomllib
-    from skillmem import cli as cli_mod
-    toml = home / ".codex" / "config.toml"
-    toml.parent.mkdir(parents=True)
-    mcp = Path(sys.executable).parent / "skillmem-mcp"
-    # a multi-line value whose continuation looks like a key: a line-level
-    # replacement would turn it into a live PATH setting
-    toml.write_text('[mcp_servers.skillmem]\ncommand = "mcp"\n[mcp_servers.skillmem.env]\n'
-                    'SKILLMEM_DB = """/old\nPATH = "/unexpected/bin"\n#"""\nSKILLMEM_AGENT = "codex"\n',
-                    encoding="utf-8")
-    before = toml.read_bytes()
-    r = cli_mod._patch_codex_config(toml, mcp, db_env="/new")
-    assert r["changed"] is False and "by hand" in r["reason"]
-    assert toml.read_bytes() == before
-    # an escaped quote before '#' inside the value: comment stays a comment
-    toml.write_text('[mcp_servers.skillmem]\ncommand = "mcp"\n[mcp_servers.skillmem.env]\n'
-                    'SKILLMEM_DB = "/old\\"#part" # keep\n', encoding="utf-8")
-    r = cli_mod._patch_codex_config(toml, mcp, db_env="/new")
-    text = toml.read_text(encoding="utf-8")
-    parsed = tomllib.loads(text)
-    assert parsed["mcp_servers"]["skillmem"]["env"] == {"SKILLMEM_DB": "/new"}
-    assert "# keep" in text and "#part" not in text.split("# keep")[0].replace('"/new"', "")
-
 
 def test_atomic_write_follows_symlink_and_keeps_mode_and_crlf(home):
     import os, stat
@@ -805,39 +728,6 @@ def test_atomic_write_follows_symlink_and_keeps_mode_and_crlf(home):
 
 # --- round 9: last P3s from the first clean gate ---------------------------
 
-def test_codex_update_keeps_crlf_on_every_line_and_backup_is_byte_exact(home):
-    import sys, tomllib
-    from skillmem import cli as cli_mod
-    toml = home / ".codex" / "config.toml"
-    toml.parent.mkdir(parents=True)
-    mcp = Path(sys.executable).parent / "skillmem-mcp"
-    toml.write_bytes(b'[mcp_servers.skillmem]\r\ncommand = "mcp"\r\n[mcp_servers.skillmem.env]\r\n'
-                     b'SKILLMEM_DB = "/old"\r\nSKILLMEM_AGENT = "codex"\r\n')
-    original = toml.read_bytes()
-    assert cli_mod._patch_codex_config(toml, mcp, db_env="/new")["changed"]
-    data = toml.read_bytes()
-    assert b"\n" not in data.replace(b"\r\n", b"")          # every line still CRLF
-    assert tomllib.loads(data.decode())["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == "/new"
-    backups = list(toml.parent.glob("config.toml.bak.*"))
-    assert backups and backups[0].read_bytes() == original
-    # inserting a key into a CRLF file uses CRLF too
-    toml.write_bytes(b'[mcp_servers.skillmem]\r\ncommand = "mcp"\r\n')
-    assert cli_mod._patch_codex_config(toml, mcp, db_env="/x")["changed"]
-    assert b"\n" not in toml.read_bytes().replace(b"\r\n", b"")
-
-
-def test_codex_malformed_entry_is_refused_not_a_traceback(home):
-    import sys
-    from skillmem import cli as cli_mod
-    toml = home / ".codex" / "config.toml"
-    toml.parent.mkdir(parents=True)
-    mcp = Path(sys.executable).parent / "skillmem-mcp"
-    for text in ('[mcp_servers]\nskillmem = "s"\n',
-                 '[mcp_servers.skillmem]\ncommand = "mcp"\nenv = 5\n'):
-        toml.write_text(text, encoding="utf-8")
-        r = cli_mod._patch_codex_config(toml, mcp, db_env="/new")
-        assert r["changed"] is False and "by hand" in r["reason"], r
-        assert toml.read_text(encoding="utf-8") == text
 
 
 def test_kind_repair_catches_vertical_tab_and_form_feed(home):
@@ -848,3 +738,29 @@ def test_kind_repair_catches_vertical_tab_and_form_feed(home):
         conn.commit()
         S.init_schema(conn)
         assert conn.execute("SELECT kind FROM memory_items WHERE slug='n'").fetchone()[0] == "my notes"
+
+
+
+# --- round 10: Codex in-place editing withdrawn ---------------------------
+
+def test_codex_existing_entry_is_never_edited_and_the_way_out_is_explained(home):
+    import sys, tomllib
+    from skillmem import cli as cli_mod
+    toml = home / ".codex" / "config.toml"
+    toml.parent.mkdir(parents=True)
+    mcp = Path(sys.executable).parent / "skillmem-mcp"
+    toml.write_bytes(b'# mine\r\nmodel = "x"\r\n')
+    assert cli_mod._patch_codex_config(toml, mcp, db_env="/db/one")["changed"]
+    before = toml.read_bytes()
+    r = cli_mod._patch_codex_config(toml, mcp, db_env="/db/two")
+    assert r["changed"] is False and "uninstall" in r["reason"] and "/db/two" in r["reason"]
+    assert toml.read_bytes() == before                      # untouched, whatever the line endings
+    assert cli_mod._patch_codex_config(toml, mcp, db_env="/db/one")["changed"] is False
+    assert cli_mod._patch_codex_config(toml, mcp)["changed"] is False
+    assert tomllib.loads(before.decode())["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == "/db/one"
+    for text in ('[mcp_servers]\nskillmem = "s"\n', 'mcp_servers = 5\n',
+                 '[mcp_servers.skillmem]\ncommand = "mcp"\nenv = 5\n'):
+        toml.write_text(text, encoding="utf-8")
+        r = cli_mod._patch_codex_config(toml, mcp, db_env="/new")
+        assert r["changed"] is False and "by hand" in r["reason"], (text, r)
+        assert toml.read_text(encoding="utf-8") == text

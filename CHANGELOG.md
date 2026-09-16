@@ -90,12 +90,13 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
 **CLI / MCP / scheduling**
 - `skillmem --db X init ...` writes `SKILLMEM_DB=X` (absolute) into every
   agent's MCP entry — Claude Code, Codex, Cursor, Windsurf, Gemini CLI,
-  opencode — and updates an existing entry's database in place (Codex: one
-  line inside `[mcp_servers.skillmem.env]`, written atomically through a
-  symlink with mode and line endings kept, and only if the parsed file
-  differs from the old one in nothing else — an inline `env = {...}` table
-  or anything the edit cannot prove harmless is refused with "edit by
-  hand"); without `--db` an existing entry is left alone. `--db` reaches scheduled jobs (re-run
+  opencode. Claude Code, Cursor, Windsurf, Gemini CLI and opencode update an
+  existing entry's database in place (JSON, rewritten atomically). Codex's
+  hand-written TOML is never edited in place: an existing entry keeps its
+  database and `init` says how to move it (`uninstall` + `init --codex`, or
+  one line under `[mcp_servers.skillmem.env]`). Without `--db` an existing
+  entry is left alone everywhere. Config files are written atomically,
+  through a symlink to its target, with mode kept. `--db` reaches scheduled jobs (re-run
   `schedule install` after upgrading). `uninstall --purge-db` removes the
   DB, its `-wal`/`-shm`, its namespaced body files and the legacy-named
   files it references (a second database referencing the same legacy file

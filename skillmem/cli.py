@@ -786,30 +786,6 @@ def _toml_str(value: str) -> str:
 
 
 
-def _codex_set_db(raw: str, db_env: str) -> str:
-    """Set SKILLMEM_DB inside [mcp_servers.skillmem.env] of a TOML text."""
-    import re as _re2
-    line = f"SKILLMEM_DB = {_toml_str(db_env)}"
-    nl = "\r\n" if "\r\n" in raw else "\n"          # the file's own convention
-    m = _re2.search(r"^\[mcp_servers\.skillmem\.env\][ \t]*\r?$", raw, _re2.M)
-    if m is None:
-        if raw and not raw.endswith("\n"):
-            raw += nl
-        return raw + nl + "[mcp_servers.skillmem.env]" + nl + line + nl
-    head, tail = raw[:m.end()], raw[m.end():]
-    nxt = _re2.search(r"^[ \t]*\[", tail, _re2.M)    # end of this table
-    block, rest = (tail[:nxt.start()], tail[nxt.start():]) if nxt else (tail, "")
-    # horizontal whitespace only: `\s*` used to swallow the newline before a
-    # first-line key and glue it to the header (invalid TOML → refused).
-    # Keep an inline comment; replace via a lambda so backslash paths survive.
-    key = _re2.compile(r"^[ \t]*SKILLMEM_DB[ \t]*=[ \t]*(?P<val>\"(?:[^\"\\]|\\.)*\"|'[^']*'|[^#\r\n]*?)(?P<rest>[ \t]*(?:#[^\r\n]*)?\r?)$",
-                      _re2.M)
-    if key.search(block):
-        block = key.sub(lambda mm: line + mm.group("rest"), block, count=1)
-    else:
-        block = nl + line + block
-    return head + block + rest
-
 
 def _patch_codex_config(
     config_toml: Path,
@@ -847,39 +823,31 @@ def _patch_codex_config(
             )
             return {"changed": False, "reason": "existing TOML is invalid",
                     "backup": str(backup)}
-        if "skillmem" in (parsed.get("mcp_servers") or {}):
-            # an existing table keeps everything but the database, which
-            # follows an explicit --db: one line replaced or appended, the
-            # user's comments untouched, the result parsed before it is written
-            entry = parsed["mcp_servers"]["skillmem"]
-            env_tbl = entry.get("env") if isinstance(entry, dict) else None
-            if not isinstance(entry, dict) or (env_tbl is not None and not isinstance(env_tbl, dict)):
-                return {"changed": False, "reason": "[mcp_servers.skillmem] has an unexpected "
-                        "shape; edit it by hand", "backup": str(backup)}
-            current = (env_tbl or {}).get("SKILLMEM_DB")
+        servers = parsed.get("mcp_servers")
+        if servers is not None and not isinstance(servers, dict):
+            return {"changed": False, "reason": "mcp_servers is not a table; edit it by hand",
+                    "backup": str(backup)}
+        if "skillmem" in (servers or {}):
+            # An existing table is left exactly as it is — including the
+            # database it points at. Editing a hand-written TOML in place was
+            # tried and withdrawn: four review rounds found a new edge each
+            # (multi-line strings, comment boundaries, CRLF), and a config
+            # file is not worth that. Moving Codex to another database is
+            # two explicit commands, or one line by hand.
+            current = None
+            entry = servers["skillmem"]
+            if isinstance(entry, dict) and isinstance(entry.get("env"), dict):
+                current = entry["env"].get("SKILLMEM_DB")
             if db_env and current != db_env:
-                new_raw = _codex_set_db(raw, db_env)
-                try:
-                    check = tomllib.loads(new_raw)
-                    ok = check["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == db_env
-                    # a line-level edit of a text config can only be trusted if
-                    # NOTHING else moved: a multi-line string value, a comment
-                    # boundary, anything — compare the whole parsed documents
-                    expect = json.loads(json.dumps(parsed, default=str))
-                    expect.setdefault("mcp_servers", {}).setdefault("skillmem", {}) \
-                          .setdefault("env", {})["SKILLMEM_DB"] = db_env
-                    ok = ok and json.loads(json.dumps(check, default=str)) == expect
-                except (tomllib.TOMLDecodeError, KeyError, TypeError, AttributeError):
-                    ok = False
-                if not ok:
-                    return {"changed": False, "reason": "could not update SKILLMEM_DB in "
-                            "place; edit [mcp_servers.skillmem.env] by hand",
-                            "backup": str(backup)}
-                _atomic_write_text(config_toml, new_raw)   # never a truncated config on ENOSPC
-                return {"changed": True, "added": f"mcp_servers.skillmem.env.SKILLMEM_DB={db_env}",
-                        "backup": str(backup)}
+                return {"changed": False, "backup": str(backup),
+                        "reason": f"skillmem MCP already configured for "
+                                  f"{current or 'the default database'}; to point Codex at "
+                                  f"{db_env}: `skillmem uninstall --no-claude-code --no-editors` "
+                                  f"then `skillmem --db {db_env} init --codex`, or set "
+                                  f"SKILLMEM_DB under [mcp_servers.skillmem.env] by hand"}
             return {"changed": False, "reason": "skillmem MCP already configured",
                     "backup": str(backup)}
+
 
     env: dict[str, str] = {"SKILLMEM_AGENT": agent}
     if db_env:
