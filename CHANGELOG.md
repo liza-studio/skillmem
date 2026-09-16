@@ -126,11 +126,14 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   candidates from every agent's records, private ones included — a 409 that
   quotes another agent's private title is a read through the trust boundary.
   Candidates are now the top BM25 matches *among the records the writer may
-  read* (the window is widened before filtering, so hidden rows cannot crowd
-  out the writer's own duplicate). MCP is one principal; unchanged.
+  read* (the scan walks the BM25 order past hidden rows until it has scored
+  its five, so no number of hidden rows crowds out the writer's own
+  duplicate). MCP is one principal; unchanged.
 - A same-text write that changes `ttl_days` now moves `freshness_until` with
-  it, and an explicit `ttl_days: null` clears both; before, the new TTL was
-  stored and the deadline never came. Re-sending the same TTL does not renew.
+  it, and over HTTP an explicit `ttl_days: null` clears both; before, the new
+  TTL was stored and the deadline never came. Re-sending the same TTL does
+  not renew; MCP and the CLI cannot clear a TTL (null is not sent, 0 is
+  refused) — 0.11.1.
 - `/update` and `mem_update` mark the rewritten text `origin=agent`: an
   owner-authored row edited by an agent kept `origin=owner`, so the owner
   would re-trust words they never wrote (approval was already dropped).

@@ -1944,17 +1944,18 @@ def find_conflicts(
     if fts_query == '""':
         return []
     try:
+        # The visibility filter runs in Python, so with a filter the SQL has no
+        # LIMIT: the cursor walks the BM25 order and stops once `candidates`
+        # VISIBLE rows are scored. A fixed window (5, then 100) let that many
+        # hidden rows crowd out the writer's own duplicate.
         rows = conn.execute(
             "SELECT m.id, m.slug, m.title, m.body, m.visibility, m.topics, m.agent "
             "FROM mem_fts_stem "
             "JOIN memory_items m ON m.id = mem_fts_stem.rowid "
             "WHERE mem_fts_stem MATCH ? AND m.deleted_at IS NULL "
             "ORDER BY bm25(mem_fts_stem) LIMIT ?",
-            # the filter runs in Python, so the SQL window must be wider than
-            # the candidate count: five hidden rows used to fill it and the
-            # writer's own duplicate went unscored
-            (fts_query, candidates if visible is None else max(100, candidates * 20)),
-        ).fetchall()
+            (fts_query, candidates if visible is None else -1),
+        )
     except sqlite3.OperationalError as exc:
         # Log so a broken FTS index isn't silently treated as "no conflicts".
         log.warning("find_conflicts FTS query failed (%s); treating as empty", exc)
@@ -1971,6 +1972,7 @@ def find_conflicts(
         }):
             continue
         if scored >= candidates:          # the top-N *visible* by BM25, as before the filter
+            rows.close()
             break
         scored += 1
         other = _word_bag(row["title"] + "\n" + row["body"])

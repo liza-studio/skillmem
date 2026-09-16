@@ -280,7 +280,7 @@ def test_learn_conflicts_are_filtered_like_write(client):
 
 
 def test_hidden_rows_do_not_crowd_out_the_writers_own_duplicate(client):
-    for i in range(5):
+    for i in range(120):                     # past every fixed window we ever had (5, 100)
         r = client.post("/write", headers=auth("carol"), json={
             "slug": f"carol-priv-{i}", "title": "deployment checklist", "body": GENERIC,
             "kind": "note", "visibility": "private", "check_conflicts": False})
