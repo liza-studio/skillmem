@@ -153,3 +153,15 @@ def test_remove_pack_leaves_the_users_own_note_in_that_project(conn, pack_dir: P
     removed = P.remove_pack(conn, "somepack", reason="test")
     assert "owner-note" not in removed and len(removed) == 2
     assert S.get(conn, "owner-note") is not None and S.get(conn, "owner-note").deleted_at is None
+
+
+def test_remove_pack_still_removes_a_skill_edited_over_mcp(conn, pack_dir: Path, monkeypatch, tmp_path):
+    from skillmem import mcp_server as M
+    P.import_pack(conn, str(pack_dir))
+    row = S.get(conn, "pack-somepack-lazy")
+    row.body = row.body + "\n\nedited by the agent"
+    row.agent = "claude-code"          # what mem_update does to the author column
+    row.origin = "agent"
+    S.upsert(conn, row, reason="agent edit")
+    removed = P.remove_pack(conn, "somepack", reason="test")
+    assert sorted(removed) == ["pack-somepack-deep", "pack-somepack-lazy"]

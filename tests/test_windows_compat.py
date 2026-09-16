@@ -114,3 +114,14 @@ def test_schtasks_command_carries_the_data_dir_overrides(monkeypatch: pytest.Mon
         assert tr.startswith('cmd /c "set "') and tr.endswith('"')
         assert 'set "SKILLMEM_HOME=C:\\Data\\sm"' in tr and 'set "SKILLMEM_DB=C:\\Data\\sm\\other.db"' in tr
         assert "&& " in tr and "skillmem.exe" in tr.split("&& ")[-1]
+
+
+def test_win_tr_wrapper_quotes_every_token_and_refuses_the_unquotable():
+    import click
+    tr = SCHED._win_tr([r"C:\Program Files\SkillMem\skillmem.exe", "export-all", r"C:\a&b\backups\vault"],
+                       {"SKILLMEM_HOME": r"C:\a&b"})
+    assert tr.endswith('"export-all" "C:\\a&b\\backups\\vault""')
+    assert 'set "SKILLMEM_HOME=C:\\a&b"' in tr
+    with pytest.raises(click.ClickException):
+        SCHED._win_tr(["skillmem.exe", "decay"], {"SKILLMEM_DB": r"C:\data\%USERNAME%\memory.db"})
+    assert SCHED._win_tr(["skillmem.exe", "decay", "--days", "14"], {}) == "skillmem.exe decay --days 14"

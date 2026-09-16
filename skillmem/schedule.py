@@ -156,12 +156,19 @@ def _win_tr(argv: list[str], env: dict[str, str] | None = None) -> str:
     Windows ``--db`` user's nightly decay ran against the default database
     while launchd/cron/systemd carried the variables.
     """
-    quoted = [f'"{a}"' if " " in a else a for a in argv]
-    cmd = " ".join(quoted)
-    if env:
-        sets = " && ".join(f'set "{k}={v}"' for k, v in env.items())
-        cmd = f'cmd /c "{sets} && {cmd}"'
-    return cmd
+    if not env:
+        return " ".join(f'"{a}"' if " " in a else a for a in argv)
+    # inside the wrapper every token is quoted: cmd.exe reads a bare & as a
+    # command separator, and a path may carry one. Two characters cannot be
+    # made safe from the command line at all — refuse them loudly.
+    for v in [*env.values(), *argv]:
+        if "%" in v or '"' in v:
+            raise click.ClickException(
+                f"cannot schedule on Windows with a path containing % or \": {v!r}; "
+                "pick another SKILLMEM_HOME/SKILLMEM_DB location"
+            )
+    sets = " && ".join(f'set "{k}={v}"' for k, v in env.items())
+    return f'cmd /c "{sets} && ' + " ".join(f'"{a}"' for a in argv) + '"'
 
 
 def _schtasks_install() -> list[str]:
