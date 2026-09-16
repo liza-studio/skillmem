@@ -3,7 +3,7 @@
 ## 0.11.0
 
 Two independent reviewers (one on the Claude side, one on the GPT side) read the
-whole codebase for the first time, then re-read every fix, five rounds deep,
+whole codebase for the first time, then re-read every fix, eighteen rounds deep,
 each round hunting for what the previous round's fixes broke. The first pass
 found its P1s not in the recap hook everyone had been staring at but in the
 parts nobody had reviewed end to end: the HTTP server, body files, packs.
