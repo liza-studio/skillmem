@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.10.6
+## 0.10.7
+
+- **A tool description said something the tool does not do.** 0.10.6 claimed
+  `mem_search` excludes session recaps by default — only the CLI does that, the
+  MCP tool searches every kind. Aligning the behaviour was tempting and wrong:
+  an agent that writes a note with `mem_write` would stop finding its own note.
+  The text now says what actually happens and suggests `kind='feedback'` or
+  `kind='skill'` when you want rules rather than the diary.
+- **Tests now hold the descriptions to the code.** Every factual claim was
+  verified against live calls — `mem_learn` writes `origin='agent'` and no
+  approval, `mem_recall` refreshes recency without touching strength,
+  `mem_update` drops approval when the text changes, `mem_get`/`mem_list` leave
+  the row untouched — and the ones that could silently drift are now assertions.
+
 
 - **Tool descriptions say what the tool does TO you, not just what it is for.**
   A directory's automated review scored our descriptions and the gaps were fair:

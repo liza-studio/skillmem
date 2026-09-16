@@ -221,3 +221,64 @@ def test_learn_recall_reinforce_cycle(mcp):
 
     missing = _payload(mcp.TOOL_HANDLERS["mem_reinforce"]({"slug": "no-such-skill"}))
     assert "error" in missing
+
+
+# --------------------------------------------------------------------------- #
+# the tool descriptions are a contract: an agent acts on them without reading
+# the code, so what they promise has to be true
+# --------------------------------------------------------------------------- #
+
+
+def _desc(mcp, name: str) -> str:
+    return next(t.description for t in mcp.TOOLS if t.name == name)
+
+
+def test_descriptions_do_not_promise_behaviour_we_lack(mcp):
+    """Caught by review: mem_search claimed it excluded session recaps, which only
+    the CLI does. A description that lies is worse than a thin one — the agent
+    cannot check it."""
+    search = _desc(mcp, "mem_search")
+    assert "excluded by default" not in search, "mem_search does not filter kinds"
+
+    # what the read-only tools claim
+    for name in ("mem_search", "mem_get", "mem_list"):
+        assert "ead-only" in _desc(mcp, name), f"{name} should say it is read-only"
+
+    # and what the writers must disclose
+    for name in ("mem_write", "mem_learn", "mem_update"):
+        d = _desc(mcp, name)
+        assert "WRITES" in d, f"{name} should disclose that it writes"
+    assert "UNAPPROVED" in _desc(mcp, "mem_learn")
+    assert "DROPS" in _desc(mcp, "mem_update")
+    assert "SIDE EFFECT" in _desc(mcp, "mem_recall")
+
+
+def test_read_only_tools_really_are(mcp, conn):
+    """mem_get and mem_list say 'no side effects' — hold them to it."""
+    from skillmem import storage as S
+    S.upsert(conn, S.MemoryItem(slug="skill-ro", kind="skill", origin="agent",
+                                title="Прогон тестов перед деплоем",
+                                body="trigger: деплой; steps: pytest."))
+    conn.commit()
+    before = S.get(conn, "skill-ro")
+    _payload(mcp.TOOL_HANDLERS["mem_get"]({"slug": "skill-ro"}))
+    _payload(mcp.TOOL_HANDLERS["mem_list"]({}))
+    after = S.get(conn, "skill-ro")
+    assert (after.access_count, after.updated_at, after.strength) == \
+           (before.access_count, before.updated_at, before.strength)
+
+
+def test_recall_refreshes_recency_but_never_strength(mcp, conn):
+    """mem_recall's description draws exactly this line; if the code ever stops
+    honouring it, an agent could promote its own guesses by re-reading them."""
+    from skillmem import storage as S
+    S.upsert(conn, S.MemoryItem(slug="skill-recency", kind="skill", origin="agent",
+                                title="Дренаж перед рестартом сервиса",
+                                body="trigger: рестарт; steps: сначала дренаж."))
+    conn.commit()
+    before = S.get(conn, "skill-recency").strength
+    _payload(mcp.TOOL_HANDLERS["mem_recall"]({"query": "рестарт сервиса",
+                                              "auto_reinforce": True}))
+    after = S.get(conn, "skill-recency")
+    assert after.strength == before, "auto_reinforce must not raise strength"
+    assert after.access_count > 0, "but it should mark the skill as retrieved"
