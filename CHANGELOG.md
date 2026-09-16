@@ -17,8 +17,10 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
 - Unapproved memory is framed by one renderer wherever a body, snippet or
   history entry reaches a model — MCP `mem_get`/`mem_search`/`mem_recall`,
   HTTP `/get`/`/search`/`/recall`, CLI `recall` (text and JSON), hooks — with
-  the title (and a history entry's old title) **inside the frame**. Listings (`mem_list`, `/list`) carry a
-  `trusted` flag and raw titles. `mem_get` no longer returns a raw body next
+  the title (and a history entry's old title) **inside the frame**; a previous
+  version is framed whatever the current one's approval — approval belongs to
+  the words that were approved. Listings (`mem_list`, `/list`) carry `origin`
+  and a `trusted` flag with raw titles. `mem_get` no longer returns a raw body next
   to a `trust_warning` key.
 - HTTP `/write` on an existing slug demands the same permission `/update`
   does: resubmitting a public rule's exact text as private used to reassign
@@ -93,10 +95,14 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   opencode. Claude Code, Cursor, Windsurf, Gemini CLI and opencode update an
   existing entry's database in place (JSON, rewritten atomically). Codex's
   hand-written TOML is never edited in place: an existing entry keeps its
-  database and `init` says how to move it (`uninstall` + `init --codex`, or
-  one line under `[mcp_servers.skillmem.env]`). Without `--db` an existing
-  entry is left alone everywhere. Config files are written atomically,
-  through a symlink to its target, with mode kept. `--db` reaches scheduled jobs (re-run
+  database and `init` says how to move it (`skillmem uninstall
+  --no-claude-code --no-editors`, which removes only the Codex entry, then
+  `skillmem --db X init --codex` — or one line under
+  `[mcp_servers.skillmem.env]`). `uninstall` removes the Codex table only
+  when the result provably equals the old file minus that table; otherwise
+  it refuses. Without `--db` an existing entry is left alone everywhere.
+  Config files are written atomically, through a symlink to its target,
+  with mode kept (JSON and TOML alike). `--db` reaches scheduled jobs (re-run
   `schedule install` after upgrading). `uninstall --purge-db` removes the
   DB, its `-wal`/`-shm`, its namespaced body files and the legacy-named
   files it references (a second database referencing the same legacy file

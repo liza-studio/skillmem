@@ -509,17 +509,8 @@ def import_vault_cmd(
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Atomic write: tempfile in same dir + os.replace. Never half-written."""
-    import os as _os, tempfile as _tempfile
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = _tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
-    try:
-        with _os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        _os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    """Atomic write, through a symlink, mode kept — see _atomic_write_text."""
+    _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _patch_claude_json(
@@ -843,7 +834,8 @@ def _patch_codex_config(
                         "reason": f"skillmem MCP already configured for "
                                   f"{current or 'the default database'}; to point Codex at "
                                   f"{db_env}: `skillmem uninstall --no-claude-code --no-editors` "
-                                  f"then `skillmem --db {db_env} init --codex`, or set "
+                                  f"(removes only the Codex entry) then "
+                                  f"`skillmem --db {db_env} init --codex`, or set "
                                   f"SKILLMEM_DB under [mcp_servers.skillmem.env] by hand"}
             return {"changed": False, "reason": "skillmem MCP already configured",
                     "backup": str(backup)}
@@ -909,9 +901,25 @@ def _unpatch_codex_config(config_toml: Path) -> dict[str, Any]:
 
     while out and not out[-1].strip():
         out.pop()
+    new_raw = "\n".join(out) + ("\n" if out else "")
+    # Line-level removal from a hand-written TOML: accept it only if the
+    # result parses to exactly the old document minus [mcp_servers.skillmem]
+    # — a header inside a multi-line string, a commented header, anything
+    # else, and we refuse rather than write a broken config.
+    expect = json.loads(json.dumps(parsed, default=str))
+    expect["mcp_servers"].pop("skillmem", None)
+    if not expect["mcp_servers"]:
+        expect.pop("mcp_servers")
+    try:
+        got = json.loads(json.dumps(tomllib.loads(new_raw), default=str))
+    except tomllib.TOMLDecodeError:
+        got = None
+    if got != expect:
+        return {"changed": False, "reason": "could not remove [mcp_servers.skillmem] "
+                "cleanly; delete the table by hand", "backup": None}
     backup = config_toml.with_suffix(f".toml.bak.{int(_time.time())}")
-    backup.write_text(raw, encoding="utf-8")
-    _atomic_write_text(config_toml, "\n".join(out) + ("\n" if out else ""))
+    backup.write_bytes(raw.encode("utf-8"))
+    _atomic_write_text(config_toml, new_raw)
     return {"changed": True, "removed": "mcp_servers.skillmem",
             "backup": str(backup)}
 
@@ -1222,7 +1230,10 @@ def init(
         click.echo(f"Done. {', '.join(wired)} — one skill database, "
                    f"{len(wired)} agents.")
     elif codex:
-        click.echo("Done. Open `codex` in any project — the mem_* tools will be there.")
+        if report.get("codex_config", {}).get("changed", True):
+            click.echo("Done. Open `codex` in any project — the mem_* tools will be there.")
+        else:
+            click.echo("Nothing changed for Codex — see codex_config.reason above.", err=True)
     elif wired and not claude_code:
         click.echo(f"Done. Open {wired[0]} — the mem_* tools will be there.")
     else:
@@ -1231,7 +1242,7 @@ def init(
 
 
 @main.command()
-@click.option("--claude-code", is_flag=True, default=True,
+@click.option("--claude-code/--no-claude-code", default=True,
               help="Restore ~/.claude.json and remove hooks from settings.json")
 @click.option("--codex/--no-codex", default=True,
               help="Remove the skillmem MCP entry from ~/.codex/config.toml")

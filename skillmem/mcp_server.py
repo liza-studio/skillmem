@@ -128,8 +128,9 @@ def _tool_get(args: dict[str, Any]) -> list[TextContent]:
     payload["links_out"] = S.links_from(conn, slug)
     payload["links_in"] = S.links_to(conn, slug)
     if args.get("include_history"):
-        # old bodies of an unapproved row are the same untrusted text
-        payload["history"] = [frame_for_model(item, dict(h), fields=("old_body",), title_field="old_title")
+        # a previous version is text nobody approved (approval belongs to
+        # the current words), so history is framed whatever the row's state
+        payload["history"] = [frame_for_model({"trusted_at": None}, dict(h), fields=("old_body",), title_field="old_title")
                               for h in S.history(conn, slug)]
     return _ok(payload)
 
