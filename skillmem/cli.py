@@ -996,6 +996,30 @@ def _patch_settings_hook(
             "backup": str(backup) if backup else None}
 
 
+
+def _skillmem_argv(cmd: str) -> list[str] | None:
+    """argv of a hook command if its BINARY is skillmem, else None.
+
+    Parse the way the command was written (shlex on POSIX, list2cmdline on
+    Windows) and match the binary by name — so a quoted path with a space,
+    skillmem.exe or any venv location match, while a foreign hook that merely
+    mentions skillmem in an argument (`audit --log skillmem-audit.log`) or is
+    named `my-skillmem` does not. The substring test that preceded this
+    deleted such hooks on uninstall.
+    """
+    import shlex as _shlex
+    try:
+        argv = _shlex.split(cmd or "", posix=(sys.platform != "win32"))
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    from pathlib import PureWindowsPath as _WP
+    raw = argv[0].strip('"')                            # list2cmdline keeps the quotes
+    name = (_WP(raw) if sys.platform == "win32" else Path(raw)).name.lower()
+    return argv if name in ("skillmem", "skillmem.exe") else None
+
+
 def _prune_settings_hook(settings_json: Path, *, command_prefix: str) -> dict[str, Any]:
     """Remove hooks whose command ends with ``command_prefix`` (any binary path).
 
@@ -1015,20 +1039,8 @@ def _prune_settings_hook(settings_json: Path, *, command_prefix: str) -> dict[st
     want = command_prefix.split()[1:]           # e.g. ["migrate"]
 
     def _is_ours(cmd: str) -> bool:
-        # parse the way the command was written: shlex on POSIX, plain split
-        # on Windows (list2cmdline); match the binary by NAME, so a quoted
-        # path with a space, skillmem.exe, or any venv location all match —
-        # and "my-skillmem migrate" (a foreign tool) does not
-        try:
-            argv = _shlex.split(cmd, posix=(sys.platform != "win32"))
-        except ValueError:
-            return False
-        if not argv:
-            return False
-        from pathlib import PureWindowsPath as _WP
-        raw = argv[0].strip('"')                        # list2cmdline keeps the quotes
-        name = (_WP(raw) if sys.platform == "win32" else Path(raw)).name.lower()
-        return name in ("skillmem", "skillmem.exe") and argv[1:] == want
+        argv = _skillmem_argv(cmd)
+        return argv is not None and argv[1:] == want
 
     removed = 0
     for event, groups in list(hooks.items()):
@@ -1226,7 +1238,9 @@ def init(
         ("Claude Code", claude_code), ("Codex", codex), ("Cursor", cursor),
         ("Windsurf", windsurf), ("Gemini CLI", gemini), ("opencode", opencode),
     ) if on]
-    codex_mismatch = "by hand" in str(report.get("codex_config", {}).get("reason", ""))
+    _cc = report.get("codex_config", {})
+    codex_mismatch = (not _cc.get("changed", True)
+                      and _cc.get("reason") != "skillmem MCP already configured")
     if len(wired) > 1:
         if codex and codex_mismatch:
             click.echo("Codex: nothing changed — see codex_config.reason above.", err=True)
@@ -1289,7 +1303,7 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
                         old_hooks = grp.get("hooks") or []
                         new_hooks = [
                             h for h in old_hooks
-                            if "skillmem" not in (h.get("command") or "")
+                            if _skillmem_argv(h.get("command") or "") is None
                         ]
                         if len(new_hooks) != len(old_hooks):
                             changed = True   # also when the group survives (mixed group)

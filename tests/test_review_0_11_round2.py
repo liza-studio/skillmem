@@ -905,3 +905,36 @@ def test_idempotent_all_agents_counts_codex(home, monkeypatch):
     assert CliRunner().invoke(cli_main, args).exit_code == 0
     r = CliRunner().invoke(cli_main, args)                   # same --db again: nothing to change
     assert r.exit_code == 0 and "6 agents" in r.output and "Codex: nothing changed" not in r.output
+
+
+
+# --- round 14: uninstall removes skillmem's hooks, not hooks that mention it --
+
+def test_uninstall_matches_hooks_by_binary_not_substring(home, monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": "/usr/local/bin/audit --log /var/log/skillmem-audit.log"},
+        {"type": "command", "command": "'/Users/first last/.venv/bin/skillmem' hook session-recap"},
+        {"type": "command", "command": "my-skillmem migrate"},
+        {"type": "command", "command": "/x/bin/skillmem migrate"}]}]}}), encoding="utf-8")
+    r = CliRunner().invoke(cli_main, ["uninstall", "--no-editors", "--no-codex"])
+    assert r.exit_code == 0, r.output
+    cmds = [h["command"] for g in json.loads(settings.read_text())["hooks"]["Stop"] for h in g["hooks"]]
+    assert cmds == ["/usr/local/bin/audit --log /var/log/skillmem-audit.log", "my-skillmem migrate"]
+
+
+def test_init_codex_does_not_say_done_after_a_refused_write(home, monkeypatch):
+    import sys
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    toml = home / ".codex" / "config.toml"
+    toml.parent.mkdir(parents=True)
+    for text in ('[mcp_servers.skillmem\ncommand = "x"\n', "mcp_servers = {}\n"):
+        toml.write_text(text, encoding="utf-8")
+        r = CliRunner().invoke(cli_main, ["--db", str(home / "c.db"), "init", "--codex",
+                                          "--hooks", "none", "--skip-migrate", "--mcp-binary", mcp])
+        assert r.exit_code == 0
+        assert "Done. Open `codex`" not in r.output and "Nothing changed for Codex" in r.output
+        assert toml.read_text(encoding="utf-8") == text
