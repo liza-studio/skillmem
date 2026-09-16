@@ -573,3 +573,20 @@ def test_session_end_recap_proceeds_over_a_held_session_lock(
     _hook(db, "session-recap", {**payload, "hook_event_name": "SessionEnd"})
     assert len(calls) == 1
     assert list((proj / "memory").glob("session-*.md"))
+
+
+def test_final_recap_over_a_held_lock_leaves_it_alone(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Running over another recap's lock must not remove that lock afterwards."""
+    proj, payload = _recap_fixture(tmp_path)
+    from skillmem import hooks as H
+    monkeypatch.setattr(H.shutil, "which", lambda *_: "/fake/claude")
+    monkeypatch.setattr(H.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(H.subprocess, "run", lambda *a, **kw: SimpleNamespace(
+        stdout=("## DONE\n" + "x" * 150).encode(), returncode=0, stderr=b""))
+    lock = H._recap_stamp(payload["session_id"]).with_suffix(".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("held by a Stop recap", encoding="utf-8")
+    _hook(db, "session-recap", {**payload, "hook_event_name": "SessionEnd"})
+    assert lock.exists() and lock.read_text(encoding="utf-8") == "held by a Stop recap"

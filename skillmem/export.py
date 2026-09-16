@@ -111,6 +111,14 @@ def export_all(conn, destination: Path) -> int:
         pass
     dbs = data.get("dbs") if isinstance(data.get("dbs"), dict) else {}
     previous: set[str] = set(dbs.get(ns, []) or [])
+    # manifests written by the 0.11 pre-releases used a flat "files" list or
+    # a "default" key; adopt them once so those files are pruned, not orphaned
+    if not previous:
+        for legacy in (data.get("files"), dbs.get("default")):
+            if isinstance(legacy, list):
+                previous = set(map(str, legacy))
+                break
+    dbs.pop("default", None)
     written: list[str] = []
     count = 0
     for item in _iter_all(conn):

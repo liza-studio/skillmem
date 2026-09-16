@@ -31,7 +31,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import uvicorn
 import yaml
@@ -160,7 +160,7 @@ class WriteRequest(BaseModel):
     project: str | None = None
     tags: list[str] = Field(default_factory=list)
     topics: list[str] = Field(default_factory=list)
-    visibility: str | None = None   # None = private for a new record, unchanged for an existing one
+    visibility: Literal["public", "shared", "private"] | None = None   # None = private for new, unchanged for existing
     ttl_days: int | None = None
     check_conflicts: bool = True
 
@@ -191,7 +191,7 @@ class LearnRequest(BaseModel):
     project: str | None = None
     tags: list[str] = Field(default_factory=list)
     topics: list[str] = Field(default_factory=list)
-    visibility: str | None = None   # None = public for a new skill, unchanged for an existing one
+    visibility: Literal["public", "shared", "private"] | None = None   # None = public for new, unchanged for existing
     ttl_days: int | None = None
     check_conflicts: bool = True
 

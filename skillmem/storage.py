@@ -170,7 +170,7 @@ CREATE TABLE IF NOT EXISTS memory_items (
     origin          TEXT NOT NULL DEFAULT 'unknown', -- owner|agent|imported|derived (v10)
     trusted_at      INTEGER,                       -- set only by the owner (v10)
     trusted_by      TEXT,
-    last_decayed_at INTEGER,                       -- one decay step per threshold (v12)
+    last_decayed_at INTEGER,                       -- one decay step per threshold (0.11)
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     deleted_at      INTEGER,
@@ -265,17 +265,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # like embedding, so the column is guaranteed regardless of the version gate.
     if "lifecycle" not in live_cols:
         _add_column(conn, "lifecycle TEXT NOT NULL DEFAULT 'active'")
-    # v12: one decay step per threshold (see decay_stale). Self-healing too.
+    # 0.11: one decay step per threshold (see decay_stale). Self-healing, like
+    # the columns above — the schema version does not move for it.
     if "last_decayed_at" not in live_cols:
         _add_column(conn, "last_decayed_at INTEGER")
-    # v12: kinds are normalised on write now; rows written before that as
+    # 0.11: kinds are normalised on write now; rows written before that as
     # "Reference" would be invisible to a kind="reference" filter. Read first
     # so the common case takes no write lock on open.
     if conn.execute(
-        "SELECT 1 FROM memory_items WHERE kind != LOWER(TRIM(kind)) LIMIT 1"
+        "SELECT 1 FROM memory_items WHERE kind != LOWER(TRIM(kind, ' \t\r\n')) LIMIT 1"
     ).fetchone():
-        conn.execute("UPDATE memory_items SET kind = LOWER(TRIM(kind)) "
-                     "WHERE kind != LOWER(TRIM(kind))")
+        conn.execute("UPDATE memory_items SET kind = LOWER(TRIM(kind, ' \t\r\n')) "
+                     "WHERE kind != LOWER(TRIM(kind, ' \t\r\n'))")
     # v10, same self-healing reason: a DB whose version says 10 but whose ALTER
     # never landed would otherwise fail every read with "no such column: origin".
     if not {"origin", "trusted_at", "trusted_by"} <= live_cols:
@@ -622,16 +623,20 @@ def _last_chain_hash(conn: sqlite3.Connection) -> str | None:
     return row["self_hash"] if row else None
 
 
+_CLOCK_WARNED: list[bool] = []
+
+
 def _chain_clock(conn: sqlite3.Connection, now: int) -> int:
     """The chain is walked in (changed_at, id) order, so a row stamped earlier
     than its predecessor (clock stepped back) would verify as a break. Clamp
     the timestamp to the tip instead of reordering existing chains."""
     row = conn.execute("SELECT MAX(changed_at) AS t FROM memory_history").fetchone()
     tip = int(row["t"]) if row and row["t"] is not None else 0
-    if tip - now > 86400:
+    if tip - now > 86400 and not _CLOCK_WARNED:
         # a row stamped far in the future (clock was wrong) pins every later
         # stamp to it until real time catches up — by design (the chain
-        # must stay ordered), but worth a line in the log
+        # must stay ordered). One line per process, not per write.
+        _CLOCK_WARNED.append(True)
         log.warning("history clock: tip is %d s ahead of now; clamping", tip - now)
     return max(now, tip)
 
@@ -959,6 +964,8 @@ def gc_body_files(conn: sqlite3.Connection) -> int:
     # open write transaction (a vault import publishes its files as it goes,
     # then commits at the end) blocks this run instead of losing its files.
     # The 60 s grace covers only the pre-transaction staging window.
+    # ponytail: the write lock spans the whole docs/ scan; split into
+    # scan-outside/unlink-inside if docs/ ever holds tens of thousands of files.
     try:
         with tx(conn):
             live = {r[0] for r in conn.execute(
@@ -979,8 +986,10 @@ def gc_body_files(conn: sqlite3.Connection) -> int:
                 except OSError:
                     continue
     except sqlite3.OperationalError as exc:
-        log.info("gc_body_files skipped: %s", exc)  # a writer holds the lock
-        return 0
+        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+            log.info("gc_body_files skipped: %s", exc)  # a writer holds the lock
+            return 0
+        raise  # disk I/O, missing schema, read-only: not "nothing to do"
     return removed
 
 
@@ -1520,7 +1529,10 @@ def list_items(
     recent: bool = True,
 ) -> list[MemoryItem]:
     if kind:
-        kind = _valid_kind(kind)  # "Reference" filters find "reference" rows
+        try:
+            kind = _valid_kind(kind)  # "Reference" filters find "reference" rows
+        except ValueError:
+            return []                 # a filter nothing can match matches nothing
     where = ["deleted_at IS NULL"]
     params: list[Any] = []
     if kind:
@@ -1763,7 +1775,10 @@ def search(
     exclude_kinds: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     if kind:
-        kind = _valid_kind(kind)  # "Reference" filters find "reference" rows
+        try:
+            kind = _valid_kind(kind)  # "Reference" filters find "reference" rows
+        except ValueError:
+            return []                 # a filter nothing can match matches nothing
     ids = hybrid_rank_ids(conn, query, kind=kind, project=project, limit=limit,
                           exclude_kinds=exclude_kinds)
     if not ids:

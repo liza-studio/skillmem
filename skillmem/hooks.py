@@ -880,6 +880,7 @@ def run_recap(data: dict[str, Any]) -> None:
     # below and on the skip:busy exit; a SIGTERM'd hook leaves it, and the
     # stale check reclaims it after RECAP_TIMEOUT + 60 s.
     session_lock = stamp.with_suffix(".lock")
+    owned = False   # only the recap that CREATED the lock may remove it
     try:
         session_lock.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -888,6 +889,7 @@ def run_recap(data: dict[str, Any]) -> None:
         except OSError:
             pass
         os.close(os.open(session_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        owned = True
     except FileExistsError:
         if not force:
             _log_line("session-recap", session_id[:8], "skip:concurrent-same-session")
@@ -895,25 +897,31 @@ def run_recap(data: dict[str, Any]) -> None:
         # The final recap is the session's last word and must not be lost to a
         # Stop recap still in flight: wait a little for it, then go anyway —
         # publication is compare-and-swap on the transcript basis, so two
-        # overlapping recaps cannot clobber each other.
+        # overlapping recaps cannot clobber each other. Running over someone
+        # else's lock means NOT touching that lock afterwards.
         for _ in range(25):
             time.sleep(0.2)
             try:
                 os.close(os.open(session_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+                owned = True
                 break
             except FileExistsError:
                 continue
             except OSError:
                 break
-        else:
+        if not owned:
             _log_line("session-recap", session_id[:8], "note:final-over-lock")
     except OSError:
         pass  # no lock dir: proceed as before rather than lose the recap
 
+    def _release_session_lock() -> None:
+        if owned:
+            session_lock.unlink(missing_ok=True)
+
     slot = _acquire_recap_slot()
     if slot is None and not force:
         _log_line("session-recap", session_id[:8], "skip:busy")
-        session_lock.unlink(missing_ok=True)
+        _release_session_lock()
         return
     if slot is None:
         # The final recap happens once per session; dropping it on a busy slot
@@ -970,7 +978,7 @@ def run_recap(data: dict[str, Any]) -> None:
         _release_recap_slot(slot)
         # the model call is over; publish below has its own lock. Released
         # here explicitly so in-process callers (tests) see it released too.
-        session_lock.unlink(missing_ok=True)
+        _release_session_lock()
     # A non-zero exit means the text is an error message, not a recap — writing
     # it would overwrite a good note with noise.
     if code != 0 or len(summary) < 100:

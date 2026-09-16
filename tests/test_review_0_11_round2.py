@@ -358,3 +358,91 @@ def test_transcript_filter_drops_synthetic_turns(tmp_path):
     ]), encoding="utf-8")
     out = H._filter_transcript(t)
     assert "real question" in out and "task-notification" not in out and "local-command" not in out
+
+
+# --- round 4: what round 3 broke -------------------------------------------
+
+def test_junk_kind_filter_matches_nothing_on_every_channel(home, monkeypatch):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="n", title="t", body="hello world", kind="note"))
+    assert S.list_items(conn, kind="../x") == []
+    assert S.search(conn, "hello", kind="../x") == []
+    fastapi_testclient = pytest.importorskip("fastapi.testclient")
+    from skillmem import server as srv
+    (home / "tokens.yaml").write_text("bob:\n  token: tok-bob\n", encoding="utf-8")
+    app = srv.build_app(srv.TokenStore(home / "tokens.yaml"), db_path=home / "memory.db")
+    with fastapi_testclient.TestClient(app) as c:
+        r = c.post("/list", headers={"Authorization": "Bearer tok-bob"}, json={"kind": "../x"})
+        assert r.status_code == 200 and r.json()["count"] == 0
+    r = CliRunner().invoke(cli_main, ["--db", str(home / "memory.db"), "ls", "--kind", "../x"])
+    assert r.exit_code == 0, r.output
+
+
+def test_gc_raises_on_non_contention_errors(home):
+    conn = S.connect(home / "noschema.db")   # no init_schema
+    with pytest.raises(Exception):
+        S.gc_body_files(conn)
+
+
+def test_prune_handles_windows_list2cmdline_quoting(home, monkeypatch):
+    from skillmem import cli as cli_mod
+    monkeypatch.setattr(cli_mod.sys, "platform", "win32")
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": '"C:\\Users\\First Last\\venv\\Scripts\\skillmem.exe" migrate'},
+        {"type": "command", "command": '"C:\\Users\\First Last\\venv\\Scripts\\skillmem.exe" hook session-recap'},
+    ]}]}}), encoding="utf-8")
+    r = cli_mod._prune_settings_hook(settings, command_prefix="skillmem migrate")
+    assert r["changed"]
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert len(data["hooks"]["Stop"][0]["hooks"]) == 1
+
+
+def test_kind_migration_trims_tabs_and_newlines(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="r", title="t", body="b", kind="reference"))
+    conn.execute("UPDATE memory_items SET kind = '\tReference\n' WHERE slug = 'r'")
+    conn.commit()
+    S.init_schema(conn)
+    assert [i.slug for i in S.list_items(conn, kind="Reference")] == ["r"]
+
+
+def test_visibility_is_validated(home):
+    fastapi_testclient = pytest.importorskip("fastapi.testclient")
+    from skillmem import server as srv
+    (home / "tokens.yaml").write_text("bob:\n  token: tok-bob\n", encoding="utf-8")
+    app = srv.build_app(srv.TokenStore(home / "tokens.yaml"), db_path=home / "memory.db")
+    with fastapi_testclient.TestClient(app) as c:
+        r = c.post("/write", headers={"Authorization": "Bearer tok-bob"},
+                   json={"slug": "x", "title": "t", "body": "b", "visibility": "Public"})
+        assert r.status_code == 422
+
+
+def test_init_db_rerun_updates_existing_mcp_entry(home, monkeypatch):
+    import sys
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    base = ["init", "--claude-code", "--hooks", "none", "--skip-migrate", "--mcp-binary", mcp]
+    assert CliRunner().invoke(cli_main, ["--db", str(home / "a.db"), *base]).exit_code == 0
+    assert CliRunner().invoke(cli_main, ["--db", str(home / "b.db"), *base]).exit_code == 0
+    cfg = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    assert cfg["mcpServers"]["skillmem"]["env"]["SKILLMEM_DB"] == str(home / "b.db")
+
+
+def test_export_adopts_pre_release_manifest(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="a", title="t", body="b", kind="note"))
+    dest = home / "vault"
+    (dest / "note").mkdir(parents=True)
+    (dest / "note" / "stale.md").write_text("old export", encoding="utf-8")
+    (dest / ".skillmem-export.json").write_text(json.dumps({"files": ["note/stale.md"]}),
+                                                encoding="utf-8")
+    E.export_all(conn, dest)
+    assert not (dest / "note" / "stale.md").exists()
+    assert (dest / "note" / "a.md").exists()
+
+
+def test_version_is_0_11():
+    from skillmem import __version__
+    assert __version__.startswith("0.11.")

@@ -1,5 +1,82 @@
 # Changelog
 
+## 0.11.0
+
+Two independent reviewers (one on the Claude side, one on the GPT side) read the
+whole codebase for the first time, and then re-read every fix, four rounds deep,
+until neither could reproduce a P1 or P2. Six P1s came out of the first pass —
+none in the recap hook everyone had been staring at; all in the parts nobody had
+reviewed end to end: the HTTP server, body files, packs.
+
+**Trust boundary — closed on every channel**
+- `skillmem trust` and `--untrust` refuse to run without a terminal, and
+  `init --claude-code` adds `"Bash(skillmem trust*)"` to `permissions.deny`.
+  The TTY check catches accidents; the deny rule is what stops Claude Code
+  from running the command at a document's request. README says which is which.
+- Unapproved memory is framed on **every** model-facing channel now — MCP
+  `mem_get`/`mem_search`/`mem_recall`, HTTP `/get`/`/search`/`/recall`, CLI
+  `recall`, hooks — by one renderer, with the **title inside the frame**.
+  `mem_get` no longer returns a raw body next to a `trust_warning` key.
+- HTTP `/write` on an existing slug demands the same permission `/update`
+  does: resubmitting a public rule's exact text as private used to reassign
+  its author and visibility and keep the owner's approval. `/learn` requires
+  `write_public` for public skills. A soft-deleted slug is not free for anyone.
+- CLI `write`/`learn` from a process without a TTY record `origin=agent`, not
+  `owner`; HTTP writes record `origin=agent` instead of `unknown`; auto-memory
+  imports default to `agent`.
+- Pack import never overwrites a row that is not that pack's own; SKILL.md
+  symlinks and files outside the pack are ignored; `git clone --`; aggregate
+  caps (500 files / 4 MB); a removed pack reinstalls. Vault attachments must
+  resolve inside the vault.
+
+**Data integrity**
+- Body files are `<slug>__<hash>[-<db>][+<content>].md`: namespaced per database
+  (two databases under one home no longer share a file) and content-addressed
+  (a new body is a new file, so publish-before-commit is safe and an outer
+  rollback cannot leave a row pointing at someone else's text). Old names keep
+  working. Orphans are collected on the nightly `decay` run and HTTP `/decay`,
+  under the database write lock, with a 60 s grace.
+- `kind` is validated on write (`a-z0-9_-`, lower-cased and trimmed); export
+  refuses any path outside its destination. `kind="../../x"` used to write there.
+- Export keeps a per-database manifest and prunes only its own stale files.
+  Use **one destination per database** — two databases exporting the same
+  `kind/slug` into one directory overwrite each other.
+- A metadata-only update re-indexes tags/topics; an ordinary update keeps the
+  strength the row earned (vault restore is explicit); `restem` indexes full
+  document bodies; `reinforce` is one relative UPDATE (concurrent confirmations
+  no longer lose each other). Known: `reinforce` is **not idempotent** — a
+  retried call counts as new evidence; evidence ids are a later release.
+- Decay: a fresh skill is measured from its creation, not from "never used";
+  one decay step per threshold, so a job run twice does not compound; the
+  lifecycle sweep runs even when nothing decays (nothing was ever archived).
+- History chain: `changed_at` is clamped monotonic on every history write
+  (a clock stepped back no longer reads as tampering). A row stamped in the
+  future pins later stamps to it until real time catches up — by design; a
+  warning is logged once when the gap exceeds a day.
+- `init_schema` no longer writes on every open (hooks stalled behind any writer).
+
+**Hooks**
+- The Stop→`skillmem migrate` hook is gone: it imported the alphabetically
+  first project's memory directory on every turn. `init` removes an existing
+  one (backup written). `--hooks minimal` now means "deny rule only".
+  Hand-written memory: `skillmem migrate --source <dir>`.
+- Recall context is budgeted per section before framing (a frame can no longer
+  be cut in half) and the seen-ledger lists only what was emitted.
+- Recap: publication fails closed without its lock; one recap per session at a
+  time, the SessionEnd recap waits for an in-flight Stop recap and then
+  proceeds; Claude Code's synthetic string turns stay out of the summary.
+
+**CLI / MCP / scheduling**
+- `init --db X` writes `SKILLMEM_DB=X` into every agent's MCP entry, updating
+  an existing entry; `--db` reaches scheduled jobs; `uninstall --purge-db`
+  removes the DB, its `-wal`/`-shm` and only its own body files.
+- `skillmem skills` (strength list) was unreachable behind the `skills` pack
+  group — it is `skillmem skills-top`.
+- MCP `limit` is bounded (1..100); `mem_write`/`mem_update` no longer advertise
+  an ignored `agent` field; "9 tools", not 8.
+- launchd load failures are reported; switching to systemd removes cron
+  entries; Windows project-dir naming matches Claude Code's.
+
 ## 0.10.8
 
 An outside review of the last four releases found no P1 but six places where a

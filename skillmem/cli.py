@@ -551,6 +551,16 @@ def _patch_claude_json(
 
     servers = data.setdefault("mcpServers", {})
     if "skillmem" in servers:
+        # an existing entry is kept — except the database it points at, which
+        # must follow --db: an upgrader who re-runs init --db X used to keep
+        # the old (or no) SKILLMEM_DB forever
+        entry = servers["skillmem"]
+        current = (entry.get("env") or {}).get("SKILLMEM_DB") if isinstance(entry, dict) else None
+        if isinstance(entry, dict) and db_env and current != db_env:
+            entry.setdefault("env", {})["SKILLMEM_DB"] = db_env
+            _atomic_write_json(claude_json, data)
+            return {"changed": True, "added": f"mcpServers.skillmem.env.SKILLMEM_DB={db_env}",
+                    "backup": str(backup) if backup else None}
         return {"changed": False, "reason": "skillmem MCP already configured",
                 "backup": str(backup) if backup else None}
 
@@ -934,12 +944,14 @@ def _prune_settings_hook(settings_json: Path, *, command_prefix: str) -> dict[st
         # path with a space, skillmem.exe, or any venv location all match —
         # and "my-skillmem migrate" (a foreign tool) does not
         try:
-            argv = _shlex.split(cmd) if sys.platform != "win32" else cmd.split()
+            argv = _shlex.split(cmd, posix=(sys.platform != "win32"))
         except ValueError:
             return False
         if not argv:
             return False
-        name = Path(argv[0]).name.lower()
+        from pathlib import PureWindowsPath as _WP
+        raw = argv[0].strip('"')                        # list2cmdline keeps the quotes
+        name = (_WP(raw) if sys.platform == "win32" else Path(raw)).name.lower()
         return name in ("skillmem", "skillmem.exe") and argv[1:] == want
 
     removed = 0
@@ -1013,8 +1025,8 @@ def _patch_settings_deny(settings_json: Path, rule: str) -> dict[str, Any]:
               help="Override path to skillmem-mcp (default: auto-detect)")
 @click.option("--hooks", "hooks_mode",
               type=click.Choice(["full", "minimal", "none"]), default="full",
-              help="full: recall/recap/guard hooks + migrate; "
-                   "minimal: only Stop→migrate; none: no hooks")
+              help="full: recall/recap/guard hooks + trust deny rule; "
+                   "minimal: deny rule only; none: nothing")
 @click.pass_context
 def init(
     ctx: click.Context,

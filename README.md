@@ -26,7 +26,7 @@ skillmem gives Claude Code and the Codex CLI a local, persistent skill & memory 
   record carries the agent that wrote it, taken from the MCP handshake, so authorship stays
   readable when they learn side by side.
 - **Cross-platform** — macOS (launchd), Windows (schtasks), Linux (systemd user timers, cron fallback).
-- **No vendor lock** — `export-all` dumps everything to plain markdown with YAML frontmatter; re-importing the dump yields the same records.
+- **No vendor lock** — `export-all` dumps everything to plain markdown with YAML frontmatter; re-importing the dump yields the same records. One destination per database: the exporter prunes its own stale files via a manifest and will not judge another database's.
 
 ## Why
 
@@ -64,7 +64,7 @@ a hosted tier. skillmem is narrower on purpose and different on four axes:
 |---|---|
 | **What it stores** | procedures — trigger, steps, outcome, lessons — not facts about a user |
 | **What it forgets** | actively: unused skills decay on an Ebbinghaus schedule and are archived; rare-but-critical rules are pinned out of it |
-| **Where strength comes from** | outside evidence only — a passing test, an accepted diff, your confirmation. An agent saying "that helped" moves recency, never strength, so it cannot promote its own mistake |
+| **Where strength comes from** | outside evidence only — a passing test, an accepted diff, your confirmation. An agent saying "that helped" moves recency, never strength, so it cannot promote its own mistake. `reinforce` is not idempotent: a retried confirmation counts again (evidence ids are a later release) |
 | **Who is trusted** | you. Provenance is recorded, approval is yours to give, and unapproved memory arrives framed as data |
 | **Where it runs** | your disk. SQLite + FTS5 + a local ONNX embedding model. No API key, no cloud, no Docker, no graph database |
 | **How it reaches the agent** | hooks on five events (SessionStart, UserPromptSubmit, PreToolUse, Stop, SessionEnd) — recall happens whether or not the agent thinks to ask, plus 9 MCP tools when it does |
