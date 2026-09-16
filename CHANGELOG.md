@@ -147,6 +147,11 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
 - `import-vault` no longer follows a symlinked note out of the vault (the
   rule attachments and packs already had): `zshrc.md -> ~/.zshrc` in a
   cloned vault used to land the real file's text in the database.
+- `scrub` is idempotent: a value already rendered as `[secret redacted]` was
+  matched again on every re-write, so a dump restore, `mem_update` or
+  `/update` of such a row grew `[secret redacted] redacted]`, changed the
+  content hash and dropped the row's approval (52 of 914 approved rows on a
+  real database after one restore over itself).
 - `skillmem skills rm <pack>` soft-deletes only the rows the import wrote —
   the ones whose slug carries the `pack-<name>-` prefix under project
   `pack:<name>` and are not `origin=owner`, edited by an agent or not; a

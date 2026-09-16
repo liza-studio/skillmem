@@ -1139,3 +1139,21 @@ def test_mcp_update_marks_the_text_as_agent_written(home: Path, monkeypatch):
     out = json.loads(M._tool_update({"slug": "owner-rule-2", "body": "v2", "reason": "edit"})[0].text)
     assert out.get("ok"), out
     assert S.get(_conn(home), "owner-rule-2").origin == "agent"
+
+
+def test_scrub_is_idempotent_and_a_restore_keeps_approval(home: Path):
+    text = 'api_key: abc123def456ghi789\npassword="hunter2secret", next'
+    once = S.scrub(text)
+    assert once == 'api_key: [secret redacted]\npassword="[secret redacted]", next'
+    assert S.scrub(once) == once and S.scrub(S.scrub(once)) == once
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="cfg", kind="note", title="cfg token: abcdef123456", body=text))
+    row = S.get(conn, "cfg")
+    conn.execute("UPDATE memory_items SET trusted_at = 1, trusted_by = 't' WHERE slug = 'cfg'")
+    conn.commit()
+    h0 = row.content_hash
+    S.upsert(conn, S.MemoryItem(slug="cfg", kind="note", title=row.title, body=row.body), reason="re-write")
+    again = S.get(conn, "cfg")
+    assert again.content_hash == h0 and again.body == row.body and again.title == row.title
+    assert again.trusted_at is not None
+    assert "redacted] redacted]" not in again.body

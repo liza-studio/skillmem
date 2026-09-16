@@ -52,9 +52,13 @@ _AWS_KEY = _re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _TG_BOT_TOKEN = _re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_\-]{32,}\b")
 _JWT = _re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b")
 # password=... / "token": "..." / secret: ... — redact the value, keep the key name.
+# A value that is already a redaction marker is not a secret: without the
+# lookahead every re-write of a scrubbed body (dump restore, mem_update,
+# /update) grew "[secret redacted] redacted]", changed the content hash and
+# dropped the row's approval.
 _SECRET_ASSIGN = _re.compile(
     r"""(?i)\b(password|passwd|pwd|secret|api[_\-]?key|token|access[_\-]?token)\b"""
-    r"""(\s*[:=]\s*)(["']?)([^\s"',;]{6,})(["']?)""",
+    r"""(\s*[:=]\s*)(["']?)(?!\[[a-z\-]+ redacted\])([^\s"',;]{6,})(["']?)""",
 )
 _WIKILINK = _re.compile(r"\[\[([^\]\n]+?)\]\]")
 
