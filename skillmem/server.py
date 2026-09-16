@@ -102,6 +102,19 @@ class TokenStore:
 # --------------------------------------------------------------------------- #
 
 
+def _predicate(agent: "AgentIdentity"):
+    """The visibility predicate for the storage rankers — or None for master.
+
+    Master sees everything, so it takes the unfiltered path: same fixed
+    candidate pool, same ranking and cost as the CLI and MCP. Handing master
+    a predicate made HTTP rank on an unbounded pool nobody benchmarked and
+    return a different top-5 than every other surface.
+    """
+    if agent.is_master:
+        return None
+    return lambda m: _visible_to(m, agent)
+
+
 def _visible_to(row: dict[str, Any] | S.MemoryItem, agent: AgentIdentity) -> bool:
     if agent.is_master:
         return True
@@ -246,7 +259,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         # the filter runs inside the ranking: a fixed page let hidden rows
         # crowd the caller's own record out; the post-check stays as a belt
         hits = S.search(conn, req.query, kind=req.kind, project=req.project, limit=req.limit,
-                        visible=lambda m: _visible_to(m, agent))
+                        visible=_predicate(agent))
         filtered = [frame_for_model(h, dict(h)) for h in hits if _visible_to(h, agent)]
         return {"count": len(filtered), "results": filtered, "agent": agent.name}
 
@@ -275,7 +288,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
     def list_(req: ListRequest, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
         conn = get_conn()
         items = S.list_items(conn, kind=req.kind, project=req.project, limit=req.limit,
-                             visible=lambda m: _visible_to(m, agent))
+                             visible=_predicate(agent))
         visible = [i for i in items if _visible_to(i, agent)]
         return {
             "count": len(visible),
@@ -446,7 +459,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         # caller may not see is both a side effect they should not be able to
         # trigger and a covert channel into someone else's memory.
         results = S.recall_skills(conn, req.query, limit=req.limit, auto_reinforce=False,
-                                  visible=lambda m: _visible_to(m, agent))
+                                  visible=_predicate(agent))
         visible = [r for r in results if _visible_to(r, agent)]
         if req.auto_reinforce:
             for r in visible:

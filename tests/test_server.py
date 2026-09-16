@@ -330,3 +330,31 @@ def test_backlinks_name_only_sources_the_caller_may_read(client):
     assert g["links_in"] == ["bob-note"]
     g = client.get("/get/team-handbook", headers=auth("boss")).json()
     assert sorted(g["links_in"]) == ["acquisition-secret", "bob-note"]
+
+
+def test_master_search_ranks_exactly_like_the_cli(client):
+    """Master takes the unfiltered path: same pool, same order as S.search."""
+    from skillmem import storage as S
+    for i in range(80):
+        client.post("/write", headers=auth("alice"), json={
+            "slug": f"a-{i}", "title": f"deploy note {i}", "body": f"deploy release rollback {'x' * (i % 7)} {i}",
+            "kind": "note", "visibility": "private", "check_conflicts": False})
+    http = [r["slug"] for r in client.post("/search", headers=auth("boss"),
+                                            json={"query": "deploy release", "limit": 20}).json()["results"]]
+    conn = S.connect(_db_of(client))
+    cli = [h["slug"] for h in S.search(conn, "deploy release", limit=20)]
+    assert http == cli and len(http) == 20
+
+
+def test_filtered_pages_cross_the_500_id_chunk_boundary(client):
+    from skillmem import storage as S
+    conn = S.connect(_db_of(client)); S.init_schema(conn)
+    for i in range(1201):
+        S.upsert(conn, S.MemoryItem(slug=f"pub-{i}", kind="skill", title="common word skill", body="common word " * 4,
+                                    visibility="public", agent="alice"), check_conflicts=False)
+    r = client.post("/recall", headers=auth("bob"), json={"query": "common word", "limit": 50}).json()
+    assert r["count"] == 50
+    s = client.post("/search", headers=auth("bob"), json={"query": "common word", "limit": 100}).json()
+    assert s["count"] == 100
+    l = client.post("/list", headers=auth("bob"), json={"limit": 100}).json()
+    assert l["count"] == 100

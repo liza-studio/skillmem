@@ -2492,13 +2492,17 @@ def recall_skills(
     if not fused:
         return []
     # apply strength bonus, then take top `limit`
-    strength_by_id = {
-        row["id"]: row["strength"]
-        for row in conn.execute(
-            f"SELECT id, strength FROM memory_items WHERE id IN ({','.join('?' * len(fused))})",
-            list(fused),
-        ).fetchall()
-    }
+    strength_by_id: dict[int, float] = {}
+    fused_ids = list(fused)
+    for start in range(0, len(fused_ids), 500):   # a filtered call fuses every match
+        chunk = fused_ids[start:start + 500]
+        strength_by_id.update({
+            row["id"]: row["strength"]
+            for row in conn.execute(
+                f"SELECT id, strength FROM memory_items WHERE id IN ({','.join('?' * len(chunk))})",
+                chunk,
+            ).fetchall()
+        })
     ranked_ids = _keep_visible(conn, sorted(
         fused, key=lambda i: -fused[i] * (1.0 + strength_by_id.get(i, 0.0) * SKILL_STRENGTH_COEF)
     ), visible, limit)
