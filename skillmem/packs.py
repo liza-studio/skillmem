@@ -38,6 +38,8 @@ from . import storage as S
 #: Skill files larger than this are skipped: a SKILL.md is a page of rules,
 #: and anything this size is a document that would swamp recall.
 MAX_SKILL_BYTES = 64_000
+MAX_PACK_SKILLS = 500          # aggregate caps: a pack is a folder, not a firehose
+MAX_PACK_BYTES = 4_000_000
 
 #: Directories that never hold skills worth importing.
 SKIP_DIRS = {".git", "node_modules", "__pycache__", "benchmarks", "evals",
@@ -149,10 +151,16 @@ def read_pack(root: Path) -> list[PackSkill]:
     """Parse a pack's skills, one per name — per-agent copies are dropped."""
     skills: list[PackSkill] = []
     seen: set[str] = set()
+    total = 0
     for path in iter_skill_files(root):
         rel = path.relative_to(root).as_posix()
-        if path.stat().st_size > MAX_SKILL_BYTES:
+        size = path.stat().st_size
+        if size > MAX_SKILL_BYTES:
             continue
+        # per-file cap alone let a pack of ten thousand small files eat memory
+        total += size
+        if len(skills) >= MAX_PACK_SKILLS or total > MAX_PACK_BYTES:
+            break
         text = path.read_text(encoding="utf-8", errors="replace")
         meta, body = _parse_frontmatter(text)
         name = meta.get("name") or path.parent.name

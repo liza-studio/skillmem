@@ -117,7 +117,7 @@ with `SKILLMEM_AGENT`, so in a shared database "who learned this" stays
 answerable. `skillmem uninstall` removes all of them (`--no-editors` to keep
 the editor entries).
 
-`init --claude-code` registers the MCP server in `~/.claude.json` and the hooks in `~/.claude/settings.json` (idempotent, with backups). Use `--hooks minimal` for just the Stop→migrate hook, or `--hooks none` for MCP only.
+`init --claude-code` registers the MCP server in `~/.claude.json` and the hooks in `~/.claude/settings.json` (idempotent, with backups). Use `--hooks minimal` for no hooks at all (only the `skillmem trust` deny rule below), or `--hooks none` for MCP only. Hand-written memory files are imported with `skillmem migrate --source <dir>`; there is no per-turn import hook.
 
 ### Codex CLI
 
@@ -259,12 +259,19 @@ The frame makes the boundary legible; it is not a guarantee that a model ignores
 sitting inside data. That guarantee comes from the reader having no tools — which is why the
 summariser has none.
 
+**Who can approve.** `skillmem trust <slug>` (and `--untrust`) refuses to run without a terminal,
+so an agent calling it from Bash gets an error, not an approval. A TTY check is accident
+protection, not a wall — `script -q /dev/null skillmem trust x` forges one — so
+`init --claude-code` also adds `"Bash(skillmem trust*)"` to `permissions.deny` in
+`~/.claude/settings.json`; that rule is what stops Claude Code from running the command at a
+document's request. Other agents need the equivalent rule in their own permission config.
+
 ## CLI highlights
 
 ```bash
 skillmem learn skill-x -t "..." --trigger "..." --steps "..." --outcome success
 skillmem recall "deploy the bot to prod"
-skillmem skills                  # list skills with strength bars
+skillmem skills-top              # list skills with strength bars
 skillmem decay --days 14         # manual decay + lifecycle sweep
 skillmem search "hash chain"     # session recaps hidden by default; --notes to include
 skillmem trust skill-x           # approve a memory as a rule (--untrust to withdraw)

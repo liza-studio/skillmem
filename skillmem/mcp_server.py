@@ -36,8 +36,7 @@ SERVER_NAME = "skillmem"
 
 
 def _db_path() -> Path:
-    override = os.environ.get("SKILLMEM_DB")
-    return Path(override).expanduser() if override else S.default_db_path()
+    return S.default_db_path()  # honours SKILLMEM_DB, then SKILLMEM_HOME
 
 
 
@@ -198,7 +197,7 @@ def _tool_write(args: dict[str, Any]) -> list[TextContent]:
             check_conflicts=bool(args.get("check_conflicts", True)),
             links=S.extract_wikilinks(item.body),
         )
-    except S.MemoryConflict as exc:
+    except (S.MemoryConflict, ValueError) as exc:
         return _err(str(exc))
     return _ok({"ok": True, "slug": result.slug, "id": result.id, "kind": result.kind})
 
@@ -264,7 +263,7 @@ def _tool_learn(args: dict[str, Any]) -> list[TextContent]:
             check_conflicts=bool(args.get("check_conflicts", True)),
             links=S.extract_wikilinks(item.body),
         )
-    except S.MemoryConflict as exc:
+    except (S.MemoryConflict, ValueError) as exc:
         return _err(str(exc))
     return _ok({"ok": True, "slug": result.slug, "id": result.id, "kind": "skill"})
 

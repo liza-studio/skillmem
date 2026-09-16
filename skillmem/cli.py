@@ -53,6 +53,10 @@ from . import __version__
 def main(ctx: click.Context, db_path: Path | None) -> None:
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db_path
+    if db_path is not None:
+        # so scheduled jobs (schedule._job_env) and anything reading
+        # default_db_path() in this process see the same database
+        os.environ["SKILLMEM_DB"] = str(db_path)
 
 
 # NOTE: a second `init` command is defined further down (the installer that
@@ -335,7 +339,8 @@ def trust_cmd(ctx: click.Context, slug: str, untrust: bool) -> None:
     # approval — otherwise one command undoes the whole trust boundary. This is
     # accident protection, not a wall: `init --claude-code` also installs a
     # permission deny rule for the command, and README says so.
-    if _owner_trust()[0] is None and not untrust:
+    if _owner_trust()[0] is None:
+        # both directions: an injected `--untrust` would strip a real rule
         raise click.ClickException(
             "refusing: `trust` needs a person at a terminal (no TTY). "
             "Run it yourself, not through an agent."
@@ -905,6 +910,42 @@ def _patch_settings_hook(
             "backup": str(backup) if backup else None}
 
 
+def _prune_settings_hook(settings_json: Path, *, command_prefix: str) -> dict[str, Any]:
+    """Remove hooks whose command ends with ``command_prefix`` (any binary path).
+
+    Upgrades must drop the Stop→migrate hook older inits installed, or the
+    wrong-project import keeps running on every turn.
+    """
+    if not settings_json.exists():
+        return {"changed": False, "reason": "no settings.json"}
+    try:
+        data = json.loads(settings_json.read_text(encoding="utf-8") or "{}")
+    except json.JSONDecodeError:
+        return {"changed": False, "reason": "existing JSON is invalid"}
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return {"changed": False, "reason": "no hooks"}
+    removed = 0
+    for event, groups in list(hooks.items()):
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            hs = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(hs, list):
+                continue
+            keep = [h for h in hs if not (isinstance(h, dict) and str(h.get("command", ""))
+                                          .rstrip().endswith(command_prefix))]
+            removed += len(hs) - len(keep)
+            group["hooks"] = keep
+        hooks[event] = [g for g in groups if not (isinstance(g, dict) and g.get("hooks") == [])]
+        if not hooks[event]:
+            del hooks[event]
+    if not removed:
+        return {"changed": False, "reason": f"no '{command_prefix}' hook present"}
+    _atomic_write_json(settings_json, data)
+    return {"changed": True, "removed": f"{removed} hook(s) running '{command_prefix}'"}
+
+
 def _patch_settings_deny(settings_json: Path, rule: str) -> dict[str, Any]:
     """Add a permission deny rule to ~/.claude/settings.json (idempotent).
 
@@ -1017,6 +1058,8 @@ def init(
         if hooks_mode != "none":
             hook_reports.append(_patch_settings_deny(
                 settings_json, "Bash(skillmem trust*)"))
+            hook_reports.append(_prune_settings_hook(
+                settings_json, command_prefix="skillmem migrate"))
         if hooks_mode == "full":
             hook_reports += [
                 _hook("SessionStart", ["hook", "mcp-guard"]),
@@ -1181,10 +1224,31 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
         report["warnings"].append(f"schedule remove failed: {exc}")
 
     if not keep_db:
-        db = S.default_db_path()
-        if db.exists():
-            db.unlink()
-            report["removed"].append(f"DB {db}")
+        db = ctx.obj.get("db_path") or S.default_db_path()
+        # the DB's own body files go with it (this DB's namespace only; the
+        # docs/ directory is shared by every database under one home)
+        try:
+            conn = S.connect(db)
+            ns = S._db_namespace(conn)
+            conn.close()
+            for p in S.docs_dir().glob("*.md"):
+                m = S._BODY_FILE_RE.search(p.name)
+                if m is None:
+                    continue
+                if m.group("content") is None:
+                    if ns:  # legacy names are only ours when we are the default DB
+                        continue
+                elif (m.group("ns") or "") != (f"-{ns}" if ns else ""):
+                    continue
+                p.unlink(missing_ok=True)
+                report["removed"].append(f"body file {p.name}")
+        except Exception as exc:  # noqa: BLE001
+            report["warnings"].append(f"body files: {exc}")
+        for suffix in ("", "-wal", "-shm"):
+            f = db.with_name(db.name + suffix)
+            if f.exists():
+                f.unlink()
+                report["removed"].append(f"DB {f}")
 
     click.echo(json.dumps(report, ensure_ascii=False, indent=2))
 
@@ -1646,7 +1710,7 @@ def learn(
     )
     try:
         result = S.upsert(conn, item, links=S.extract_wikilinks(item.body))
-    except S.MemoryConflict as exc:
+    except (S.MemoryConflict, ValueError) as exc:
         click.echo(f"CONFLICT: {exc}", err=True)
         sys.exit(1)
     click.echo(f"Learned: {result.slug} (id={result.id})")

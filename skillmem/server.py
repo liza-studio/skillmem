@@ -292,17 +292,32 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
                 status_code=403,
                 detail="agent lacks 'write_public' permission (or master scope)",
             )
-        existing = S.get(conn, item.slug)
-        if existing is None:
+        # S.get() hides soft-deleted rows, upsert does not: a tombstone's slug
+        # is still a record with an author and history, not free for anyone.
+        row = conn.execute(
+            "SELECT * FROM memory_items WHERE slug = ?", (item.slug,)
+        ).fetchone()
+        if row is None:
             return
+        existing = S.MemoryItem.from_row(row)
+        if row["deleted_at"] is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="slug belongs to a deleted record; pick another slug",
+            )
         if not _may_write(existing, agent):
             raise HTTPException(
                 status_code=403,
                 detail="slug exists and belongs to another agent or is public; "
                        "use /update with the right permission",
             )
+        if item.visibility != existing.visibility:
+            raise HTTPException(
+                status_code=409,
+                detail=f"record is {existing.visibility}; a create call cannot "
+                       "change visibility",
+            )
         item.agent = existing.agent or agent.name
-        item.visibility = existing.visibility
 
     @app.post("/write")
     def write(req: WriteRequest, agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:
@@ -322,6 +337,8 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             )
         except S.MemoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         return {"ok": True, "slug": result.slug, "id": result.id, "agent": agent.name}
 
     @app.post("/update/{slug}")
@@ -365,6 +382,8 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             )
         except S.MemoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         return {"ok": True, "slug": result.slug}
 
     @app.post("/learn")
@@ -387,6 +406,8 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             )
         except S.MemoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         return {"ok": True, "slug": result.slug, "id": result.id, "kind": "skill", "agent": agent.name}
 
     @app.post("/recall")
@@ -431,7 +452,9 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         conn = get_conn()
         decayed = S.decay_stale(conn, days_threshold=days)
         sweep = S.sweep_lifecycle(conn)  # same maintenance the CLI run does
-        return {"decayed": len(decayed), "details": decayed, "lifecycle": sweep}
+        gc = S.gc_body_files(conn)
+        return {"decayed": len(decayed), "details": decayed, "lifecycle": sweep,
+                "gc_body_files": gc}
 
     @app.post("/reload-tokens")
     def reload_tokens(agent: AgentIdentity = Depends(get_agent)) -> dict[str, Any]:

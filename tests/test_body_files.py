@@ -68,6 +68,12 @@ def test_failed_insert_leaves_no_stray_file(conn, monkeypatch):
     restore()
 
     assert S.get(conn, "big-doc") is None
+    # 0.11: the content-addressed file is left for gc (an identical concurrent
+    # write may have won the race and reference it); gc removes true orphans
+    import os as _os
+    for p in S.docs_dir().glob("big-doc*"):
+        _os.utime(p, (0, 0))
+    assert S.gc_body_files(conn) == 1
     leftovers = [p for p in S.docs_dir().glob("big-doc*") if ".staged-" not in p.name]
     assert leftovers == [], f"unpublished body file leaked: {leftovers}"
 

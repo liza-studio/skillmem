@@ -97,11 +97,18 @@ def export_all(conn, destination: Path) -> int:
     # forever and a restore resurrected it. Only manifest-listed files are
     # ever removed — anything else in the directory is not ours.
     manifest = destination / ".skillmem-export.json"
-    previous: set[str] = set()
+    # keyed per database: two databases exporting into one directory must
+    # not delete each other's files
+    ns = S._db_namespace(conn) or "default"
+    data: dict = {}
     try:
-        previous = set(json.loads(manifest.read_text(encoding="utf-8")).get("files", []))
+        loaded = json.loads(manifest.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
     except (OSError, ValueError):
         pass
+    dbs = data.get("dbs") if isinstance(data.get("dbs"), dict) else {}
+    previous: set[str] = set(dbs.get(ns, []) or [])
     written: list[str] = []
     count = 0
     for item in _iter_all(conn):
@@ -124,6 +131,6 @@ def export_all(conn, destination: Path) -> int:
         stale = destination / rel
         if stale.resolve().is_relative_to(root):
             stale.unlink(missing_ok=True)
-    manifest.write_text(json.dumps({"files": sorted(written)}, indent=1),
-                        encoding="utf-8")
+    dbs[ns] = sorted(written)
+    manifest.write_text(json.dumps({"dbs": dbs}, indent=1), encoding="utf-8")
     return count

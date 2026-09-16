@@ -860,7 +860,10 @@ def _db_namespace(conn: sqlite3.Connection) -> str:
         path = str(Path(row[2]).resolve()) if row and row[2] else ""
     except (sqlite3.Error, OSError, TypeError):
         path = ""
-    if not path or path == str(default_db_path().resolve()):
+    # Only the canonical file keeps the empty namespace — NOT whatever
+    # SKILLMEM_DB points at, or an override DB and memory.db would share it.
+    canonical = str((default_data_dir() / "memory.db").resolve())
+    if not path or path == canonical:
         return ""
     return hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]
 
@@ -911,18 +914,14 @@ def _publish_body_file(staged: tuple[Path, Path]) -> str:
 
 def _discard_body_file(conn: sqlite3.Connection,
                        staged: tuple[Path, Path] | None) -> None:
-    """Remove a body file whose transaction failed — unless a row (say, the
-    identical concurrent write that won the slug race) references it."""
-    if staged is None:
-        return
-    name = staged[1].name
-    try:
-        if conn.execute("SELECT 1 FROM memory_items WHERE body_path = ? LIMIT 1",
-                        (name,)).fetchone():
-            return
-        staged[1].unlink(missing_ok=True)
-    except (sqlite3.Error, OSError):
-        pass  # an orphan is harmless (gc_body_files); never mask the real error
+    """A failed transaction leaves its (content-addressed) file for gc.
+
+    It must not unlink: with identical content two writers share one file,
+    and the one that lost on "database is locked" cannot see the winner's
+    uncommitted row — it would delete the file the winner is about to
+    reference. gc_body_files() removes true orphans after a grace period.
+    """
+    return None
 
 
 def gc_body_files(conn: sqlite3.Connection) -> int:
@@ -939,6 +938,8 @@ def gc_body_files(conn: sqlite3.Connection) -> int:
         m = _BODY_FILE_RE.search(path.name)
         if m is None or path.name in live:
             continue
+        if m.group("content") is None:
+            continue  # pre-0.11 name: no namespace, could be any database's
         if (m.group("ns") or "") != (f"-{ns}" if ns else ""):
             continue  # another database's file
         # a file younger than a minute may belong to a write still committing
@@ -981,12 +982,18 @@ _KIND_RE = _re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 
 
 def _valid_kind(kind: str) -> str:
-    """kind ends up in file paths (export, vault) — keep it a plain word."""
-    if not _KIND_RE.fullmatch(kind or ""):
+    """kind ends up in file paths (export, vault) — keep it a plain word.
+
+    Normalises case and whitespace first ("Reference" is a reference), so
+    frontmatter and older rows keep working; only genuinely unsafe values
+    ("../x", "", 40 chars) are refused.
+    """
+    norm = (kind or "").strip().lower()
+    if not _KIND_RE.fullmatch(norm):
         raise ValueError(
             f"invalid kind {kind!r}: use a-z, 0-9, '_' or '-', 1-32 chars"
         )
-    return kind
+    return norm
 
 
 def set_trust(conn: sqlite3.Connection, slug: str, *, trusted: bool,
@@ -1034,7 +1041,7 @@ def upsert(
     ``restore_strength=True`` — before that, every force-overwrite and every
     pack re-import silently reset it to 1.0.
     """
-    _valid_kind(item.kind)
+    item.kind = _valid_kind(item.kind)
     item.title = scrub(item.title)
     item.body = scrub(item.body)
     item.wordcount = _wordcount(item.body)
@@ -1326,6 +1333,7 @@ def soft_delete(conn: sqlite3.Connection, slug: str, reason: str) -> bool:
     now = _now()
     with tx(conn):
         prev_hash = _last_chain_hash(conn)
+        now = _chain_clock(conn, now)
         payload = {
             "slug": row["slug"], "old_title": row["title"], "old_body": row["body"],
             "changed_at": now, "changed_by": None, "reason": f"deleted: {reason}",

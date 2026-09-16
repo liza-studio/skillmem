@@ -9,7 +9,7 @@ Events:
     SessionStart      -> mcp-guard, session-history
     UserPromptSubmit  -> verify-gate, auto-recall
     PreToolUse        -> tool-recall   (Bash|Edit|Write|NotebookEdit)
-    Stop              -> session-recap (rate-limited; then `skillmem migrate`)
+    Stop              -> session-recap (rate-limited; indexes its own note)
     SessionEnd        -> session-recap (once per session, not rate-limited)
 
 recall/search are called directly through the storage layer (no child CLI
@@ -211,6 +211,10 @@ def frame_for_model(row: Any, payload: dict[str, Any],
             text = f"{title}\n\n{payload[f]}" if title else str(payload[f])
             payload[f] = render_untrusted(text)
             title = None  # once inside a frame, do not repeat it
+    if title and fields:
+        # nothing to carry the title (empty body): frame the title itself
+        payload[fields[0]] = render_untrusted(str(title))
+        title = None
     if payload.get("title"):
         payload["title"] = "(unapproved memory — title inside the framed body)"
     return payload
@@ -290,12 +294,18 @@ def _recall_sections(
     fb_header: str,
     skills_header: str,
     min_strength: float = 0.0,
+    budget: int | None = None,
 ) -> str:
     """Shared composer for auto-recall / tool-recall: feedback + skills sections.
 
     Trusted and untrusted memories go into separate blocks. Whatever is derived
     from a transcript or imported from someone else's pack is content this
     machine did not author, and an agent must read it as data.
+
+    ``budget`` is enforced HERE, section by section, never by slicing the
+    finished text: a slice after framing could cut the closing marker off the
+    untrusted block, and the caller's "seen" ledger must list only what was
+    actually emitted.
     """
     try:
         fb = [
@@ -320,15 +330,27 @@ def _recall_sections(
     trusted_fb = [r for r in fb if not _is_untrusted(r)]
     trusted_skills = [r for r in skills if not _is_untrusted(r)]
     untrusted = [r for r in (*fb, *skills) if _is_untrusted(r)]
-    if trusted_fb:
-        parts.append(fb_header + "\n" + _lines(trusted_fb))
-    if trusted_skills:
-        parts.append(skills_header + "\n" + _lines(trusted_skills))
-    if untrusted:
-        # Truncate first, frame second — a frame added before truncation gets its
-        # closing marker cut off. The title goes inside the frame too: it is text
-        # from the same untrusted source.
-        parts.append(render_untrusted(_lines(untrusted, with_origin=True)))
+    limit = budget if budget is not None else 10**9
+    used = 0
+
+    def _take(text: str) -> bool:
+        nonlocal used
+        if used + len(text) + 2 > limit:
+            return False
+        parts.append(text)
+        used += len(text) + 2
+        return True
+
+    # sections in priority order; a section that does not fit is dropped
+    # whole, and a row inside it is dropped whole — never cut mid-line
+    for header, rows in ((fb_header, trusted_fb), (skills_header, trusted_skills)):
+        while rows and not _take(header + "\n" + _lines(rows)):
+            rows = rows[:-1]
+    # Truncate first, frame second — a frame added before truncation gets its
+    # closing marker cut off. The title goes inside the frame too: it is text
+    # from the same untrusted source.
+    while untrusted and not _take(render_untrusted(_lines(untrusted, with_origin=True))):
+        untrusted = untrusted[:-1]
     return "\n\n".join(parts)
 
 
@@ -375,6 +397,7 @@ def auto_recall(ctx: click.Context) -> None:
         skills_limit=2, fb_limit=3, body_chars=400,
         fb_header="### Relevant feedback:",
         skills_header="### Relevant skills (how this was done before):",
+        budget=1500,
     )
     slugs = _extract_slugs(context)
     _append_seen(session_id, slugs)
@@ -382,8 +405,6 @@ def auto_recall(ctx: click.Context) -> None:
               ",".join(slugs), len(context))
     if not context.strip():
         return
-    if len(context) > 1500:
-        context = context[:1500] + "…"
     _emit("UserPromptSubmit", f"📚 Auto-recall from memory (apply if relevant):\n\n{context}")
 
 
@@ -424,6 +445,7 @@ def tool_recall(ctx: click.Context) -> None:
         fb_header="### Rules/warnings from feedback:",
         skills_header="### Similar past tasks (skills):",
         min_strength=0.3,
+        budget=1000,
     )
     slugs = _extract_slugs(context)
     _append_seen(session_id, slugs)
@@ -431,8 +453,6 @@ def tool_recall(ctx: click.Context) -> None:
               ",".join(slugs), len(context))
     if not context.strip():
         return
-    if len(context) > 1000:
-        context = context[:1000] + "…"
     _emit("PreToolUse", f"🔧 Tool-recall (context for {tool_name}):\n{context}")
 
 
@@ -614,9 +634,10 @@ RECAP_MAX_TRANSCRIPT_FINAL = 20_480
 def newest_transcript_for_cwd(cwd: Path | None = None) -> Path | None:
     """Claude Code names a project dir after the path, with separators as dashes."""
     here = (cwd or Path.cwd()).resolve()
-    # Claude Code names the project dir by replacing every path separator
-    # (and the drive colon on Windows) with "-"; "/" alone left C:\... intact.
-    slug = "-" + re.sub(r"[/\\:]", "-", str(here)).strip("-")
+    # Claude Code names the project dir by replacing every non-alphanumeric
+    # character with "-" (/Users/x/.claude → -Users-x--claude); "/" alone
+    # missed dots and the Windows drive colon.
+    slug = re.sub(r"[^A-Za-z0-9]", "-", str(here))
     d = Path.home() / ".claude" / "projects" / slug
     try:
         files = [f for f in d.glob("*.jsonl") if f.is_file()]
@@ -755,12 +776,15 @@ def _filter_transcript(path: Path) -> str:
             if rec.get("type") not in ("user", "assistant"):
                 continue
             content = (rec.get("message") or {}).get("content") or []
-            if not isinstance(content, list):
+            if isinstance(content, str):
+                text = content  # plain-string messages are real turns too
+            elif isinstance(content, list):
+                text = " ".join(
+                    c.get("text", "") for c in content
+                    if isinstance(c, dict) and c.get("type") == "text"
+                )
+            else:
                 continue
-            text = " ".join(
-                c.get("text", "") for c in content
-                if isinstance(c, dict) and c.get("type") == "text"
-            )
             if len(text) > 10:
                 out.append(f"{rec['type']}: {text}")
     return "\n".join(out)
@@ -841,9 +865,29 @@ def run_recap(data: dict[str, Any]) -> None:
     if not claude_bin:
         _log_line("session-recap", session_id[:8], "skip:no-claude-cli")
         return
+    # One recap per session at a time. The debounce stamp is checked early
+    # and written late, so two Stops for one session could both pass it; an
+    # exclusive per-session lock closes that window. Released at exit, so
+    # every early return below is covered without threading it through.
+    session_lock = stamp.with_suffix(".lock")
+    try:
+        session_lock.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if time.time() - session_lock.stat().st_mtime > RECAP_TIMEOUT + 60:
+                session_lock.unlink()  # a recap that died
+        except OSError:
+            pass
+        os.close(os.open(session_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        _log_line("session-recap", session_id[:8], "skip:concurrent-same-session")
+        return
+    except OSError:
+        pass  # no lock dir: proceed as before rather than lose the recap
+
     slot = _acquire_recap_slot()
     if slot is None and not force:
         _log_line("session-recap", session_id[:8], "skip:busy")
+        session_lock.unlink(missing_ok=True)
         return
     if slot is None:
         # The final recap happens once per session; dropping it on a busy slot
@@ -898,6 +942,9 @@ def run_recap(data: dict[str, Any]) -> None:
         _log_line("session-recap", session_id[:8], f"error {type(exc).__name__}")
     finally:
         _release_recap_slot(slot)
+        # the model call is over; publish below has its own lock. Released
+        # here explicitly — atexit alone does not fire between in-process runs.
+        session_lock.unlink(missing_ok=True)
     # A non-zero exit means the text is an error message, not a recap — writing
     # it would overwrite a good note with noise.
     if code != 0 or len(summary) < 100:
