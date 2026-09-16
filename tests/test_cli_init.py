@@ -225,7 +225,8 @@ def test_init_does_not_mistake_a_differently_scoped_hook_for_ours(fakehome: Path
 
 
 def test_init_repoints_the_mcp_entry_with_the_hooks(fakehome: Path):
-    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    base = Path(sys.executable).parent
+    mcp = str(next(p for p in (base / "skillmem-mcp", base / "skillmem-mcp.exe") if p.exists()))
     claude_json = fakehome / ".claude.json"
     claude_json.write_text(json.dumps({"mcpServers": {
         "skillmem": {"command": "/old/venv/bin/skillmem-mcp", "args": [], "env": {"X": "1"}},
@@ -296,3 +297,15 @@ def test_uninstall_removes_the_trust_deny_rule(fakehome: Path):
     assert "Bash(skillmem trust*)" in json.loads(settings_json.read_text())["permissions"]["deny"]
     _run(["uninstall", "--claude-code"])
     assert "Bash(skillmem trust*)" not in json.loads(settings_json.read_text()).get("permissions", {}).get("deny", [])
+
+
+def test_backups_are_private_and_only_written_on_change(fakehome: Path):
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    settings_json = fakehome / ".claude" / "settings.json"
+    settings_json.parent.mkdir(parents=True, exist_ok=True)
+    settings_json.write_text("{}")
+    settings_json.chmod(0o600)
+    _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
+    backups = list(settings_json.parent.glob("settings.json.bak.*"))
+    assert backups and all((b.stat().st_mode & 0o777) == 0o600 for b in backups)
+    assert (settings_json.stat().st_mode & 0o777) == 0o600

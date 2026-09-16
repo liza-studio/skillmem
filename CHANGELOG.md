@@ -134,10 +134,12 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   hook the user scoped to another matcher is left alone; missing, `""` and `"*"`
   are the same scope. The `mcpServers.skillmem` command follows the venv too
   (Claude Code only, when it is named `skillmem-mcp` and the new binary exists).
-  Config backups are taken only when a file is actually rewritten — a no-op
-  re-run leaves none, a refusal (invalid JSON/TOML) leaves the file untouched
-  and none — and are named exclusively (`.bak.<sec>`, `.bak.<sec>.1`, …), so
-  helpers running within one second cannot overwrite each other's copy.
+  Config backups (every agent's file, Claude Code to opencode) are byte-exact,
+  mode 0600 (`~/.claude.json` carries the OAuth account), taken only when a
+  file is actually rewritten — a no-op re-run leaves none, a refusal (invalid
+  JSON/TOML) leaves the file untouched and none — and named exclusively
+  (`.bak.<sec>`, `.bak.<sec>.1`, …), so helpers running within one second
+  cannot overwrite each other's copy.
   `uninstall --claude-code` also removes the `Bash(skillmem trust*)` deny rule.
 - Upgrading: re-run `skillmem init --claude-code` (and `schedule install`) to
   receive the deny rule, the hook prune and the job environment. A row whose

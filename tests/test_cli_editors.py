@@ -81,7 +81,7 @@ def test_init_editor_refuses_invalid_json(fakehome: Path):
 
     assert _init("--cursor")[0] == 0
     assert path.read_text(encoding="utf-8") == "{ not json"
-    assert list(path.parent.glob("mcp.json.bak.*"))
+    assert not list(path.parent.glob("mcp.json.bak.*"))   # refused = untouched, no backup
 
 
 def test_init_opencode_uses_its_own_shape(fakehome: Path):

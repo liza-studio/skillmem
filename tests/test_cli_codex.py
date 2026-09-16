@@ -85,7 +85,7 @@ def test_init_codex_idempotent(fakehome: Path):
 
 
 def test_init_codex_refuses_broken_toml(fakehome: Path):
-    """Invalid TOML is left alone with a backup — never silently overwritten."""
+    """Invalid TOML is left alone, untouched and without a backup — never silently overwritten."""
     cfg_path = _config(fakehome)
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     broken = 'model = "unterminated\n'
@@ -125,3 +125,15 @@ def test_uninstall_codex_noop_when_absent(fakehome: Path):
     """Uninstall on a machine that never ran init --codex must not crash."""
     code, _ = _run(["uninstall", "--keep-db"])
     assert code == 0
+
+
+def test_codex_backup_is_the_original_bytes_even_without_trailing_newline(fakehome: Path):
+    cfg_path = fakehome / ".codex" / "config.toml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    original = b"[a]\r\nx = 1"                      # CRLF, no final newline
+    cfg_path.write_bytes(original)
+    code, _ = _init(fakehome)
+    assert code == 0
+    backups = list(cfg_path.parent.glob("config.toml.bak.*"))
+    assert len(backups) == 1 and backups[0].read_bytes() == original
+    assert (backups[0].stat().st_mode & 0o777) == 0o600
