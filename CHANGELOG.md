@@ -58,9 +58,10 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   0.11 export over a pre-release manifest adopts and prunes that whole list.
   Strength, pin and the access/confirmed/failure counters are written to
   frontmatter now, and a body is written verbatim, so a dump→restore keeps
-  exact slugs (`a_b` and `a-b` no longer merge), whitespace (and with it the
-  owner's approval), counters, pins and a recorded `origin` — `unknown`
-  included. Importing a plain Obsidian note keeps what the row earned.
+  exact slugs (`a_b` and `a-b` no longer merge), LF bodies byte for byte (and
+  with them the owner's approval), counters, pins (when the dump records
+  them) and a recorded `origin` — `unknown` included. Importing a plain
+  Obsidian note keeps what the row earned.
 - A same-text write applies only the metadata the caller actually sent: a
   retried `mem_write` without a `kind` no longer turns a trusted skill into a
   note, a same-text `mem_learn` no longer flips a private skill public, and an
@@ -90,8 +91,8 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   installs the deny rule; `--hooks minimal` means exactly that and nothing
   else. Hand-written memory: `skillmem migrate --source <dir>`.
 - Recall context is budgeted per section before framing (a frame can no longer
-  be cut in half) and the seen-ledger lists exactly what was emitted, whatever
-  characters the slug uses.
+  be cut in half) and the seen-ledger lists exactly what was emitted (any slug
+  without spaces or `]`).
 - Recap: publication fails closed without its lock; Stop recaps of one
   session are serialised by a per-session lock, and the SessionEnd recap waits
   up to 5 s for an in-flight Stop recap and then proceeds anyway (publication

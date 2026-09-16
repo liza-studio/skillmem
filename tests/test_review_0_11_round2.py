@@ -1050,3 +1050,44 @@ def test_seen_ledger_accepts_any_slug_and_decay_days_are_clamped(home):
     assert S.decay_stale(conn, days_threshold=0) == []          # no compounding
     r = CliRunner().invoke(cli_main, ["--db", str(home / "memory.db"), "decay", "--days", "0"])
     assert r.exit_code != 0
+
+
+
+# --- round 17: the P3s of round 16 -----------------------------------------
+
+def test_learn_project_applies_and_write_ttl_error_is_a_conflict_line(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="s", title="t", body=S.skill_body("tr", "st", "success", None),
+                                kind="skill", project="old"))
+    conn.commit()
+    r = CliRunner().invoke(cli_main, ["--db", str(home / "memory.db"), "learn", "s", "--title", "t",
+                                      "--trigger", "tr", "--steps", "st", "--outcome", "success",
+                                      "--project", "new"])
+    assert r.exit_code == 0, r.output
+    assert conn.execute("SELECT project FROM memory_items WHERE slug='s'").fetchone()[0] == "new"
+    r = CliRunner().invoke(cli_main, ["--db", str(home / "memory.db"), "write", "--slug", "w",
+                                      "--title", "t", "--body", "b", "--ttl-days", "0"])
+    assert r.exit_code != 0 and "Traceback" not in r.output and "ttl_days" in r.output
+
+
+def test_mcp_null_is_not_explicit_and_old_dumps_keep_pins(home, monkeypatch, tmp_path):
+    from skillmem import mcp_server as M, vault as V
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="sk", title="t", body="b", kind="skill", visibility="private",
+                                origin="owner"))
+    S.set_trust(conn, "sk", trusted=True); S.set_pinned(conn, "sk", True); conn.commit()
+    monkeypatch.setenv("SKILLMEM_DB", str(home / "memory.db"))
+    monkeypatch.setattr(M, "_CONN", None)
+    M._tool_write({"slug": "sk", "title": "t", "body": "b", "kind": None})
+    M._tool_learn({"slug": "sk", "title": "t", "trigger": "x", "steps": "y", "outcome": "z",
+                   "visibility": None})
+    row = conn.execute("SELECT kind, visibility FROM memory_items WHERE slug='sk'").fetchone()
+    assert (row["kind"], row["visibility"]) == ("skill", "private")
+    # a dump written before pins were exported must not unpin on re-import
+    dump = tmp_path / "old"
+    (dump / "skill").mkdir(parents=True)
+    (dump / "skill" / "sk.md").write_text(
+        "---\nname: sk\ndescription: t\nmetadata:\n  node_type: memory\n  type: skill\n  origin: owner\n"
+        "strength: 1.0\n---\n\nb\n", encoding="utf-8")
+    V.import_vault(conn, dump, skip_auto_memories=False)
+    assert conn.execute("SELECT pinned, origin FROM memory_items WHERE slug='sk'").fetchone()[0] == 1

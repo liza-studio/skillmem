@@ -200,7 +200,9 @@ def _tool_write(args: dict[str, Any]) -> list[TextContent]:
             check_conflicts=bool(args.get("check_conflicts", True)),
             links=S.extract_wikilinks(item.body),
             # only what the client actually sent may change an existing row
-            explicit={k for k in ("kind", "project", "tags", "topics", "ttl_days") if k in args},
+            # a JSON null is "not sent"; an empty list for tags/topics is a real clear
+            explicit={k for k in ("kind", "project", "tags", "topics", "ttl_days")
+                      if args.get(k) is not None},
         )
     except (S.MemoryConflict, ValueError) as exc:
         return _err(str(exc))
@@ -271,7 +273,8 @@ def _tool_learn(args: dict[str, Any]) -> list[TextContent]:
             conn, item,
             check_conflicts=bool(args.get("check_conflicts", True)),
             links=S.extract_wikilinks(item.body),
-            explicit={k for k in ("visibility", "project", "tags", "topics", "ttl_days") if k in args},
+            explicit={k for k in ("visibility", "project", "tags", "topics", "ttl_days")
+                      if args.get(k) is not None},
         )
     except (S.MemoryConflict, ValueError) as exc:
         return _err(str(exc))

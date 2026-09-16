@@ -253,7 +253,8 @@ def _run_import(conn, root, assets_root, kind, project_override,
             extras = _restore_meta(meta)
             if isinstance(md, dict) and md.get("originSessionId"):
                 extras["source_session"] = str(md["originSessionId"])
-            pinned = bool(meta.get("pinned")) if _is_auto_memory(meta) else None
+            # only a dump that RECORDS the pin may change it (a pre-0.11 dump has no key)
+            pinned = bool(meta.get("pinned")) if _is_auto_memory(meta) and "pinned" in meta else None
 
             attachments: list[str] = []
             for asset in _collect_attachments(root, path.parent, body):

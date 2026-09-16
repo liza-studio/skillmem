@@ -259,7 +259,7 @@ def write(
             explicit={p for p in ("kind", "project", "ttl_days")
                       if ctx.get_parameter_source(p) == click.core.ParameterSource.COMMANDLINE},
         )
-    except S.MemoryConflict as exc:
+    except (S.MemoryConflict, ValueError) as exc:
         click.echo(str(exc), err=True)
         sys.exit(2)
     click.echo(f"OK: {result.slug} (id={result.id})")
@@ -1843,7 +1843,9 @@ def learn(
     )
     try:
         result = S.upsert(conn, item, links=S.extract_wikilinks(item.body),
-                          explicit={"tags"} if tags else set())   # never flip visibility on same text
+                          # what was typed applies; visibility is never flipped on same text
+                          explicit={p for p in ("tags", "project")
+                                    if ctx.get_parameter_source(p) == click.core.ParameterSource.COMMANDLINE})
     except (S.MemoryConflict, ValueError) as exc:
         click.echo(f"CONFLICT: {exc}", err=True)
         sys.exit(1)

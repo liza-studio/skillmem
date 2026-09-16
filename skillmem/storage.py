@@ -1245,6 +1245,8 @@ def upsert(
                        if v is not None and v != existing[k]}
             if item.agent is not None and item.agent != existing["agent"]:
                 changed["agent"] = item.agent
+            if item.origin and _valid_origin(item.origin) != existing["origin"]:
+                changed["origin"] = _valid_origin(item.origin)   # a dump restores its origin
         else:
             changed = {k: v for k, v in meta.items()
                        if k in explicit and v is not None and v != existing[k]}
