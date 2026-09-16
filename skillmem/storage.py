@@ -1948,8 +1948,12 @@ def find_conflicts(
         # LIMIT: the cursor walks the BM25 order and stops once `candidates`
         # VISIBLE rows are scored. A fixed window (5, then 100) let that many
         # hidden rows crowd out the writer's own duplicate.
+        # Narrow on purpose: without a LIMIT SQLite sorts every match before
+        # the first row comes out, and dragging `body` through that sort cost
+        # 0.3-0.5 s per write on a 9k-row database. Bodies are fetched below
+        # for the few rows that get scored.
         rows = conn.execute(
-            "SELECT m.id, m.slug, m.title, m.body, m.visibility, m.topics, m.agent "
+            "SELECT m.id, m.slug, m.visibility, m.topics, m.agent "
             "FROM mem_fts_stem "
             "JOIN memory_items m ON m.id = mem_fts_stem.rowid "
             "WHERE mem_fts_stem MATCH ? AND m.deleted_at IS NULL "
@@ -1975,7 +1979,12 @@ def find_conflicts(
             rows.close()
             break
         scored += 1
-        other = _word_bag(row["title"] + "\n" + row["body"])
+        text = conn.execute(
+            "SELECT title, body FROM memory_items WHERE id = ?", (row["id"],)
+        ).fetchone()
+        if text is None:                  # deleted between the walk and now
+            continue
+        other = _word_bag(text["title"] + "\n" + text["body"])
         if not other:
             continue
         inter = bag & other
@@ -1986,7 +1995,7 @@ def find_conflicts(
         if overlap >= threshold:
             conflicts.append({
                 "slug": row["slug"],
-                "title": row["title"],
+                "title": text["title"],
                 "overlap": round(overlap, 3),
             })
     return conflicts
