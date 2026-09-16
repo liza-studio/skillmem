@@ -276,6 +276,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "SELECT id, kind FROM memory_items WHERE kind != LOWER(TRIM(kind, ' \t\r\n')) "
         "OR kind LIKE '%  %' OR kind LIKE '%' || char(9) || '%' "
         "OR kind LIKE '%' || char(10) || '%' OR kind LIKE '%' || char(13) || '%' "
+        "OR kind LIKE '%' || char(11) || '%' OR kind LIKE '%' || char(12) || '%' "
         "OR kind LIKE '%' || char(160) || '%'"
     ).fetchall()
     for r in odd:

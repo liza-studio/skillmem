@@ -790,23 +790,24 @@ def _codex_set_db(raw: str, db_env: str) -> str:
     """Set SKILLMEM_DB inside [mcp_servers.skillmem.env] of a TOML text."""
     import re as _re2
     line = f"SKILLMEM_DB = {_toml_str(db_env)}"
+    nl = "\r\n" if "\r\n" in raw else "\n"          # the file's own convention
     m = _re2.search(r"^\[mcp_servers\.skillmem\.env\][ \t]*\r?$", raw, _re2.M)
     if m is None:
         if raw and not raw.endswith("\n"):
-            raw += "\n"
-        return raw + "\n[mcp_servers.skillmem.env]\n" + line + "\n"
+            raw += nl
+        return raw + nl + "[mcp_servers.skillmem.env]" + nl + line + nl
     head, tail = raw[:m.end()], raw[m.end():]
     nxt = _re2.search(r"^[ \t]*\[", tail, _re2.M)    # end of this table
     block, rest = (tail[:nxt.start()], tail[nxt.start():]) if nxt else (tail, "")
     # horizontal whitespace only: `\s*` used to swallow the newline before a
     # first-line key and glue it to the header (invalid TOML → refused).
     # Keep an inline comment; replace via a lambda so backslash paths survive.
-    key = _re2.compile(r"^[ \t]*SKILLMEM_DB[ \t]*=[ \t]*(?P<val>\"(?:[^\"\\]|\\.)*\"|'[^']*'|[^#\r\n]*?)(?P<rest>[ \t]*(?:#.*)?)\r?$",
+    key = _re2.compile(r"^[ \t]*SKILLMEM_DB[ \t]*=[ \t]*(?P<val>\"(?:[^\"\\]|\\.)*\"|'[^']*'|[^#\r\n]*?)(?P<rest>[ \t]*(?:#[^\r\n]*)?\r?)$",
                       _re2.M)
     if key.search(block):
         block = key.sub(lambda mm: line + mm.group("rest"), block, count=1)
     else:
-        block = "\n" + line + block
+        block = nl + line + block
     return head + block + rest
 
 
@@ -835,7 +836,7 @@ def _patch_codex_config(
     if config_toml.exists():
         raw = config_toml.read_bytes().decode("utf-8")   # keep CRLF as is
         backup = config_toml.with_suffix(f".toml.bak.{int(_time.time())}")
-        backup.write_text(raw, encoding="utf-8")
+        backup.write_bytes(raw.encode("utf-8"))           # byte-exact, no newline translation
         try:
             parsed = tomllib.loads(raw)
         except tomllib.TOMLDecodeError as exc:
@@ -850,7 +851,12 @@ def _patch_codex_config(
             # an existing table keeps everything but the database, which
             # follows an explicit --db: one line replaced or appended, the
             # user's comments untouched, the result parsed before it is written
-            current = ((parsed["mcp_servers"]["skillmem"] or {}).get("env") or {}).get("SKILLMEM_DB")
+            entry = parsed["mcp_servers"]["skillmem"]
+            env_tbl = entry.get("env") if isinstance(entry, dict) else None
+            if not isinstance(entry, dict) or (env_tbl is not None and not isinstance(env_tbl, dict)):
+                return {"changed": False, "reason": "[mcp_servers.skillmem] has an unexpected "
+                        "shape; edit it by hand", "backup": str(backup)}
+            current = (env_tbl or {}).get("SKILLMEM_DB")
             if db_env and current != db_env:
                 new_raw = _codex_set_db(raw, db_env)
                 try:

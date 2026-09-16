@@ -801,3 +801,50 @@ def test_atomic_write_follows_symlink_and_keeps_mode_and_crlf(home):
     cli_mod._atomic_write_text(link, 'model = "y"\r\n')
     assert link.is_symlink() and target.read_bytes() == b'model = "y"\r\n'
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+# --- round 9: last P3s from the first clean gate ---------------------------
+
+def test_codex_update_keeps_crlf_on_every_line_and_backup_is_byte_exact(home):
+    import sys, tomllib
+    from skillmem import cli as cli_mod
+    toml = home / ".codex" / "config.toml"
+    toml.parent.mkdir(parents=True)
+    mcp = Path(sys.executable).parent / "skillmem-mcp"
+    toml.write_bytes(b'[mcp_servers.skillmem]\r\ncommand = "mcp"\r\n[mcp_servers.skillmem.env]\r\n'
+                     b'SKILLMEM_DB = "/old"\r\nSKILLMEM_AGENT = "codex"\r\n')
+    original = toml.read_bytes()
+    assert cli_mod._patch_codex_config(toml, mcp, db_env="/new")["changed"]
+    data = toml.read_bytes()
+    assert b"\n" not in data.replace(b"\r\n", b"")          # every line still CRLF
+    assert tomllib.loads(data.decode())["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == "/new"
+    backups = list(toml.parent.glob("config.toml.bak.*"))
+    assert backups and backups[0].read_bytes() == original
+    # inserting a key into a CRLF file uses CRLF too
+    toml.write_bytes(b'[mcp_servers.skillmem]\r\ncommand = "mcp"\r\n')
+    assert cli_mod._patch_codex_config(toml, mcp, db_env="/x")["changed"]
+    assert b"\n" not in toml.read_bytes().replace(b"\r\n", b"")
+
+
+def test_codex_malformed_entry_is_refused_not_a_traceback(home):
+    import sys
+    from skillmem import cli as cli_mod
+    toml = home / ".codex" / "config.toml"
+    toml.parent.mkdir(parents=True)
+    mcp = Path(sys.executable).parent / "skillmem-mcp"
+    for text in ('[mcp_servers]\nskillmem = "s"\n',
+                 '[mcp_servers.skillmem]\ncommand = "mcp"\nenv = 5\n'):
+        toml.write_text(text, encoding="utf-8")
+        r = cli_mod._patch_codex_config(toml, mcp, db_env="/new")
+        assert r["changed"] is False and "by hand" in r["reason"], r
+        assert toml.read_text(encoding="utf-8") == text
+
+
+def test_kind_repair_catches_vertical_tab_and_form_feed(home):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="n", title="t", body="b", kind="note"))
+    for junk in ("my\x0bnotes", "my\x0cnotes"):
+        conn.execute("UPDATE memory_items SET kind = ? WHERE slug = 'n'", (junk,))
+        conn.commit()
+        S.init_schema(conn)
+        assert conn.execute("SELECT kind FROM memory_items WHERE slug='n'").fetchone()[0] == "my notes"

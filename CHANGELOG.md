@@ -44,8 +44,8 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   now propagates instead of reading as "nothing to do".
 - `kind` is validated on write — `[a-z0-9_-][a-z0-9_ -]{0,31}` after
   lower-casing, trimming and collapsing whitespace — and existing rows are
-  normalised once on the next open (a write) — case, ASCII whitespace and
-  NBSP; a pre-0.11 `visibility` is lower-cased and space-trimmed, and one
+  normalised once on the next open (a write) — case, runs of space, tab,
+  CR, LF, VT, FF and NBSP; a pre-0.11 `visibility` is lower-cased and space-trimmed, and one
   outside `public`/`shared`/`private` becomes `private`, so old rows stay
   updatable. Filters are
   case-insensitive; a filter nothing can match returns nothing. Export refuses
@@ -93,9 +93,9 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   opencode — and updates an existing entry's database in place (Codex: one
   line inside `[mcp_servers.skillmem.env]`, written atomically through a
   symlink with mode and line endings kept, and only if the parsed file
-  differs from the old one in nothing else; an inline `env = {...}` table
-  or a multi-line value is refused with "edit by hand"); without `--db` an
-  existing entry is left alone. `--db` reaches scheduled jobs (re-run
+  differs from the old one in nothing else — an inline `env = {...}` table
+  or anything the edit cannot prove harmless is refused with "edit by
+  hand"); without `--db` an existing entry is left alone. `--db` reaches scheduled jobs (re-run
   `schedule install` after upgrading). `uninstall --purge-db` removes the
   DB, its `-wal`/`-shm`, its namespaced body files and the legacy-named
   files it references (a second database referencing the same legacy file
