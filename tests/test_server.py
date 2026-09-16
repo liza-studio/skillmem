@@ -229,3 +229,41 @@ def test_reinforce_gated_by_visibility(client):
     assert r.status_code == 404
     r = client.post("/reinforce/carol-private-skill", headers=auth("carol"))
     assert r.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# round 25: what the control round found in the core
+# --------------------------------------------------------------------------- #
+
+GENERIC = "deployment database migration rollback production checklist for the release train"
+
+
+def test_conflict_candidates_never_name_what_the_writer_cannot_read(client):
+    """A 409 that quotes another agent's private title is a read through the boundary."""
+    write(client, "alice", "private-acquisition", visibility="private", body=GENERIC)
+    client_titles = client.post("/write", headers=auth("bob"), json={
+        "slug": "bob-checklist", "title": "deployment checklist", "body": GENERIC,
+        "kind": "note", "visibility": "private", "check_conflicts": True,
+    })
+    assert client_titles.status_code == 200, client_titles.text   # nothing bob can see overlaps
+    assert "private-acquisition" not in client_titles.text
+    # the same overlap against bob's OWN record is still reported
+    r = client.post("/write", headers=auth("bob"), json={
+        "slug": "bob-checklist-2", "title": "deployment checklist again", "body": GENERIC,
+        "kind": "note", "visibility": "private", "check_conflicts": True,
+    })
+    assert r.status_code == 409 and "bob-checklist" in r.text and "private-acquisition" not in r.text
+
+
+def test_update_by_an_agent_marks_the_text_as_agent_written(client):
+    """An owner-authored row rewritten over HTTP is no longer owner text."""
+    from skillmem import storage as S
+
+    conn = S.connect(_db_of(client))
+    S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="owner-rule", kind="note", title="rule", body="v1",
+                                visibility="public", agent="alice", origin="owner"))
+    r = client.post("/update/owner-rule", headers=auth("alice"), json={"body": "v2", "reason": "edit"})
+    assert r.status_code == 200, r.text
+    row = S.get(conn, "owner-rule")
+    assert row.origin == "agent" and row.agent == "alice"

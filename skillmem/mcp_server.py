@@ -229,6 +229,7 @@ def _tool_update(args: dict[str, Any]) -> list[TextContent]:
     if args.get("project") is not None:
         existing.project = args["project"]
     existing.agent = _agent()
+    existing.origin = "agent"          # the words are the agent's now, whoever wrote v1
     if args.get("tags") is not None:
         existing.tags = list(args["tags"])
     if args.get("topics") is not None:

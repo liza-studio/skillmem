@@ -20,7 +20,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Callable, Any, Iterable, Iterator
 
 from platformdirs import user_data_dir
 
@@ -1103,6 +1103,7 @@ def upsert(
     reason: str | None = None,
     force: bool = False,
     check_conflicts: bool = False,
+    conflict_filter: Callable[[dict[str, Any]], bool] | None = None,
     links: Iterable[str] | None = None,
     restore_strength: bool = False,
     explicit: set[str] | None = None,
@@ -1172,7 +1173,7 @@ def upsert(
         # Conflict check runs BEFORE the transaction so we hold no write lock
         # while we're scanning FTS5 — keeps concurrent searchers responsive.
         if check_conflicts and not force:
-            conflicts = find_conflicts(conn, item.title, item.body)
+            conflicts = find_conflicts(conn, item.title, item.body, visible=conflict_filter)
             if conflicts:
                 raise MemoryConflict(
                     "duplicate-candidates:" + json.dumps(conflicts, ensure_ascii=False)
@@ -1262,6 +1263,11 @@ def upsert(
             changed["topics"] = topics
         if revive and existing["deleted_at"] is not None:
             changed["deleted_at"] = None
+        if "ttl_days" in changed:
+            # a new TTL is a new deadline; storing ttl_days alone left
+            # freshness_until as it was and the expiry never came
+            ttl = changed["ttl_days"]
+            changed["freshness_until"] = now + ttl * 86400 if ttl else None
         if "tags" in changed or "topics" in changed:
             # tags/topics are part of the lexical index — a tag added to an
             # unchanged body must be searchable, so the stems follow. Built
@@ -1913,8 +1919,13 @@ def find_conflicts(
     threshold: float = 0.7,
     candidates: int = 5,
     exclude_slug: str | None = None,
+    visible: Callable[[dict[str, Any]], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Return existing memories whose word content overlaps the new one.
+
+    ``visible`` gets ``{"visibility", "topics", "agent"}`` of each candidate
+    and drops the ones the caller may not see: a 409 that names another
+    agent's private title is a read through the trust boundary.
 
     Uses FTS5 BM25 to surface candidates (cheap), then computes asymmetric
     inclusion overlap ``|A ∩ B| / min(|A|, |B|)`` on the bag of words: if 70%
@@ -1932,7 +1943,8 @@ def find_conflicts(
         return []
     try:
         rows = conn.execute(
-            "SELECT m.id, m.slug, m.title, m.body FROM mem_fts_stem "
+            "SELECT m.id, m.slug, m.title, m.body, m.visibility, m.topics, m.agent "
+            "FROM mem_fts_stem "
             "JOIN memory_items m ON m.id = mem_fts_stem.rowid "
             "WHERE mem_fts_stem MATCH ? AND m.deleted_at IS NULL "
             "ORDER BY bm25(mem_fts_stem) LIMIT ?",
@@ -1946,6 +1958,11 @@ def find_conflicts(
     conflicts: list[dict[str, Any]] = []
     for row in rows:
         if exclude_slug and row["slug"] == exclude_slug:
+            continue
+        if visible is not None and not visible({
+            "visibility": row["visibility"], "agent": row["agent"],
+            "topics": _parse_json_list(row["topics"]),
+        }):
             continue
         other = _word_bag(row["title"] + "\n" + row["body"])
         if not other:

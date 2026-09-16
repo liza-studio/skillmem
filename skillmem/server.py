@@ -344,6 +344,7 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
             result = S.upsert(
                 conn, item,
                 check_conflicts=req.check_conflicts,
+                conflict_filter=lambda row: _visible_to(row, agent),
                 links=S.extract_wikilinks(req.body),
                 explicit=set(req.model_fields_set) & {"kind", "project", "tags", "topics", "ttl_days"},
             )
@@ -387,6 +388,10 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         # Authorship stays with whoever created the record; an editor is not an
         # author. Only fill it in when the record never had one.
         existing.agent = original_author or agent.name
+        # The words are now an agent's, whoever created the record: an
+        # owner-authored row rewritten over HTTP kept origin=owner, and the
+        # owner would re-trust text they never wrote.
+        existing.origin = "agent"
         try:
             result = S.upsert(
                 conn, existing, reason=req.reason,

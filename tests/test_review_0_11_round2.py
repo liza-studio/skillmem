@@ -1112,3 +1112,30 @@ def test_migrate_on_identical_text_keeps_provenance(home, tmp_path):
     MG.import_dir(conn, src)
     row = conn.execute("SELECT origin, trusted_at FROM memory_items WHERE slug='rule-x'").fetchone()
     assert row["origin"] == "owner" and row["trusted_at"] is not None
+
+
+def test_same_text_write_with_new_ttl_moves_the_deadline(home: Path):
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="ttl-probe", kind="note", title="t", body="same words here"))
+    assert S.get(conn, "ttl-probe").freshness_until is None
+    S.upsert(conn, S.MemoryItem(slug="ttl-probe", kind="note", title="t", body="same words here", ttl_days=1),
+             explicit={"ttl_days"})
+    row = S.get(conn, "ttl-probe")
+    assert row.ttl_days == 1 and row.freshness_until is not None
+    assert row.freshness_until - row.updated_at == 86400
+    S.upsert(conn, S.MemoryItem(slug="ttl-probe", kind="note", title="t", body="same words here", ttl_days=3),
+             explicit={"ttl_days"})
+    row = S.get(conn, "ttl-probe")
+    assert row.ttl_days == 3 and row.freshness_until - row.updated_at == 3 * 86400
+
+
+def test_mcp_update_marks_the_text_as_agent_written(home: Path, monkeypatch):
+    from skillmem import mcp_server as M
+    monkeypatch.setenv("SKILLMEM_DB", str(home / "memory.db"))
+    monkeypatch.setattr(M, "_CONN", None)
+    conn = _conn(home)
+    S.upsert(conn, S.MemoryItem(slug="owner-rule-2", kind="note", title="rule", body="v1",
+                                agent="owner", origin="owner"))
+    out = json.loads(M._tool_update({"slug": "owner-rule-2", "body": "v2", "reason": "edit"})[0].text)
+    assert out.get("ok"), out
+    assert S.get(_conn(home), "owner-rule-2").origin == "agent"
