@@ -94,3 +94,23 @@ def test_launchd_plist_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert plist["ProgramArguments"][1:] == ["decay", "--days", "14"]
     assert plist["StartCalendarInterval"] == {"Hour": 4, "Minute": 15}
     assert any("load" in c for cmd in calls for c in cmd)
+
+
+def test_schtasks_command_carries_the_data_dir_overrides(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(SCHED.sys, "platform", "win32")
+    monkeypatch.setenv("SKILLMEM_HOME", r"C:\Data\sm")
+    monkeypatch.setenv("SKILLMEM_DB", r"C:\Data\sm\other.db")
+    calls: list[list[str]] = []
+
+    class _P:
+        returncode = 0
+        stdout = stderr = ""
+
+    monkeypatch.setattr(SCHED.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _P())
+    SCHED._schtasks_install()
+    trs = [c[c.index("/TR") + 1] for c in calls]
+    assert len(trs) == 2
+    for tr in trs:
+        assert tr.startswith('cmd /c "set "') and tr.endswith('"')
+        assert 'set "SKILLMEM_HOME=C:\\Data\\sm"' in tr and 'set "SKILLMEM_DB=C:\\Data\\sm\\other.db"' in tr
+        assert "&& " in tr and "skillmem.exe" in tr.split("&& ")[-1]

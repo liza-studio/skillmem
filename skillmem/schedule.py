@@ -148,10 +148,20 @@ def _launchd_status() -> list[str]:
 # win32: schtasks
 # --------------------------------------------------------------------------- #
 
-def _win_tr(argv: list[str]) -> str:
-    """Command string for /TR: paths with spaces go in inner quotes."""
+def _win_tr(argv: list[str], env: dict[str, str] | None = None) -> str:
+    """Command string for /TR: paths with spaces go in inner quotes.
+
+    schtasks has no environment block, so the overrides the install ran under
+    (see ``_job_env``) are set inside a ``cmd /c`` wrapper — without it a
+    Windows ``--db`` user's nightly decay ran against the default database
+    while launchd/cron/systemd carried the variables.
+    """
     quoted = [f'"{a}"' if " " in a else a for a in argv]
-    return " ".join(quoted)
+    cmd = " ".join(quoted)
+    if env:
+        sets = " && ".join(f'set "{k}={v}"' for k, v in env.items())
+        cmd = f'cmd /c "{sets} && {cmd}"'
+    return cmd
 
 
 def _schtasks_install() -> list[str]:
@@ -164,7 +174,7 @@ def _schtasks_install() -> list[str]:
     }
     for name, argv in jobs.items():
         task = _WIN_TASKS[name]
-        cmd = ["schtasks", "/Create", "/F", "/TN", task, "/TR", _win_tr(argv), *specs[name]]
+        cmd = ["schtasks", "/Create", "/F", "/TN", task, "/TR", _win_tr(argv, _job_env()), *specs[name]]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise click.ClickException(

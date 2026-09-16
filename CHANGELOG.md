@@ -137,6 +137,15 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
 - `/update` and `mem_update` mark the rewritten text `origin=agent`: an
   owner-authored row edited by an agent kept `origin=owner`, so the owner
   would re-trust words they never wrote (approval was already dropped).
+- `skillmem pack remove` soft-deletes only the rows the import wrote
+  (`agent = import:<pack>`); a user's own note filed under `pack:<name>` used
+  to go with it.
+- Dump file names: a clean slug that already ends in `__<8 hex>` gets its own
+  hash too, so it cannot share a file with the sanitised form of another slug
+  (one of the two records was silently missing from the dump).
+- Windows: `schedule install` wraps the task command in `cmd /c` with
+  `SKILLMEM_HOME`/`SKILLMEM_DB` set, so `--db` reaches scheduled jobs there
+  as it does under launchd, cron and systemd.
 - `skillmem skills` (strength list) was unreachable behind the `skills` pack
   group — it is `skillmem skills-top`.
 - MCP `limit` is bounded (1..100); `mem_write`/`mem_update` no longer advertise

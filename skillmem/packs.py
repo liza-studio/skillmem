@@ -316,10 +316,14 @@ def list_packs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def remove_pack(conn: sqlite3.Connection, pack: str, *, reason: str) -> list[str]:
-    """Soft-delete every skill imported from ``pack`` (history is kept)."""
+    """Soft-delete every skill imported from ``pack`` (history is kept).
+
+    Only rows the import wrote (``agent = import:<pack>``): a user's own note
+    filed under the same project used to be removed with the pack.
+    """
     rows = conn.execute(
-        "SELECT slug FROM memory_items WHERE project = ? AND deleted_at IS NULL",
-        (f"pack:{pack}",),
+        "SELECT slug FROM memory_items WHERE project = ? AND agent = ? AND deleted_at IS NULL",
+        (f"pack:{pack}", f"import:{pack}"),
     ).fetchall()
     removed = []
     for r in rows:

@@ -35,7 +35,9 @@ def _safe_filename(slug: str) -> str:
     name = _SAFE_FN.sub("-", slug).strip("-")
     if not name:
         name = "untitled"
-    if name != slug:
+    if name != slug or "__" in name:
+        # "a-b__<hash of a/b>" is also what a clean slug may literally be
+        # called; hash those too so the two never share a file
         name += "__" + _hashlib.sha256(slug.encode("utf-8")).hexdigest()[:8]
     return name
 

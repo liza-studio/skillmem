@@ -203,3 +203,11 @@ def test_roundtrip_preserves_created_at(tmp_path, conn):
     import_vault(conn2, tmp_path / "d", skip_auto_memories=False)
     restored = S.get(conn2, "old-note")
     assert restored.created_at == 1_600_000_000
+
+
+def test_dump_file_names_never_collide_between_a_sanitised_and_a_literal_slug():
+    from skillmem.export import _safe_filename
+    sanitised = _safe_filename("a/b")
+    assert sanitised.startswith("a-b__")
+    assert _safe_filename(sanitised) != sanitised        # the literal look-alike gets its own hash
+    assert _safe_filename("plain-slug") == "plain-slug"

@@ -144,3 +144,12 @@ def test_per_agent_copies_of_one_skill_import_once(conn, tmp_path: Path):
     report = P.import_pack(conn, str(root))
     assert report.imported == ["pack-multi-lazy"]
     assert "skills/lazy/SKILL.md" in S.load_body(S.get(conn, "pack-multi-lazy"))
+
+
+def test_remove_pack_leaves_the_users_own_note_in_that_project(conn, pack_dir: Path):
+    P.import_pack(conn, str(pack_dir))
+    S.upsert(conn, S.MemoryItem(slug="owner-note", kind="note", title="mine", body="my own words",
+                                project="pack:somepack", agent="me", origin="owner"))
+    removed = P.remove_pack(conn, "somepack", reason="test")
+    assert "owner-note" not in removed and len(removed) == 2
+    assert S.get(conn, "owner-note") is not None and S.get(conn, "owner-note").deleted_at is None
