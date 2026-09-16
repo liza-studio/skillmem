@@ -753,7 +753,7 @@ def test_codex_existing_entry_is_never_edited_and_the_way_out_is_explained(home)
     assert cli_mod._patch_codex_config(toml, mcp, db_env="/db/one")["changed"]
     before = toml.read_bytes()
     r = cli_mod._patch_codex_config(toml, mcp, db_env="/db/two")
-    assert r["changed"] is False and "uninstall" in r["reason"] and "/db/two" in r["reason"]
+    assert r["changed"] is False and "by hand" in r["reason"] and "/db/two" in r["reason"]
     assert toml.read_bytes() == before                      # untouched, whatever the line endings
     assert cli_mod._patch_codex_config(toml, mcp, db_env="/db/one")["changed"] is False
     assert cli_mod._patch_codex_config(toml, mcp)["changed"] is False
@@ -767,28 +767,6 @@ def test_codex_existing_entry_is_never_edited_and_the_way_out_is_explained(home)
 
 
 # --- round 11: the printed advice must run; history is never approved -------
-
-def test_the_printed_codex_migration_recipe_actually_runs(home, monkeypatch):
-    import sys, json as _json, tomllib
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
-    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
-    base = ["init", "--codex", "--claude-code", "--hooks", "none", "--skip-migrate", "--mcp-binary", mcp]
-    assert CliRunner().invoke(cli_main, ["--db", str(home / "a.db"), *base]).exit_code == 0
-    r = CliRunner().invoke(cli_main, ["--db", str(home / "b.db"), "init", "--codex", "--skip-migrate",
-                                      "--mcp-binary", mcp])
-    assert r.exit_code == 0 and "uninstall --no-claude-code --no-editors" in r.output
-    assert "Done. Open `codex`" not in r.output
-    # run exactly what it printed
-    r = CliRunner().invoke(cli_main, ["uninstall", "--no-claude-code", "--no-editors"])
-    assert r.exit_code == 0, r.output
-    assert "mcpServers" in _json.loads((home / ".claude.json").read_text())   # Claude Code kept
-    assert "skillmem" in _json.loads((home / ".claude.json").read_text())["mcpServers"]
-    assert "skillmem" not in (tomllib.loads((home / ".codex" / "config.toml").read_text()).get("mcp_servers") or {})
-    r = CliRunner().invoke(cli_main, ["--db", str(home / "b.db"), "init", "--codex", "--skip-migrate",
-                                      "--mcp-binary", mcp])
-    assert r.exit_code == 0
-    env = tomllib.loads((home / ".codex" / "config.toml").read_text())["mcp_servers"]["skillmem"]["env"]
-    assert env["SKILLMEM_DB"] == str(home / "b.db")
 
 
 def test_codex_uninstall_refuses_when_it_cannot_prove_the_result(home):
@@ -846,3 +824,53 @@ def test_http_list_carries_trusted_and_json_writes_follow_symlinks(home, monkeyp
     link.symlink_to(target)
     cli_mod._atomic_write_json(link, {"a": 1})
     assert link.is_symlink() and json.loads(target.read_text()) == {"a": 1}
+
+
+
+# --- round 12: advice that does exactly what it says --------------------------
+
+def test_codex_move_advice_is_one_line_by_hand_and_nothing_else(home, monkeypatch):
+    import sys, tomllib
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    assert CliRunner().invoke(cli_main, ["--db", str(home / "a.db"), "init", "--codex",
+                                         "--skip-migrate", "--mcp-binary", mcp]).exit_code == 0
+    r = CliRunner().invoke(cli_main, ["--db", str(home / "b.db"), "init", "--codex",
+                                      "--skip-migrate", "--mcp-binary", mcp])
+    assert r.exit_code == 0
+    assert "SKILLMEM_DB" in r.output and "[mcp_servers.skillmem.env]" in r.output
+    assert "uninstall --no-claude-code" not in r.output and "Done. Open `codex`" not in r.output
+    # the printed line, applied by hand, is all it takes
+    toml = home / ".codex" / "config.toml"
+    text = toml.read_text(encoding="utf-8").replace(str(home / "a.db"), str(home / "b.db"))
+    toml.write_text(text, encoding="utf-8")
+    assert tomllib.loads(text)["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == str(home / "b.db")
+    # --all-agents with Codex refused must not claim 6 agents
+    r = CliRunner().invoke(cli_main, ["--db", str(home / "c.db"), "init", "--all-agents",
+                                      "--hooks", "none", "--skip-migrate", "--mcp-binary", mcp])
+    assert r.exit_code == 0 and "6 agents" not in r.output and "Codex: nothing changed" in r.output
+
+
+def test_uninstall_surfaces_the_codex_refusal_and_keeps_crlf_backup(home, monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    toml = home / ".codex" / "config.toml"
+    toml.parent.mkdir(parents=True)
+    text = ('developer_instructions = """\nExample:\n[mcp_servers.skillmem]\ncommand = "x"\n"""\n\n'
+            '[mcp_servers.skillmem]\ncommand = "mcp"\n[mcp_servers.skillmem.env]\nSKILLMEM_DB = "/old"\n')
+    toml.write_text(text, encoding="utf-8")
+    r = CliRunner().invoke(cli_main, ["uninstall", "--no-claude-code", "--no-editors"])
+    assert r.exit_code == 0, r.output
+    assert "by hand" in r.output                          # the refusal is in the report's warnings
+    assert toml.read_text(encoding="utf-8") == text
+    # CRLF file: removed, backup byte-exact
+    crlf = (b'[mcp_servers]\r\n[mcp_servers.skillmem]\r\ncommand = "mcp"\r\n'
+            b'[mcp_servers.skillmem.env]\r\nSKILLMEM_DB = "/old"\r\n[other]\r\ny = 1\r\n')
+    toml.write_bytes(crlf)
+    from skillmem import cli as cli_mod
+    r = cli_mod._unpatch_codex_config(toml)
+    assert r["changed"], r                                # explicit [mcp_servers] header tolerated
+    backups = sorted(toml.parent.glob("config.toml.bak.*"))
+    assert backups and backups[-1].read_bytes() == crlf
+    import tomllib
+    assert tomllib.loads(toml.read_text(encoding="utf-8")) == {"other": {"y": 1}} or \
+           tomllib.loads(toml.read_text(encoding="utf-8")) == {"mcp_servers": {}, "other": {"y": 1}}

@@ -833,10 +833,8 @@ def _patch_codex_config(
                 return {"changed": False, "backup": str(backup),
                         "reason": f"skillmem MCP already configured for "
                                   f"{current or 'the default database'}; to point Codex at "
-                                  f"{db_env}: `skillmem uninstall --no-claude-code --no-editors` "
-                                  f"(removes only the Codex entry) then "
-                                  f"`skillmem --db {db_env} init --codex`, or set "
-                                  f"SKILLMEM_DB under [mcp_servers.skillmem.env] by hand"}
+                                  f"{db_env}, set SKILLMEM_DB = {_toml_str(db_env)} under "
+                                  f"[mcp_servers.skillmem.env] in {config_toml} by hand"}
             return {"changed": False, "reason": "skillmem MCP already configured",
                     "backup": str(backup)}
 
@@ -880,12 +878,12 @@ def _unpatch_codex_config(config_toml: Path) -> dict[str, Any]:
 
     if not config_toml.exists():
         return {"changed": False, "reason": "no config.toml"}
-    raw = config_toml.read_text(encoding="utf-8")
+    raw = config_toml.read_bytes().decode("utf-8")   # byte-exact backup, CRLF kept
     try:
         parsed = tomllib.loads(raw)
     except tomllib.TOMLDecodeError:
         return {"changed": False, "reason": f"could not parse {config_toml}"}
-    if "skillmem" not in (parsed.get("mcp_servers") or {}):
+    if not isinstance(parsed.get("mcp_servers"), dict) or "skillmem" not in parsed["mcp_servers"]:
         return {"changed": False, "reason": "skillmem MCP not configured"}
 
     out: list[str] = []
@@ -912,6 +910,8 @@ def _unpatch_codex_config(config_toml: Path) -> dict[str, Any]:
         expect.pop("mcp_servers")
     try:
         got = json.loads(json.dumps(tomllib.loads(new_raw), default=str))
+        if got.get("mcp_servers") == {}:
+            got.pop("mcp_servers")   # an explicit, now-empty [mcp_servers] header
     except tomllib.TOMLDecodeError:
         got = None
     if got != expect:
@@ -1227,6 +1227,9 @@ def init(
         ("Windsurf", windsurf), ("Gemini CLI", gemini), ("opencode", opencode),
     ) if on]
     if len(wired) > 1:
+        if codex and not report.get("codex_config", {}).get("changed", True):
+            click.echo("Codex: nothing changed — see codex_config.reason above.", err=True)
+            wired.remove("Codex")
         click.echo(f"Done. {', '.join(wired)} — one skill database, "
                    f"{len(wired)} agents.")
     elif codex:
@@ -1269,10 +1272,7 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
                     del data["mcpServers"]["skillmem"]
                     if not data["mcpServers"]:
                         del data["mcpServers"]
-                    claude_json.write_text(
-                        json.dumps(data, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
+                    _atomic_write_json(claude_json, data)
                     report["removed"].append(f"mcpServers.skillmem (backup: {backup})")
             except json.JSONDecodeError:
                 report["warnings"].append(f"could not parse {claude_json}")
@@ -1302,10 +1302,7 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
                 if changed:
                     backup = settings_json.with_suffix(f".json.bak.{int(_time.time())}")
                     backup.write_text(settings_json.read_text(encoding="utf-8"))
-                    settings_json.write_text(
-                        json.dumps(data, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
+                    _atomic_write_json(settings_json, data)
                     report["removed"].append(f"hooks pointing to skillmem (backup: {backup})")
             except json.JSONDecodeError:
                 report["warnings"].append(f"could not parse {settings_json}")
@@ -1315,6 +1312,8 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
         if r.get("changed"):
             report["removed"].append(
                 f"mcp_servers.skillmem from config.toml (backup: {r['backup']})")
+        elif r.get("reason") and "by hand" in r["reason"]:
+            report["warnings"].append(f"codex: {r['reason']}")
 
     if editors:
         for agent, (parts, label) in MCP_JSON_AGENTS.items():

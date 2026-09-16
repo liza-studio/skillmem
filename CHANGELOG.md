@@ -95,14 +95,13 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
   opencode. Claude Code, Cursor, Windsurf, Gemini CLI and opencode update an
   existing entry's database in place (JSON, rewritten atomically). Codex's
   hand-written TOML is never edited in place: an existing entry keeps its
-  database and `init` says how to move it (`skillmem uninstall
-  --no-claude-code --no-editors`, which removes only the Codex entry, then
-  `skillmem --db X init --codex` — or one line under
-  `[mcp_servers.skillmem.env]`). `uninstall` removes the Codex table only
-  when the result provably equals the old file minus that table; otherwise
-  it refuses. Without `--db` an existing entry is left alone everywhere.
-  Config files are written atomically, through a symlink to its target,
-  with mode kept (JSON and TOML alike). `--db` reaches scheduled jobs (re-run
+  database and `init` prints the one line to set by hand
+  (`SKILLMEM_DB = "X"` under `[mcp_servers.skillmem.env]`). `uninstall`
+  removes the Codex table only when the result provably equals the old file
+  minus that table; otherwise it leaves the file alone and says so in
+  `warnings`. Without `--db` an existing entry is left alone everywhere.
+  `init` and `uninstall` write config files atomically, through a symlink
+  to its target, with mode kept (JSON and TOML alike). `--db` reaches scheduled jobs (re-run
   `schedule install` after upgrading). `uninstall --purge-db` removes the
   DB, its `-wal`/`-shm`, its namespaced body files and the legacy-named
   files it references (a second database referencing the same legacy file
