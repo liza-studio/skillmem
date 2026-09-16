@@ -162,3 +162,27 @@ def test_search_widens_past_a_wall_of_notes(tmp_path, monkeypatch):
                              catch_exceptions=False)
     assert out.exit_code == 0
     assert "skill-recap-hook" in out.output
+
+
+def test_init_rewrites_hooks_from_another_venv_instead_of_doubling(fakehome: Path):
+    """A hook already wired to an older venv is repointed, not duplicated —
+    a doubled Stop hook would recap every session twice."""
+    mcp = str(Path(sys.executable).parent / "skillmem-mcp")
+    _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
+    settings_json = fakehome / ".claude" / "settings.json"
+    settings = json.loads(settings_json.read_text())
+    cmds = lambda s: [h["command"] for g in s["hooks"].values() for grp in g for h in grp["hooks"]]
+    before = cmds(settings)
+    for grp in (g for lst in settings["hooks"].values() for g in lst):
+        for h in grp["hooks"]:
+            if h["command"].endswith("hook session-recap"):
+                h["command"] = "/old/venv/bin/skillmem hook session-recap"
+    settings["hooks"]["Stop"].append(
+        {"hooks": [{"type": "command", "command": "/old/venv/bin/skillmem hook foreign-thing"}]})
+    settings_json.write_text(json.dumps(settings))
+    _run(["init", "--claude-code", "--mcp-binary", mcp, "--skip-migrate"])
+    after = cmds(json.loads(settings_json.read_text()))
+    assert len(after) == len(before) + 1                      # only the foreign hook is extra
+    assert "/old/venv/bin/skillmem hook foreign-thing" in after  # untouched
+    assert not any(c.endswith("/old/venv/bin/skillmem hook session-recap") for c in after)
+    assert sum(c.endswith("hook session-recap") for c in after) == sum(c.endswith("hook session-recap") for c in before)

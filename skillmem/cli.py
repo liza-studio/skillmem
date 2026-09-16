@@ -957,8 +957,11 @@ def _patch_settings_hook(
 ) -> dict[str, Any]:
     """Add a hook into ``~/.claude/settings.json`` if not already present.
 
-    Dedup is by the full command (not the binary path): one event can carry
-    several distinct skillmem hooks (verify-gate + auto-recall).
+    Dedup is by the skillmem subcommand (argv after the binary), not the
+    binary path: one event can carry several distinct skillmem hooks
+    (verify-gate + auto-recall), while the same hook wired to an older venv
+    is rewritten in place rather than doubled — a doubled Stop hook would
+    recap every session twice.
     """
     import time as _time
     data: dict[str, Any] = {}
@@ -983,9 +986,17 @@ def _patch_settings_hook(
     cmd_str = _hook_cmd(binary, args)
     for group in event_hooks:
         for h in group.get("hooks", []) or []:
-            if h.get("command", "") == cmd_str:
+            cmd = h.get("command", "")
+            if cmd == cmd_str:
                 return {"changed": False,
                         "reason": f"{event} hook already present: {' '.join(args)}",
+                        "backup": str(backup) if backup else None}
+            argv = _skillmem_argv(cmd)
+            if argv is not None and argv[1:] == list(args):
+                h["command"] = cmd_str
+                _atomic_write_json(settings_json, data)
+                return {"changed": True,
+                        "updated": f"hooks.{event}: {' '.join(args)} now runs {binary}",
                         "backup": str(backup) if backup else None}
     group: dict[str, Any] = {
         "hooks": [{"type": "command", "command": cmd_str, "timeout": timeout}]

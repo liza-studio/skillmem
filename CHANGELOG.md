@@ -127,6 +127,9 @@ parts nobody had reviewed end to end: the HTTP server, body files, packs.
 - MCP `limit` is bounded (1..100); `mem_write`/`mem_update` no longer advertise
   an ignored `agent` field; "9 tools", not 8. `visibility` is validated on
   every channel (`public`/`shared`/`private`); HTTP omits it to mean "keep".
+- `init --claude-code` run from a new venv (a moved install, pip → pipx) repoints
+  a hook it already wired instead of adding a second copy — two copies of the
+  Stop hook recapped every session twice.
 - Upgrading: re-run `skillmem init --claude-code` (and `schedule install`) to
   receive the deny rule, the hook prune and the job environment. A row whose
   pre-0.11 `kind` still fails validation after normalisation (non-ASCII,
