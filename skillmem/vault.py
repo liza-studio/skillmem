@@ -302,6 +302,9 @@ def _run_import(conn, root, assets_root, kind, project_override,
                 # A plain Obsidian note carries no strength to restore — an
                 # ordinary sync must keep what the row earned.
                 actor="import",     # the only appender that named no actor
+                # import-vault is the owner restoring their own dump at a
+                # terminal, so it may put a record's kind back as the dump has it
+                owner_call=True,
                 restore_strength="strength" in extras or _is_auto_memory(meta),
                 revive=_is_auto_memory(meta),   # a dump restores a deleted slug too
                 explicit=None,
