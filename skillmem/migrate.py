@@ -26,7 +26,7 @@ from typing import Any
 import yaml
 
 from . import storage as _storage
-from .storage import MemoryItem, extract_wikilinks, upsert
+from .storage import owner_present, MemoryItem, extract_wikilinks, upsert
 
 
 def _resolve_default_source() -> Path:
@@ -227,9 +227,9 @@ def import_file(conn, path: Path, *, force: bool = True,
         reason="migrated from .md" if existed else None,
         force=force,
         links=extract_wikilinks(body),
-        # `skillmem migrate` reads the owner's own markdown at their terminal,
-        # so it may restore a record's kind as the file has it
-        owner_call=True,
+        # only with a person at the terminal: an agent can author the .md and
+        # then run `skillmem migrate` itself, which is how a relabel got through
+        owner_call=owner_present(),
     )
     return "updated" if existed else "inserted"
 

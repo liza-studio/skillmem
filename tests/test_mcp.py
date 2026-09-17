@@ -508,13 +508,67 @@ def test_the_briefing_names_the_owner_rules_an_agent_rewrote(mcp):
     assert "gate-rule" in brief["awaiting_reapproval"]
 
 
+def test_the_owner_signal_is_the_terminal_not_the_module(mcp, monkeypatch):
+    """`skillmem write` and `skillmem migrate` are as reachable from Bash as any
+    MCP tool, so the module a call comes from proves nothing."""
+    from skillmem import storage as S
+    import pytest
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="tty-rule", kind="feedback", title="rule",
+                                body="deploy only through the gate, always",
+                                origin="owner"), owner_call=True)
+    S.set_trust(conn, "tty-rule", trusted=True)
+    monkeypatch.setattr(S.sys.stdin, "isatty", lambda: False, raising=False)
+    monkeypatch.setattr(S.sys.stdout, "isatty", lambda: False, raising=False)
+    assert S.owner_present() is False
+    # what the CLI now passes with no terminal present
+    with pytest.raises(S.SealedRecord):
+        S.upsert(conn, S.MemoryItem(slug="tty-rule", kind="note", title="rule",
+                                    body="deploy only through the gate, always"),
+                 explicit={"kind"}, owner_call=S.owner_present())
+    assert conn.execute("SELECT kind FROM memory_items WHERE slug='tty-rule'"
+                        ).fetchone()["kind"] == "feedback"
+
+
+def test_the_guard_fires_when_the_caller_names_no_fields(mcp):
+    """explicit=None means "apply everything", so it includes the kind. migrate,
+    packs and the importer all pass None, and the guard used to skip them."""
+    from skillmem import storage as S
+    import pytest
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="none-rule", kind="feedback", title="rule",
+                                body="the owner's rule with an explicit set",
+                                origin="owner"), owner_call=True)
+    S.set_trust(conn, "none-rule", trusted=True)
+    with pytest.raises(S.SealedRecord):
+        S.upsert(conn, S.MemoryItem(slug="none-rule", kind="note", title="rule",
+                                    body="a rewritten body from a markdown file"),
+                 explicit=None, reason="migrated from .md")
+    assert conn.execute("SELECT kind FROM memory_items WHERE slug='none-rule'"
+                        ).fetchone()["kind"] == "feedback"
+
+
+def test_reinforce_refuses_an_archived_record(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    _payload(mcp._tool_learn({"slug": "skill-arch", "title": "arch", "trigger": "a trigger",
+                              "steps": "the steps", "outcome": "success", "lessons": None}))
+    before = conn.execute("SELECT strength FROM memory_items WHERE slug='skill-arch'"
+                          ).fetchone()["strength"]
+    _payload(mcp._tool_archive({"slug": "skill-arch"}))
+    assert S.reinforce(conn, "skill-arch", evidence="user_confirmed") is None
+    after = conn.execute("SELECT strength, access_count FROM memory_items "
+                         "WHERE slug='skill-arch'").fetchone()
+    assert after["strength"] == before and after["access_count"] == 0
+
+
 def test_every_upsert_caller_is_deliberate_about_the_guard():
     """The audit three rounds of P1s were missing: an owner surface must say
     owner_call=True, an agent surface must never claim it. A surface added
     without a decision is guarded by default; this only checks the decisions."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent.parent / "skillmem"
-    owner_surfaces = {"cli.py", "migrate.py", "vault.py"}     # a person at a terminal
+    owner_surfaces = {"cli.py", "migrate.py", "vault.py"}     # ask the terminal
     agent_surfaces = {"mcp_server.py", "server.py", "packs.py"}
     for name in owner_surfaces | agent_surfaces:
         lines = (root / name).read_text().splitlines()
@@ -523,7 +577,10 @@ def test_every_upsert_caller_is_deliberate_about_the_guard():
                 continue
             window = "\n".join(lines[i:i + 16])
             if name in owner_surfaces:
-                assert "owner_call=True" in window, f"{name}:{i + 1} missing owner_call"
+                # the TTY, never a hardcoded True: an agent runs these commands too
+                assert "owner_call=" in window and "owner_present()" in window, \
+                    f"{name}:{i + 1} must derive owner_call from owner_present()"
+                assert "owner_call=True" not in window, f"{name}:{i + 1} hardcodes owner_call"
             else:
                 assert "owner_call" not in window, f"{name}:{i + 1} claims owner_call"
 

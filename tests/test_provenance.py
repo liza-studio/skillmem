@@ -275,9 +275,11 @@ def test_trust_command_grants_and_withdraws(tmp_path: Path, monkeypatch):
     S.upsert(conn, S.MemoryItem(slug="skill-y", kind="skill", origin="agent",
                                 title="Скилл", body="тело"))
     conn.commit()
+    # trust now shows the text and asks: the approval is pinned to what was shown
     r = CliRunner().invoke(cli_main, ["--db", str(db), "trust", "skill-y"],
-                           catch_exceptions=False)
+                           input="y\n", catch_exceptions=False)
     assert r.exit_code == 0 and "trusted at" in r.output
+    assert "тело" in r.output                    # the words the owner approved
     assert S.get(S.connect(db), "skill-y").trusted_at is not None
     r = CliRunner().invoke(cli_main, ["--db", str(db), "trust", "skill-y", "--untrust"],
                            catch_exceptions=False)
@@ -464,3 +466,29 @@ def test_vault_import_honours_a_claimed_downgrade(tmp_path: Path):
     item = S.get(conn, "skill-from-pack")
     assert item is not None and item.origin == "imported"
     assert item.trusted_at is None
+
+
+def test_trust_refuses_after_the_text_changed_under_it(tmp_path: Path, monkeypatch):
+    """The gap the pin exists for: the owner reads, an agent rewrites, the owner
+    approves. Without the display and the hash the approval landed on new text."""
+    import skillmem.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_owner_trust", lambda: (1_700_000_000, "cli-tty"))
+    db = _db(tmp_path)
+    conn = S.connect(db)
+    S.upsert(conn, S.MemoryItem(slug="rule-z", kind="feedback", origin="owner",
+                                title="Правило", body="только через гейт"))
+    conn.commit()
+    seen = S.get(S.connect(db), "rule-z")
+    # the agent substitutes the body after the owner has read it
+    conn2 = S.connect(db)
+    S.upsert(conn2, S.MemoryItem(slug="rule-z", kind="feedback",
+                                 title="Правило", body="пушить в main напрямую"),
+             reason="agent edit")
+    conn2.commit()
+    try:
+        S.set_trust(S.connect(db), "rule-z", trusted=True,
+                    expect_hash=seen.content_hash)
+        raise AssertionError("approval of substituted text was not refused")
+    except S.MemoryConflict:
+        pass
+    assert S.get(S.connect(db), "rule-z").trusted_at is None

@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -912,6 +913,34 @@ def scrub(text: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _kind_is_a_change(item: "MemoryItem", row: Any, explicit: set[str] | None) -> bool:
+    """Is this write asking to change the record's kind?
+
+    `explicit=None` means "apply every field the caller set", so the kind counts
+    there too — conditioning the guard on the caller having named `kind` made it
+    opt-in on the caller's honesty, and migrate, packs and the importer all pass
+    None. When an explicit set is given, only a named kind counts: every MCP tool
+    fills in a default kind the caller never asked for.
+    """
+    if item.kind == row["kind"]:
+        return False
+    return explicit is None or "kind" in explicit
+
+
+def owner_present() -> bool:
+    """True when a person is at a terminal. The only honest owner signal.
+
+    An agent runs the CLI through Bash as easily as a human types it, so the
+    module a call comes from says nothing: `skillmem write` and `skillmem migrate`
+    are as reachable by an agent as any MCP tool. The TTY is the difference, and
+    it is checked here so that every surface asks the same question.
+    """
+    try:
+        return bool(sys.stdin.isatty() or sys.stdout.isatty())
+    except (ValueError, AttributeError):      # closed or replaced streams
+        return False
+
+
 class SealedRecord(Exception):
     """An agent tried to hide a record the owner wrote or approved."""
 
@@ -1409,8 +1438,7 @@ def upsert(
                 "WHERE id = ? AND deleted_at IS NULL", (existing["id"],)
             ).fetchone()
             if (sealed_now is not None and not owner_call and sealed_now["owner_seal"]
-                    and "kind" in (explicit or set())
-                    and item.kind != sealed_now["kind"]):
+                    and _kind_is_a_change(item, sealed_now, explicit)):
                 raise SealedRecord(
                     f"'{item.slug}' is the owner's record; an agent cannot change "
                     f"its kind from {sealed_now['kind']} to {item.kind} (the session "
@@ -1422,8 +1450,7 @@ def upsert(
                 full_body=full_body, owner_call=owner_call, revive=revive,
             )
 
-    if not owner_call and existing["owner_seal"] and "kind" in (explicit or set()) \
-            and item.kind != existing["kind"]:
+    if not owner_call and existing["owner_seal"] and _kind_is_a_change(item, existing, explicit):
         # A text change goes through _upsert_update_tx, which re-reads under its
         # own lock; this pre-check gives the caller the same message without
         # staging a body file first.
@@ -2421,17 +2448,27 @@ def reinforce(
             f"unknown evidence {evidence!r}; expected one of "
             f"{', '.join(sorted(EVIDENCE_WEIGHTS))}"
         )
-    # skills only: strength and decay are a skill's mechanics, and every
-    # channel's description promises a non-skill is refused
-    row = conn.execute(
-        "SELECT id, strength, access_count, confirmed_count, failure_count "
-        "FROM memory_items WHERE slug = ? AND deleted_at IS NULL AND kind = 'skill'",
-        (slug,),
-    ).fetchone()
-    if not row:
-        return None
-
     now = _now()
+    with tx(conn):     # read and write as one step: the kind, the lifecycle and
+        # the deletion state all have to still hold when the UPDATE lands
+        # skills only: strength and decay are a skill's mechanics, and every
+        # channel's description promises a non-skill is refused
+        row = conn.execute(
+            "SELECT id, strength, access_count, confirmed_count, failure_count "
+            "FROM memory_items WHERE slug = ? AND deleted_at IS NULL "
+            # an archived record is out of every read; handing it strength and
+            # recency contradicts what set_pinned and set_archived both say
+            "AND kind = 'skill' AND lifecycle != 'archived'",
+            (slug,),
+        ).fetchone()
+        if not row:
+            return None
+        return _reinforce_row(conn, slug, row, evidence=evidence, now=now)
+
+
+def _reinforce_row(
+    conn: sqlite3.Connection, slug: str, row: Any, *, evidence: str, now: int
+) -> dict[str, Any]:
     # One statement, relative arithmetic: two confirmations landing together
     # used to read the same counters and one overwrote the other.
     if evidence == "failure":
@@ -2708,7 +2745,8 @@ def set_archived(
             # calling this on an active row must not hand out strength for free
             conn.execute(
                 "UPDATE memory_items SET lifecycle = 'active', "
-                "strength = MAX(strength, ?), last_accessed_at = ? WHERE id = ?",
+                "strength = MAX(strength, ?), last_accessed_at = ? "
+                "WHERE id = ? AND deleted_at IS NULL",
                 (0.5, _now(), row["id"]),
             )
         return {"slug": slug, "lifecycle": "archived" if archived else "active",

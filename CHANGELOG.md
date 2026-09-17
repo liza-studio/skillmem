@@ -64,8 +64,25 @@
   restore fires only for a record that is actually archived, not for every
   non-archived dump, which defeated decay on every weekly export/import. The
   importer's own history rows name it ("import") instead of no one.
-- The owner gate fails closed: `upsert` guards unless the caller states it is the
-  owner's own surface (`owner_call=True`, the CLI). Three rounds running, the hole
+- The owner gate fails closed, and the owner signal is the terminal. `upsert`
+  guards unless the caller passes `owner_call`, and the CLI, `migrate` and the
+  vault importer derive it from `owner_present()` — a TTY — rather than asserting
+  it, because an agent runs `skillmem write` through Bash as easily as a person
+  types it. The guard also fires when the caller names no fields at all
+  (`explicit=None` means "apply everything", which includes the kind), so
+  `migrate`, packs and the importer are no longer exempt by omission.
+- `skillmem skills-archive` needs a terminal, like `trust` does. The refusal from
+  `mem_archive` names it as the owner's way, and reachable from Bash it was the
+  same hole under another name — with a history row signed "owner-cli".
+- `skillmem trust` prints the record and asks before approving. A hash pin is
+  worth nothing if the owner approves a slug without seeing the words: an agent
+  rewrite between a separate `cat` and the approval used to become approved text.
+- `mem_reinforce` refuses an archived record and reads and writes inside one
+  transaction: it handed strength and recency to a record that is out of every
+  read, and its `kind = 'skill'` filter was a read-then-write gap of its own.
+- Every write that touches lifecycle, strength, approval or pinning carries
+  `deleted_at IS NULL`, so none of them can land on a record deleted since the
+  read. Three rounds running, the hole
   was a surface that simply did not pass the old opt-in flag — MCP, then HTTP
   `/update`, then HTTP `/write` and `/learn`.
 - Approval is pinned to the text the owner read. `skillmem trust` passes the hash

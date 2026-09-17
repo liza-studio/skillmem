@@ -254,7 +254,9 @@ def write(
     try:
         result = S.upsert(
             conn, item, reason=reason, force=force,
-            owner_call=True,   # the CLI is the owner's own surface (a TTY)
+            # the TTY, not the module: an agent runs this command through Bash
+            # as easily as a person types it
+            owner_call=S.owner_present(),
             check_conflicts=check_conflicts,
             links=S.extract_wikilinks(body_text),
             explicit={p for p in ("kind", "project", "ttl_days")
@@ -365,6 +367,16 @@ def trust_cmd(ctx: click.Context, slug: str, untrust: bool) -> None:
     seen = S.get(conn, slug)
     if seen is None:
         raise click.ClickException(f"no memory with slug '{slug}'")
+    if not untrust:
+        # Show it. The pin is worth nothing if the owner approves a slug without
+        # seeing the words: an agent rewrite between a separate `cat` and this
+        # command was approved text.
+        click.echo(f"--- {seen.slug} [{seen.kind}] ---")
+        click.echo(seen.title)
+        click.echo("")
+        click.echo(S.load_body(seen))
+        click.echo("--- end ---")
+        click.confirm("Approve this text as your own rule?", abort=True)
     try:
         item = S.set_trust(conn, slug, trusted=not untrust,
                            expect_hash=None if untrust else seen.content_hash)
@@ -1931,7 +1943,7 @@ def learn(
     )
     try:
         result = S.upsert(conn, item, links=S.extract_wikilinks(item.body),
-                          owner_call=True,   # typed at the owner's terminal
+                          owner_call=S.owner_present(),   # a person at a terminal
                           # what was typed applies; visibility is never flipped on same text
                           explicit={p for p in ("tags", "project")
                                     if ctx.get_parameter_source(p) == click.core.ParameterSource.COMMANDLINE})
@@ -2199,10 +2211,21 @@ def skills_archive(ctx: click.Context, slug: str, restore: bool) -> None:
     owner wrote or approved — hiding one of those from every read is the owner's
     call, and this is where it is made.
     """
+    at_terminal = S.owner_present()
+    if not restore and not at_terminal:
+        # mem_archive refuses a sealed record and names this command as the
+        # owner's way. Reachable from Bash, it was simply the same hole with a
+        # different name — and it signed the history row "owner-cli".
+        raise SystemExit(
+            "refusing: `skills-archive` needs a person at a terminal (no TTY). "
+            "Run it yourself, not through an agent."
+        )
     conn = _conn(ctx.obj["db_path"])
     try:
-        res = S.set_archived(conn, slug, not restore, by="owner-cli")
-    except ValueError as exc:
+        res = S.set_archived(conn, slug, not restore,
+                             by="owner-cli" if at_terminal else "cli-no-tty",
+                             allow_sealed=at_terminal)
+    except (S.SealedRecord, ValueError) as exc:
         raise SystemExit(str(exc))
     if not res:
         click.echo(f"'{slug}' not found.")
