@@ -47,6 +47,19 @@
 - `skillmem trust` refuses a record that is archived: the nightly sweep can retire
   one between the owner reading it and approving it, and approving something out
   of every read is not what they meant.
+- `import-vault` restores a dump's archived state only with a person at the
+  terminal. An agent can write a `.md` carrying `lifecycle: archived` and run the
+  import, which is hiding a record by another route; without a terminal the
+  record stays visible and the report names it.
+- `skillmem trust` refuses a record whose text can only be shown as an excerpt —
+  a missing body file, or one that does not match the approved hash. Approving on
+  the strength of an excerpt approves text the terminal never displayed. A body
+  file with no recorded hash counts as a mismatch, and a tampered file is never
+  recorded as the previous version in the history chain.
+- An update that touches no row raises instead of reporting success: a record
+  deleted between the read and the write used to be acknowledged as stored.
+- The HTTP layer answers 403 for a refusal on the owner's own record, rather than
+  500.
 - One imported file is all-or-nothing. A refusal partway through left the row
   written and its lifecycle, pin and counters unapplied.
 - HTTP recall no longer answers 500 when its recency bookkeeping meets a write

@@ -518,6 +518,23 @@ def test_the_briefing_names_the_owner_rules_an_agent_rewrote(mcp):
     assert "gate-rule" in brief["awaiting_reapproval"]
 
 
+def test_a_body_file_with_no_recorded_hash_is_not_served(tmp_path, monkeypatch):
+    """An empty content_hash used to switch the comparison off entirely."""
+    from skillmem import storage as S
+    monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SKILLMEM_DB", raising=False)
+    conn = S.connect(tmp_path / "home" / "memory.db"); S.init_schema(conn)
+    big = "the owner's rule about the deploy gate. " * 400
+    S.upsert(conn, S.MemoryItem(slug="no-hash", kind="feedback", title="rule",
+                                body=big, origin="owner"), owner_call=True)
+    item = S.get(conn, "no-hash")
+    assert item.body_path
+    conn.execute("UPDATE memory_items SET content_hash = '' WHERE slug = 'no-hash'")
+    served = S.load_body(S.get(conn, "no-hash"))
+    assert served == S.get(conn, "no-hash").body       # the excerpt, not the file
+    assert "no-hash" in S.mismatched_bodies(conn)
+
+
 def test_an_unnamed_kind_is_not_written(mcp):
     """The guard exempts a kind the caller never named — so the write must not
     apply the dataclass default either, or the record is relabelled anyway."""

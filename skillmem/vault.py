@@ -194,10 +194,14 @@ class VaultReport:
     updated: int = 0
     skipped: int = 0
     failed: list[tuple[str, str]] = None
+    # slugs a dump asked to retire that only the owner may retire
+    skipped_archive: list[str] = None
 
     def __post_init__(self) -> None:
         if self.failed is None:
             self.failed = []
+        if self.skipped_archive is None:
+            self.skipped_archive = []
 
 
 def _iter_md(root: Path) -> Iterable[Path]:
@@ -325,11 +329,20 @@ def _run_import(conn, root, assets_root, kind, project_override,
                         S.set_pinned(conn, slug, False)
                     # a dump of an archived record restores it archived, or the
                     # weekly export would quietly un-retire everything
-                    # allow_sealed: restoring the state a dump RECORDS is not an
-                    # agent hiding a record — the record was already archived when
-                    # it was exported. Without this the owner's own restore failed
-                    # on every sealed record and brought it back active.
-                    S.set_archived(conn, slug, True, by="import", allow_sealed=True)
+                    # allow_sealed only with a person at the terminal. Restoring
+                    # the state a dump RECORDS is not an agent hiding a record —
+                    # but an agent can WRITE a .md file with `lifecycle: archived`
+                    # and run the import, which is hiding a record by another
+                    # route. Without a terminal the record stays visible and the
+                    # report says so: visible-but-unretired is the safe failure.
+                    if S.owner_present():
+                        S.set_archived(conn, slug, True, by="import",
+                                       allow_sealed=True)
+                    else:
+                        try:
+                            S.set_archived(conn, slug, True, by="import")
+                        except S.SealedRecord:
+                            report.skipped_archive.append(slug)
                     if pinned is None and was_pinned and was_pinned["pinned"]:
                         S.set_pinned(conn, slug, True)     # the row's own flag, untouched
                 if pinned is not None:

@@ -1053,6 +1053,12 @@ def _stage_body_file(conn: sqlite3.Connection, slug: str, body: str,
     return dest, dest
 
 
+def read_body_file(body_path: str) -> str | None:
+    """Public alias: callers that must distinguish the file's own bytes from the
+    excerpt load_body falls back to."""
+    return _read_body_file(body_path)
+
+
 def _read_body_file(body_path: str) -> str | None:
     """Read an externalised body, or None if it is not there (a GC'd or moved
     file must not take down the write that only wanted it for history)."""
@@ -1138,7 +1144,7 @@ def mismatched_bodies(conn: sqlite3.Connection) -> list[str]:
         except OSError:
             bad.append(r["slug"])
             continue
-        if r["content_hash"] and _hash(r["title"], text) != r["content_hash"]:
+        if not r["content_hash"] or _hash(r["title"], text) != r["content_hash"]:
             bad.append(r["slug"])
     return bad
 
@@ -1163,7 +1169,9 @@ def load_body(item: "MemoryItem") -> str:
     # words underneath the approval, with trusted_at, content_hash, updated_at and
     # the history chain all untouched. Serve the stored excerpt instead, so text
     # nobody approved never reaches a model as a rule.
-    if item.content_hash and _hash(item.title, text) != item.content_hash:
+    # an empty content_hash used to disable the comparison entirely; a row with a
+    # body file and no hash cannot be shown to a model as approved text either
+    if not item.content_hash or _hash(item.title, text) != item.content_hash:
         log.warning(
             "body file for '%s' does not match the approved text (%s) — "
             "serving the stored excerpt; run `skillmem verify` and re-approve",
@@ -1565,6 +1573,7 @@ def _upsert_update_tx(
     explicit: set[str] | None = None,
 ) -> None:
     with tx(conn):
+        changes_before = conn.total_changes
         # Re-read inside the lock for the history row only: `existing` was
         # fetched before the transaction, so two concurrent updates both recorded
         # the same previous text and the intermediate version vanished from
@@ -1590,7 +1599,13 @@ def _upsert_update_tx(
             # An externalised body lives in a file, and `old_body` was read
             # before the lock: two concurrent updates both recorded the older
             # version as predecessor, and the middle one was then GC'd off disk.
-            hist_body = _read_body_file(fresh["body_path"]) or old_body
+            disk = _read_body_file(fresh["body_path"])
+            # a file that does not match the hash the row carries is not the
+            # previous version of anything: recording it would sign someone
+            # else's text into the chain
+            hist_body = (disk if disk is not None
+                         and _hash(fresh["title"], disk) == existing["content_hash"]
+                         else old_body)
         else:
             hist_body = fresh["body"]
         prev_hash = _last_chain_hash(conn)
@@ -1653,6 +1668,14 @@ def _upsert_update_tx(
                 existing["id"], 1 if revive else 0,
             ),
         )
+        if conn.total_changes == changes_before:
+            # deleted (or otherwise gone) between the read and this write: the
+            # row is not there, and reporting success left the caller believing
+            # text was stored that no read will ever return
+            raise MemoryConflict(
+                f"slug '{item.slug}' disappeared while it was being written "
+                f"(deleted concurrently); nothing was stored"
+            )
         if links is not None:
             _replace_links_inner(conn, item.slug, links)
 

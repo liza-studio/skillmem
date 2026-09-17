@@ -369,6 +369,9 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
                 links=S.extract_wikilinks(req.body),
                 explicit=set(req.model_fields_set) & {"kind", "project", "tags", "topics", "ttl_days"},
             )
+        except S.SealedRecord as exc:
+            # the owner's own record: a refusal, not a server fault
+            raise HTTPException(status_code=403, detail=str(exc))
         except S.MemoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
@@ -422,6 +425,9 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
                 explicit={k for k in ("kind", "project", "tags", "topics")
                           if getattr(req, k) is not None},
             )
+        except S.SealedRecord as exc:
+            # the owner's own record: a refusal, not a server fault
+            raise HTTPException(status_code=403, detail=str(exc))
         except S.MemoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
@@ -448,6 +454,9 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
                 links=S.extract_wikilinks(item.body),
                 explicit=set(req.model_fields_set) & {"project", "tags", "topics", "ttl_days"},
             )
+        except S.SealedRecord as exc:
+            # the owner's own record: a refusal, not a server fault
+            raise HTTPException(status_code=403, detail=str(exc))
         except S.MemoryConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:

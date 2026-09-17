@@ -353,11 +353,23 @@ def test_the_owners_dump_restores_a_sealed_archived_record(tmp_path, monkeypatch
     dump = tmp_path / "dump"
     E.export_all(src, dump)
     dst = S.connect(tmp_path / "dst.db"); S.init_schema(dst)
+    # with a terminal: the dump's archived state is restored
+    monkeypatch.setattr(S, "owner_present", lambda: True)
     res = V.import_vault(dst, dump, skip_auto_memories=False)
     assert not res.failed, res.failed
     row = dst.execute("SELECT lifecycle, owner_seal FROM memory_items "
                       "WHERE slug='sealed-arch'").fetchone()
     assert (row["lifecycle"], row["owner_seal"]) == ("archived", 1)
+
+    # without one: an agent can write a .md carrying `lifecycle: archived` and run
+    # the import, so the record stays visible and the report names it
+    other = S.connect(tmp_path / "other.db"); S.init_schema(other)
+    monkeypatch.setattr(S, "owner_present", lambda: False)
+    res2 = V.import_vault(other, dump, skip_auto_memories=False)
+    row2 = other.execute("SELECT lifecycle FROM memory_items "
+                         "WHERE slug='sealed-arch'").fetchone()
+    assert row2["lifecycle"] == "active"
+    assert res2.skipped_archive == ["sealed-arch"]
 
 
 def test_a_swapped_body_file_is_not_served_as_approved_text(tmp_path, monkeypatch):

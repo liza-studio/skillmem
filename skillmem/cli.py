@@ -378,10 +378,23 @@ def trust_cmd(ctx: click.Context, slug: str, untrust: bool) -> None:
         # Show it. The pin is worth nothing if the owner approves a slug without
         # seeing the words: an agent rewrite between a separate `cat` and this
         # command was approved text.
+        shown = S.load_body(seen)
+        if seen.body_path and (shown != S.read_body_file(seen.body_path)
+                               or S.mismatched_bodies(conn) and seen.slug in
+                               S.mismatched_bodies(conn)):
+            # load_body falls back to the stored excerpt when the file is missing
+            # or does not match the approved hash — approving on the strength of
+            # an excerpt approves text this terminal never displayed.
+            raise click.ClickException(
+                f"'{slug}' keeps its text in a file that is missing or does not "
+                f"match what was approved, so only an excerpt can be shown. "
+                f"Fix the record first (`skillmem verify`); refusing to approve "
+                f"text you have not seen."
+            )
         click.echo(f"--- {seen.slug} [{seen.kind}] ---")
         click.echo(seen.title)
         click.echo("")
-        click.echo(S.load_body(seen))
+        click.echo(shown)
         click.echo("--- end ---")
         click.confirm("Approve this text as your own rule?", abort=True)
     try:
