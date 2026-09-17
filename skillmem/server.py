@@ -416,6 +416,8 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         try:
             result = S.upsert(
                 conn, existing, reason=req.reason,
+                # the surface stamps itself: `agent` is caller-supplied text
+                actor=f"http:{agent.name}",
                 links=S.extract_wikilinks(req.body),
                 explicit={k for k in ("kind", "project", "tags", "topics")
                           if getattr(req, k) is not None},

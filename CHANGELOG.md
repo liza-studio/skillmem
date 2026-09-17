@@ -45,9 +45,15 @@
   kind, so a relabelled rule leaves it exactly as archiving would. Existing
   databases gain the column and its backfill on first open, whatever their
   schema version, and a database whose column landed without the backfill is
-  repaired on the next open.
-- Every real lifecycle change writes a row into the tamper-evident history, the
-  nightly sweep included, with the acting surface stamped by that surface rather
+  repaired on the next open. The seal check runs inside the write transaction,
+  so it cannot be overtaken by the owner approving the record between the check
+  and the write, and a pack removal skips sealed records: an agent can file a
+  record under `pack:<name>`, and the owner's own removal would otherwise delete
+  it.
+- Every change that takes a record out of every read writes a row into the
+  tamper-evident history, the nightly sweep's own archiving included (the
+  active-to-stale step writes none: a stale record still appears in search,
+  recall, list and the briefing), with the acting surface stamped by that surface rather
   than taken from the caller (an MCP client supplies its own name). A call that
   changes nothing writes nothing. `skillmem skills-lifecycle` counts every kind
   rather than skills alone and lists the archived slugs, so what is out of every

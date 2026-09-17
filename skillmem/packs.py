@@ -327,7 +327,11 @@ def remove_pack(conn: sqlite3.Connection, pack: str, *, reason: str) -> list[str
     prefix = f"pack-{pack}-"
     rows = conn.execute(
         "SELECT slug FROM memory_items WHERE project = ? AND slug LIKE ? ESCAPE '\\' "
-        "AND origin <> 'owner' AND deleted_at IS NULL",
+        # origin <> 'owner' is not enough: an agent may relabel origin to
+        # 'agent' and set project='pack:<name>' on a record whose slug happens
+        # to match the prefix, and the owner's own pack removal would then
+        # delete it. owner_seal cannot be relabelled.
+        "AND origin <> 'owner' AND owner_seal = 0 AND deleted_at IS NULL",
         (f"pack:{pack}", prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"),
     ).fetchall()
     removed = []

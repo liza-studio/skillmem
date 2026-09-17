@@ -326,6 +326,10 @@ def _run_import(conn, root, assets_root, kind, project_override,
             # the owner's must come back sealed, or export+import is a way to
             # launder exactly the records the seal protects. It is only ever
             # raised here — an import cannot clear a seal the row already has.
+            # an active dump over an archived record must restore it, or the
+            # importer and skills-restore disagree about the same dump
+            if not want_archived and _is_auto_memory(meta):
+                S.set_archived(conn, slug, False)
             if isinstance(md, dict) and md.get("owner_seal"):
                 conn.execute(
                     "UPDATE memory_items SET owner_seal = 1 WHERE slug = ?", (slug,))

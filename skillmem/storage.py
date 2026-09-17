@@ -1154,6 +1154,7 @@ def upsert(
     restore_strength: bool = False,
     explicit: set[str] | None = None,
     revive: bool = False,
+    actor: str | None = None,
 ) -> MemoryItem:
     """Insert or update ``item`` by slug; returns the same (mutated) object.
 
@@ -1375,7 +1376,7 @@ def upsert(
             conn, item=item, existing=existing, now=now, reason=reason,
             stemmed=stemmed, freshness=freshness, old_body=old_body, links=links,
             strength=item.strength if restore_strength else None,
-            revive=revive,
+            revive=revive, actor=actor,
         )
     except BaseException:
         _discard_body_file(conn, staged)
@@ -1399,6 +1400,7 @@ def _upsert_update_tx(
     conn: sqlite3.Connection, *, item: "MemoryItem", existing: Any, now: int,
     reason: str | None, stemmed: str, freshness: int | None, old_body: str,
     links: list[str] | None, strength: float | None = None, revive: bool = False,
+    actor: str | None = None,
 ) -> None:
     with tx(conn):
         prev_hash = _last_chain_hash(conn)
@@ -1406,7 +1408,8 @@ def _upsert_update_tx(
         history_payload = {
             "slug": existing["slug"], "old_title": existing["title"],
             "old_body": old_body, "changed_at": now,
-            "changed_by": item.agent, "reason": reason or "force overwrite",
+            # the surface stamps itself; item.agent is caller-supplied text
+            "changed_by": actor or item.agent, "reason": reason or "force overwrite",
         }
         self_hash = _chain_hash(prev_hash, history_payload)
         conn.execute(
@@ -1418,7 +1421,7 @@ def _upsert_update_tx(
             """,
             (
                 existing["slug"], existing["title"], old_body,
-                now, item.agent, reason or "force overwrite",
+                now, actor or item.agent, reason or "force overwrite",
                 prev_hash, self_hash,
             ),
         )
@@ -2505,53 +2508,70 @@ def _append_lifecycle_history(
     )
 
 
+class SealedRecord(Exception):
+    """An agent tried to hide a record the owner wrote or approved."""
+
+
 def set_archived(
-    conn: sqlite3.Connection, slug: str, archived: bool = True, *, by: str | None = None
+    conn: sqlite3.Connection, slug: str, archived: bool = True, *,
+    by: str | None = None, allow_sealed: bool = True
 ) -> dict[str, Any] | None:
     """Archive a record (out of search, recall and inject; kept, reversible)
     or bring it back. A pinned record is refused — pin means "never archive".
 
     Deletion stays with the owner at the CLI; an agent gets to say "this no
-    longer applies" without erasing anything.
+    longer applies" without erasing anything. `allow_sealed=False` is the agent's
+    call: it refuses a record the owner ever wrote or approved. The check lives
+    here, inside the write transaction, because a caller that reads the seal and
+    then archives can be overtaken by an owner approving the record in between.
     """
-    row = conn.execute(
-        "SELECT id, pinned, lifecycle, title, body FROM memory_items "
-        "WHERE slug = ? AND deleted_at IS NULL",
-        (slug,),
-    ).fetchone()
-    if not row:
-        return None
-    if archived and row["pinned"]:
-        raise ValueError(f"'{slug}' is pinned; unpin it before archiving it")
-    # Hiding a record from every read is a change the owner must be able to see
-    # afterwards: mem_update leaves a history row, and so does this. The text is
-    # untouched, so the row records what was hidden, not a new version.
-    moving = (row["lifecycle"] != "archived") if archived else (row["lifecycle"] != "active")
-    if moving:
-        # only a real transition gets a row: "restored from active" recorded a
-        # change that never happened, and an agent could repeat it at will
-        _append_lifecycle_history(
-            conn, slug, row,
-            "archived" if archived else f"restored from {row['lifecycle']}",
-            by,
-        )
-    if archived:
-        # lifecycle only — updated_at is the text's age, and archiving is not
-        # an edit; touching it would reorder listings and reset freshness
-        conn.execute(
-            "UPDATE memory_items SET lifecycle = 'archived' WHERE id = ?", (row["id"],)
-        )
-    elif row["lifecycle"] != "active":
-        # only a real restore refreshes recency and floors strength, or the
-        # nightly sweep_lifecycle would archive it again on its next run;
-        # calling this on an active row must not hand out strength for free
-        conn.execute(
-            "UPDATE memory_items SET lifecycle = 'active', "
-            "strength = MAX(strength, ?), last_accessed_at = ? WHERE id = ?",
-            (0.5, _now(), row["id"]),
-        )
-    return {"slug": slug, "lifecycle": "archived" if archived else "active",
-            "was": row["lifecycle"]}
+    with tx(conn):    # BEGIN IMMEDIATE: the seal check, the history row and the
+        # lifecycle write are one step, and two processes cannot append history
+        # rows to the same predecessor hash
+        row = conn.execute(
+            "SELECT id, pinned, lifecycle, title, body, owner_seal FROM memory_items "
+            "WHERE slug = ? AND deleted_at IS NULL",
+            (slug,),
+        ).fetchone()
+        if not row:
+            return None
+        if archived and not allow_sealed and row["owner_seal"]:
+            raise SealedRecord(
+                f"'{slug}' is the owner's record (written or approved by them); "
+                f"an agent cannot archive it. The owner can: skillmem skills-archive {slug}"
+            )
+        if archived and row["pinned"]:
+            raise ValueError(f"'{slug}' is pinned; unpin it before archiving it")
+        # Hiding a record from every read is a change the owner must be able to
+        # see afterwards: mem_update leaves a history row, and so does this. The
+        # text is untouched, so the row records what was hidden, not a version.
+        moving = ((row["lifecycle"] != "archived") if archived
+                  else (row["lifecycle"] != "active"))
+        if moving:
+            # only a real transition gets a row: "restored from active" recorded
+            # a change that never happened, and an agent could repeat it at will
+            _append_lifecycle_history(
+                conn, slug, row,
+                "archived" if archived else f"restored from {row['lifecycle']}",
+                by,
+            )
+        if archived:
+            # lifecycle only — updated_at is the text's age, and archiving is
+            # not an edit; touching it would reorder listings and reset freshness
+            conn.execute(
+                "UPDATE memory_items SET lifecycle = 'archived' WHERE id = ?", (row["id"],)
+            )
+        elif row["lifecycle"] != "active":
+            # only a real restore refreshes recency and floors strength, or the
+            # nightly sweep_lifecycle would archive it again on its next run;
+            # calling this on an active row must not hand out strength for free
+            conn.execute(
+                "UPDATE memory_items SET lifecycle = 'active', "
+                "strength = MAX(strength, ?), last_accessed_at = ? WHERE id = ?",
+                (0.5, _now(), row["id"]),
+            )
+        return {"slug": slug, "lifecycle": "archived" if archived else "active",
+                "was": row["lifecycle"]}
 
 
 def restore_skill(conn: sqlite3.Connection, slug: str, *, by: str | None = None) -> bool:

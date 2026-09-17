@@ -252,6 +252,27 @@ def test_the_owner_seal_survives_export_and_import(tmp_path, monkeypatch):
     assert row["owner_seal"] == 1             # the seal does
 
 
+def test_an_active_dump_restores_an_archived_record(tmp_path, monkeypatch):
+    """Otherwise the importer and skills-restore disagree about the same dump."""
+    from skillmem import storage as S, export as E, vault as V
+    monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SKILLMEM_DB", raising=False)
+    src = S.connect(tmp_path / "home" / "memory.db"); S.init_schema(src)
+    S.upsert(src, S.MemoryItem(slug="skill-live", kind="skill", title="live",
+                               body="a skill that is active in the dump"))
+    dump = tmp_path / "dump"
+    E.export_all(src, dump)
+
+    dst = S.connect(tmp_path / "dst.db"); S.init_schema(dst)
+    S.upsert(dst, S.MemoryItem(slug="skill-live", kind="skill", title="live",
+                               body="an older text of the same skill here"))
+    S.set_archived(dst, "skill-live", True)
+    res = V.import_vault(dst, dump, skip_auto_memories=False)
+    assert not res.failed, res.failed
+    row = dst.execute("SELECT lifecycle FROM memory_items WHERE slug='skill-live'").fetchone()
+    assert row["lifecycle"] == "active"
+
+
 def test_pinned_archived_record_survives_the_round_trip(tmp_path, monkeypatch):
     """The state 0.11.0's pin bug produced: the import used to fail and un-retire it."""
     from skillmem import storage as S, export as E, vault as V

@@ -482,6 +482,55 @@ def test_agent_cannot_relabel_a_sealed_record_out_of_the_briefing(mcp):
                         ).fetchone()["kind"] == "feedback"
 
 
+def test_the_seal_is_checked_inside_the_write(mcp):
+    """A gate that reads the seal and then archives loses the race against the
+    owner approving the record in between, so storage enforces it."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="race-rule", kind="feedback", title="rule",
+                                body="a rule approved between check and write",
+                                origin="owner"))
+    import pytest
+    with pytest.raises(S.SealedRecord):
+        S.set_archived(conn, "race-rule", True, allow_sealed=False)
+    # the owner's own path is unaffected
+    assert S.set_archived(conn, "race-rule", True)["lifecycle"] == "archived"
+
+
+def test_update_history_names_the_surface_not_the_client(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="upd-actor", kind="note", title="note",
+                                body="the first text of this note here"))
+    _payload(mcp._tool_update({"slug": "upd-actor", "body": "a different text for this note",
+                               "reason": "revised"}))
+    actor = conn.execute("SELECT changed_by FROM memory_history WHERE slug='upd-actor' "
+                         "ORDER BY id DESC LIMIT 1").fetchone()["changed_by"]
+    assert actor.startswith("mcp:"), actor
+
+
+def test_pack_removal_spares_a_sealed_record(mcp):
+    """An agent can set project='pack:x' on a record whose slug matches the
+    prefix; the owner's own pack removal must not then delete it."""
+    from skillmem import storage as S
+    from skillmem.packs import remove_pack
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="pack-demo-rule", kind="feedback", title="rule",
+                                body="the owner's rule that looks like a pack skill",
+                                origin="owner"))
+    # the state an agent's own edits leave: origin relabelled, project filed
+    # under the pack, and the slug already matching the import's prefix
+    conn.execute("UPDATE memory_items SET origin = 'agent', project = 'pack:demo' "
+                 "WHERE slug = 'pack-demo-rule'")
+    assert conn.execute("SELECT owner_seal FROM memory_items WHERE slug='pack-demo-rule'"
+                        ).fetchone()["owner_seal"] == 1
+    removed = remove_pack(conn, "demo", reason="pack removed")
+    assert "pack-demo-rule" not in removed
+    row = conn.execute("SELECT deleted_at, owner_seal FROM memory_items "
+                       "WHERE slug='pack-demo-rule'").fetchone()
+    assert row["deleted_at"] is None and row["owner_seal"] == 1
+
+
 def test_nightly_sweep_never_hides_an_owner_record(mcp):
     """The slow path to the same place: an agent can drive strength to the floor."""
     from skillmem import storage as S

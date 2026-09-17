@@ -204,6 +204,7 @@ def _tool_write(args: dict[str, Any]) -> list[TextContent]:
             links=S.extract_wikilinks(item.body),
             # only what the client actually sent may change an existing row
             # a JSON null is "not sent"; an empty list for tags/topics is a real clear
+            actor=f"mcp:{_agent()}",
             explicit={k for k in ("kind", "project", "tags", "topics", "ttl_days")
                       if args.get(k) is not None},
         )
@@ -256,6 +257,7 @@ def _tool_update(args: dict[str, Any]) -> list[TextContent]:
         result = S.upsert(
             conn, existing, reason=reason,
             links=S.extract_wikilinks(body),
+            actor=f"mcp:{_agent()}",
             explicit={k for k in ("kind", "project", "tags", "topics") if args.get(k) is not None},
         )
     except (S.MemoryConflict, ValueError) as exc:
@@ -297,6 +299,7 @@ def _tool_learn(args: dict[str, Any]) -> list[TextContent]:
             conn, item,
             check_conflicts=bool(args.get("check_conflicts", True)),
             links=S.extract_wikilinks(item.body),
+            actor=f"mcp:{_agent()}",
             explicit={k for k in ("visibility", "project", "tags", "topics", "ttl_days")
                       if args.get(k) is not None},
         )
@@ -373,27 +376,25 @@ def _tool_archive(args: dict[str, Any]) -> list[TextContent]:
     conn = _shared_conn()
     S.init_schema(conn)
     archived = bool(args.get("archived", True))
-    if archived:
+    try:
         # An agent retires what it learned. Hiding a rule the owner wrote or
         # approved is the owner's call: archiving leaves the text, the approval
         # and the origin intact, so nothing in a later read would show that an
         # agent had taken it out of every search, recall and briefing.
-        # owner_seal, not origin/trusted_at: mem_update legitimately relabels
-        # origin to 'agent' and drops the approval, so an agent could clear its
-        # own way to the gate with one extra call. The seal is never cleared.
-        row = conn.execute(
-            "SELECT owner_seal FROM memory_items "
-            "WHERE slug = ? AND deleted_at IS NULL", (slug,)).fetchone()
-        if row and row["owner_seal"]:
-            return _err(f"'{slug}' is the owner's record (written or approved by them); "
-                        f"an agent cannot archive it. The owner can: "
-                        f"skillmem skills-archive {slug}")
-    try:
+        #
+        # allow_sealed=False: storage checks the seal inside the write
+        # transaction. Checking it here and archiving afterwards loses the race
+        # against the owner approving the record in between. The seal, not
+        # origin/trusted_at: mem_update legitimately relabels origin to 'agent'
+        # and drops the approval, so an agent could otherwise clear its own way
+        # to the gate with one extra call.
+        #
         # "mcp:" is stamped here, not taken from the caller: _agent() falls back
         # to clientInfo.name, so an agent could otherwise sign the audit row
         # "owner-cli" and the one trace of the change would name the wrong party.
-        result = S.set_archived(conn, slug, archived, by=f"mcp:{_agent()}")
-    except ValueError as exc:
+        result = S.set_archived(conn, slug, archived,
+                                by=f"mcp:{_agent()}", allow_sealed=False)
+    except (S.SealedRecord, ValueError) as exc:
         return _err(str(exc))
     if not result:
         return _err(f"not found: {slug}")
