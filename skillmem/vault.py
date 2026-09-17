@@ -305,12 +305,21 @@ def _run_import(conn, root, assets_root, kind, project_override,
                 revive=_is_auto_memory(meta),   # a dump restores a deleted slug too
                 explicit=None,
             )
-            # archive first: set_archived refuses a pinned row, so a dump of a
-            # pinned+archived record would come back active with a ValueError
-            if _is_auto_memory(meta) and meta.get("lifecycle") == "archived":
+            # set_archived refuses a pinned row, and the row may be pinned in
+            # the destination, in the dump, or both. Unpin, archive, then pin
+            # to whatever the dump says (or leave the row's own flag alone).
+            want_archived = _is_auto_memory(meta) and meta.get("lifecycle") == "archived"
+            if want_archived:
+                was_pinned = conn.execute(
+                    "SELECT pinned FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
+                    (slug,)).fetchone()
+                if was_pinned and was_pinned["pinned"]:
+                    S.set_pinned(conn, slug, False)
                 # a dump of an archived record restores it archived, or the
                 # weekly export would quietly un-retire everything
                 S.set_archived(conn, slug, True)
+                if pinned is None and was_pinned and was_pinned["pinned"]:
+                    S.set_pinned(conn, slug, True)     # the row's own flag, untouched
             if pinned is not None:
                 S.set_pinned(conn, slug, pinned)
             counters = {k: extras[k] for k in ("access_count", "confirmed_count", "failure_count")

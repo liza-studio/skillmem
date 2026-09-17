@@ -2043,7 +2043,7 @@ def reinforce(ctx: click.Context, slug: str, evidence: str) -> None:
 @click.option("--off", is_flag=True, help="Unpin instead: put it back under decay.")
 @click.pass_context
 def pin(ctx: click.Context, slug: str, off: bool) -> None:
-    """Exempt a skill from decay and archiving (mirrors mem_pin).
+    """Exempt a record from decay and from the nightly sweep (mirrors mem_pin).
 
     For a rule that matters precisely because it is rarely needed — a deploy
     gate, a safety constraint — where being unused is not evidence of being
@@ -2056,6 +2056,11 @@ def pin(ctx: click.Context, slug: str, off: bool) -> None:
         sys.exit(1)
     state = "pinned" if result["pinned"] else "unpinned"
     click.echo(f"{state}: {slug}" + ("" if result["changed"] else " (already)"))
+    if result["lifecycle"] == "archived":
+        # pinning does not un-archive, and archiving is refused while pinned:
+        # without this line the record silently stays out of every read
+        click.echo(f"note: '{slug}' is archived and stays out of search, recall and "
+                   f"inject — run `skillmem skills-restore {slug}` to bring it back.")
 
 
 @main.group()
@@ -2136,7 +2141,7 @@ def skills_lifecycle(ctx: click.Context) -> None:
     conn = _conn(ctx.obj["db_path"])
     counts = S.lifecycle_counts(conn)
     if not counts:
-        click.echo("No skills yet.")
+        click.echo("Nothing stored yet.")
         return
     for state in ("active", "stale", "archived"):
         click.echo(f"  {state:9} {counts.get(state, 0)}")
@@ -2152,6 +2157,28 @@ def skills_restore(ctx: click.Context, slug: str) -> None:
         click.echo(f"Restored '{slug}' → active.")
     else:
         click.echo(f"Skill '{slug}' not found.")
+
+
+@main.command("skills-archive")
+@click.argument("slug")
+@click.option("--restore", is_flag=True, help="Bring it back instead (same as skills-restore).")
+@click.pass_context
+def skills_archive(ctx: click.Context, slug: str, restore: bool) -> None:
+    """Archive any record, including the owner's own approved rules.
+
+    mem_archive lets an agent retire what it learned, but refuses a record the
+    owner wrote or approved — hiding one of those from every read is the owner's
+    call, and this is where it is made.
+    """
+    conn = _conn(ctx.obj["db_path"])
+    try:
+        res = S.set_archived(conn, slug, not restore, by="owner-cli")
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    if not res:
+        click.echo(f"'{slug}' not found.")
+        raise SystemExit(1)
+    click.echo(f"'{slug}': {res['was']} → {res['lifecycle']}.")
 
 
 @main.command("skills-dups")

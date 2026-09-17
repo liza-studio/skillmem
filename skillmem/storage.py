@@ -1299,11 +1299,12 @@ def upsert(
         return MemoryItem.from_row(existing)
 
     if not reason and not force:
-        # this reaches the CLI and an MCP agent alike, and "force=True" is in
-        # neither surface's vocabulary; name the one thing both of them have
+        # this reaches the CLI, MCP and HTTP alike, and the create surfaces
+        # (mem_write, mem_learn) carry neither reason= nor force=; name the
+        # action, not a parameter the caller may not have
         raise MemoryConflict(
             f"slug '{item.slug}' already exists with different text; "
-            f"supply a reason to overwrite it, or pick another slug"
+            f"overwrite it through an explicit update, or pick another slug"
         )
 
     old_path = existing["body_path"] if "body_path" in existing.keys() else None
@@ -2417,18 +2418,40 @@ def sweep_lifecycle(
     return {"staled": staled, "archived": archived}
 
 
-def lifecycle_counts(conn: sqlite3.Connection, *, kind: str = "skill") -> dict[str, int]:
-    """Count skills per lifecycle state."""
+def lifecycle_counts(
+    conn: sqlite3.Connection, *, kind: str | None = None
+) -> dict[str, int]:
+    """Count records per lifecycle state. kind=None counts every kind: an agent
+    can archive a note or a feedback rule too, and a skills-only count made
+    those invisible to the one command that reports the lifecycle."""
     rows = conn.execute(
         "SELECT lifecycle, COUNT(*) c FROM memory_items "
-        "WHERE kind = ? AND deleted_at IS NULL GROUP BY lifecycle",
-        (kind,),
+        "WHERE (? IS NULL OR kind = ?) AND deleted_at IS NULL GROUP BY lifecycle",
+        (kind, kind),
     ).fetchall()
     return {r["lifecycle"]: r["c"] for r in rows}
 
 
+def _append_lifecycle_history(
+    conn: sqlite3.Connection, slug: str, row: Any, reason: str, by: str | None
+) -> None:
+    """One tamper-evident row per lifecycle change — the owner's only trace of it."""
+    now = _chain_clock(conn, _now())
+    prev_hash = _last_chain_hash(conn)
+    payload = {
+        "slug": slug, "old_title": row["title"], "old_body": row["body"],
+        "changed_at": now, "changed_by": by, "reason": reason,
+    }
+    conn.execute(
+        "INSERT INTO memory_history (slug, old_title, old_body, changed_at, changed_by,"
+        " reason, prev_hash, self_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (slug, row["title"], row["body"], now, by, reason,
+         prev_hash, _chain_hash(prev_hash, payload)),
+    )
+
+
 def set_archived(
-    conn: sqlite3.Connection, slug: str, archived: bool
+    conn: sqlite3.Connection, slug: str, archived: bool = True, *, by: str | None = None
 ) -> dict[str, Any] | None:
     """Archive a record (out of search, recall and inject; kept, reversible)
     or bring it back. A pinned record is refused — pin means "never archive".
@@ -2437,13 +2460,22 @@ def set_archived(
     longer applies" without erasing anything.
     """
     row = conn.execute(
-        "SELECT id, pinned, lifecycle FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
+        "SELECT id, pinned, lifecycle, title, body FROM memory_items "
+        "WHERE slug = ? AND deleted_at IS NULL",
         (slug,),
     ).fetchone()
     if not row:
         return None
     if archived and row["pinned"]:
         raise ValueError(f"'{slug}' is pinned; unpin it first (mem_pin pinned=false)")
+    # Hiding a record from every read is a change the owner must be able to see
+    # afterwards: mem_update leaves a history row, and so does this. The text is
+    # untouched, so the row records what was hidden, not a new version.
+    _append_lifecycle_history(
+        conn, slug, row,
+        "archived" if archived else f"restored from {row['lifecycle']}",
+        by,
+    )
     if archived:
         # lifecycle only — updated_at is the text's age, and archiving is not
         # an edit; touching it would reorder listings and reset freshness
@@ -2463,20 +2495,11 @@ def set_archived(
             "was": row["lifecycle"]}
 
 
-def restore_skill(conn: sqlite3.Connection, slug: str) -> bool:
-    """Bring an archived/stale skill back to 'active' (and nudge strength up)."""
-    row = conn.execute(
-        "SELECT id FROM memory_items WHERE slug = ? AND deleted_at IS NULL", (slug,)
-    ).fetchone()
-    if not row:
-        return False
-    conn.execute(
-        "UPDATE memory_items SET lifecycle = 'active', "
-        "strength = MAX(strength, ?), last_accessed_at = ? WHERE id = ?",
-        (0.5, _now(), row["id"]),
-    )
-    # Autocommit connection — see sweep_lifecycle for why there is no commit().
-    return True
+def restore_skill(conn: sqlite3.Connection, slug: str, *, by: str | None = None) -> bool:
+    """Bring a hidden skill back to 'active'. One implementation, shared with
+    set_archived(archived=False): the two used to hold the same UPDATE, and only
+    one of them learned not to hand strength to a row that was never hidden."""
+    return set_archived(conn, slug, False, by=by) is not None
 
 
 # Curator threshold (Phase 3): skills above this cosine are merge candidates.

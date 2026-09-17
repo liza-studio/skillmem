@@ -23,9 +23,23 @@
 - A dump now carries `lifecycle`, so an archived record does not come back
   active after an export/import round trip — including a record that was both
   pinned and archived, which used to fail the import and land active.
-- The conflict message for an existing slug no longer names `force=True`, which
-  is in no surface's vocabulary; it names the reason both the CLI and an MCP
-  agent can actually supply.
+- The conflict message for an existing slug names no parameter at all. It used
+  to say `force=True`, which no surface accepts, and then `reason=`, which only
+  the update tools carry — the two tools that actually raise it, `mem_write` and
+  `mem_learn`, have neither.
+- `mem_archive` refuses a record the owner wrote or approved, and names
+  `skillmem skills-archive` instead. Archiving hides a record from search,
+  recall, list and the session briefing while leaving its text, approval and
+  origin untouched, so an agent retiring the owner's own rule left nothing that
+  a later read would show. Every lifecycle change now also writes a row into
+  the tamper-evident history, and `skillmem skills-lifecycle` counts every kind
+  rather than skills alone, so an archived note or feedback rule is visible
+  where the lifecycle is reported.
+- `skillmem pin` on an archived record says so: pinning does not un-archive, and
+  archiving is refused while pinned, so the record would otherwise stay out of
+  every read without a word. `restore_skill` and `set_archived(archived=false)`
+  are now one implementation — the duplicate pair let only one of them learn not
+  to hand strength to a record that was never hidden.
 
 ## 0.11.0
 

@@ -356,8 +356,21 @@ def _tool_archive(args: dict[str, Any]) -> list[TextContent]:
         return _err("slug is required")
     conn = _shared_conn()
     S.init_schema(conn)
+    archived = bool(args.get("archived", True))
+    if archived:
+        # An agent retires what it learned. Hiding a rule the owner wrote or
+        # approved is the owner's call: archiving leaves the text, the approval
+        # and the origin intact, so nothing in a later read would show that an
+        # agent had taken it out of every search, recall and briefing.
+        row = conn.execute(
+            "SELECT origin, trusted_at FROM memory_items "
+            "WHERE slug = ? AND deleted_at IS NULL", (slug,)).fetchone()
+        if row and (row["origin"] == "owner" or row["trusted_at"]):
+            what = "approved by" if row["trusted_at"] else "written by"
+            return _err(f"'{slug}' was {what} the owner; an agent cannot archive it. "
+                        f"The owner can: skillmem skills-archive {slug}")
     try:
-        result = S.set_archived(conn, slug, bool(args.get("archived", True)))
+        result = S.set_archived(conn, slug, archived, by=_agent())
     except ValueError as exc:
         return _err(str(exc))
     if not result:
@@ -630,8 +643,11 @@ TOOLS: list[Tool] = [
             "(archived=false). WRITES: archiving sets the lifecycle state and nothing "
             "else — an archived record leaves mem_search, mem_recall, mem_list and "
             "the hooks' recall, but keeps its text, history and approval and is still "
-            "readable by slug with mem_get. Nothing is deleted — deletion stays with "
-            "the owner at the CLI (`skillmem rm`). Refuses a pinned record (unpin "
+            "readable by slug with mem_get, and every call leaves a history row so the "
+            "owner can see what was retired. Nothing is deleted — deletion stays with "
+            "the owner at the CLI (`skillmem rm`), and so does retiring a record the "
+            "owner wrote or approved: this tool refuses those and names the CLI "
+            "command instead. Refuses a pinned record (unpin "
             "first) and an unknown slug. Restoring a genuinely archived record also "
             "refreshes its recency and floors strength at 0.5, or the nightly sweep "
             "would archive it again; on a record that is already active it changes "

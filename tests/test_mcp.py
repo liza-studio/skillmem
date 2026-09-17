@@ -408,6 +408,43 @@ def test_learn_refuses_a_slug_that_already_holds_a_note(mcp):
     assert S.get(conn, "looks-like-skill").kind == "note"
 
 
+def test_agent_cannot_archive_what_the_owner_approved(mcp):
+    """Archiving hides a record from every read without touching text or approval,
+    so an agent doing it to the owner's own rule leaves nothing a later read shows."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="rule-gate", kind="feedback", title="deploy gate",
+                                body="deploy only through the gate, never by hand",
+                                origin="owner"))
+    conn.execute("UPDATE memory_items SET trusted_at = ?, trusted_by = 'owner' "
+                 "WHERE slug = 'rule-gate'", (1_700_000_000,))
+    err = _payload(mcp._tool_archive({"slug": "rule-gate"}))
+    assert "cannot archive" in err.get("error", ""), err
+    assert "skills-archive" in err["error"]
+    row = conn.execute("SELECT lifecycle FROM memory_items WHERE slug='rule-gate'").fetchone()
+    assert row["lifecycle"] == "active"
+    # the owner's own path still works
+    assert S.set_archived(conn, "rule-gate", True, by="owner-cli")["lifecycle"] == "archived"
+
+
+def test_archiving_leaves_a_history_row(mcp):
+    """The owner's only trace of a record leaving every read."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    _payload(mcp._tool_learn({"slug": "skill-temp", "title": "temp", "trigger": "a trigger here",
+                              "steps": "the steps taken", "outcome": "success", "lessons": None}))
+    before = conn.execute("SELECT COUNT(*) c FROM memory_history WHERE slug='skill-temp'").fetchone()["c"]
+    _payload(mcp._tool_archive({"slug": "skill-temp"}))
+    _payload(mcp._tool_archive({"slug": "skill-temp", "archived": False}))
+    rows = conn.execute("SELECT reason FROM memory_history WHERE slug='skill-temp' "
+                        "ORDER BY id").fetchall()
+    assert len(rows) == before + 2, [r["reason"] for r in rows]
+    assert rows[-2]["reason"] == "archived"
+    assert rows[-1]["reason"].startswith("restored from")
+    _, broken = S.verify_history(conn)
+    assert broken == []                           # the hash chain still verifies
+
+
 def test_pinning_writes_the_flag_and_nothing_else(mcp):
     """mem_pin's description says the flag only; no lifecycle, no free strength."""
     from skillmem import storage as S
@@ -481,4 +518,7 @@ def test_write_refusal_names_only_parameters_this_tool_has(mcp):
     _payload(mcp._tool_write({"slug": "w1", "title": "one", "body": "first body text here"}))
     err = _payload(mcp._tool_write({"slug": "w1", "title": "one", "body": "different body text"}))
     msg = err.get("error", "")
-    assert "reason" in msg and "reason=" not in msg and "force=" not in msg
+    # mem_write and mem_learn carry neither reason nor force; the message must
+    # not send the agent after a parameter its schema does not have
+    assert "reason" not in msg and "force" not in msg, msg
+    assert "update" in msg.lower()
