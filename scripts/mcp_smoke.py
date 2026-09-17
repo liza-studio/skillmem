@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -17,7 +18,8 @@ from pathlib import Path
 import tempfile
 
 HERE = Path(__file__).resolve().parent.parent
-SERVER = HERE / ".venv" / "bin" / "skillmem-mcp"
+_bin = os.environ.get("SKILLMEM_MCP_BIN") or shutil.which("skillmem-mcp")
+SERVER = Path(_bin) if _bin else HERE / ".venv" / "bin" / "skillmem-mcp"
 DB_PATH = os.environ.get(
     "SKILLMEM_DB", str(Path(tempfile.gettempdir()) / "skillmem-test" / "memory.db")
 )
@@ -44,18 +46,10 @@ def main() -> int:
     env = os.environ.copy()
     env["SKILLMEM_DB"] = DB_PATH
 
-    # Make sure the smoke DB is populated — fresh check-out shouldn't need
-    # the caller to run `skillmem migrate` first.
-    db = Path(DB_PATH)
-    db.parent.mkdir(parents=True, exist_ok=True)
-    if not db.exists() or db.stat().st_size < 1024:
-        migrator = HERE / ".venv" / "bin" / "skillmem"
-        subprocess.run(
-            [str(migrator), "migrate"],
-            env={**os.environ, "SKILLMEM_DB": DB_PATH},
-            check=True,
-            capture_output=True,
-        )
+    # The script seeds everything it asserts through the server's own stdio,
+    # so an empty database is a valid starting point — and no run of this
+    # script pulls the caller's real memories into a test database.
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
     proc = subprocess.Popen(
         [str(SERVER)],
@@ -91,6 +85,25 @@ def main() -> int:
                     "mem_write"]
         assert names == expected, f"got {names}, want {expected}"
         print("OK tools/list:", names)
+
+        # Seed through the same stdio surface: the script has to pass on an
+        # empty database, not only on the author's own.
+        for i in range(3):
+            _send(proc, {
+                "jsonrpc": "2.0", "id": 100 + i, "method": "tools/call",
+                "params": {"name": "mem_write", "arguments": {
+                    "slug": f"smoke-feedback-{i}",
+                    "title": f"smoke feedback {i}",
+                    "body": f"Правило {i}: проверять галлюцинации командой, "
+                            f"а не рассуждением — случай номер {i}. "
+                            f"Rule {i}: verify claim {i} with a command, not by reasoning.",
+                    "kind": "feedback",
+                    "check_conflicts": False,   # three near-identical seeds on purpose
+                }},
+            })
+            seeded = json.loads(_read(proc)["result"]["content"][0]["text"])
+            assert seeded.get("ok") is True, seeded
+        print("OK seeded 3 feedback records")
 
         # Cyrillic query is intentional: bilingual search is a feature.
         _send(proc, {

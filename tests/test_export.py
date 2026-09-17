@@ -228,3 +228,25 @@ def test_archived_record_stays_archived_through_export_and_import(tmp_path, monk
     V.import_vault(fresh, dump, skip_auto_memories=False)   # restoring a dump, not reading a vault
     row = fresh.execute("SELECT lifecycle FROM memory_items WHERE slug='skill-exp'").fetchone()
     assert row["lifecycle"] == "archived"          # a dump must not un-retire a record
+
+
+def test_pinned_archived_record_survives_the_round_trip(tmp_path, monkeypatch):
+    """The state 0.11.0's pin bug produced: the import used to fail and un-retire it."""
+    from skillmem import storage as S, export as E, vault as V
+    monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SKILLMEM_DB", raising=False)
+    conn = S.connect(tmp_path / "home" / "memory.db"); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="skill-pinned-exp", kind="skill", title="pinned exp",
+                                body="a retired gate rule kept for the record"))
+    S.set_archived(conn, "skill-pinned-exp", True)
+    conn.execute("UPDATE memory_items SET pinned = 1, strength = 0.1 "
+                 "WHERE slug = 'skill-pinned-exp'")
+    dump = tmp_path / "dump"
+    E.export_all(conn, dump)
+    fresh = S.connect(tmp_path / "fresh.db"); S.init_schema(fresh)
+    res = V.import_vault(fresh, dump, skip_auto_memories=False)
+    assert not res.failed, res.failed
+    row = fresh.execute("SELECT lifecycle, pinned, strength FROM memory_items "
+                        "WHERE slug='skill-pinned-exp'").fetchone()
+    assert (row["lifecycle"], row["pinned"]) == ("archived", 1)
+    assert row["strength"] == 0.1          # the dump's strength, not a restore floor

@@ -408,26 +408,77 @@ def test_learn_refuses_a_slug_that_already_holds_a_note(mcp):
     assert S.get(conn, "looks-like-skill").kind == "note"
 
 
-def test_pinning_an_archived_record_brings_it_back(mcp):
+def test_pinning_writes_the_flag_and_nothing_else(mcp):
+    """mem_pin's description says the flag only; no lifecycle, no free strength."""
     from skillmem import storage as S
     conn = mcp._shared_conn(); S.init_schema(conn)
     _payload(mcp._tool_learn({"slug": "skill-gate", "title": "gate", "trigger": "deploy gate rule",
                               "steps": "always through the gate", "outcome": "success", "lessons": "none"}))
+    conn.execute("UPDATE memory_items SET strength = 0.05 WHERE slug = 'skill-gate'")
     _payload(mcp._tool_archive({"slug": "skill-gate"}))
-    r = _payload(mcp._tool_pin({"slug": "skill-gate"}))
-    assert r["pinned"] and r.get("restored") is True
-    row = conn.execute("SELECT lifecycle, pinned FROM memory_items WHERE slug='skill-gate'").fetchone()
-    assert row["lifecycle"] == "active" and row["pinned"]     # "never archived" must be true
+    before = conn.execute("SELECT lifecycle, strength, last_accessed_at, updated_at "
+                          "FROM memory_items WHERE slug='skill-gate'").fetchone()
+    _payload(mcp._tool_pin({"slug": "skill-gate"}))
+    after = conn.execute("SELECT lifecycle, strength, last_accessed_at, updated_at, pinned "
+                         "FROM memory_items WHERE slug='skill-gate'").fetchone()
+    assert after["pinned"] == 1
+    assert (after["lifecycle"], after["strength"]) == (before["lifecycle"], before["strength"])
+    assert after["last_accessed_at"] == before["last_accessed_at"]
+    assert after["updated_at"] == before["updated_at"]
+    # the explicit verb is the way back, and it works on a pinned row
+    r = _payload(mcp._tool_archive({"slug": "skill-gate", "archived": False}))
+    assert r["lifecycle"] == "active"
     assert any(i["slug"] == "skill-gate" for i in _payload(mcp._tool_list({"limit": 50}))["items"])
 
 
-def test_recall_limit_argument_is_clamped_to_fifty(mcp):
-    assert mcp._limit({"limit": 100}, 5, cap=50) == 50        # what the description promises
-    assert mcp._limit({"limit": 100}, 5) == 100               # other tools keep the 100 cap
+def test_recall_limit_argument_is_clamped_to_fifty(mcp, monkeypatch):
+    """The clamp has to be applied by mem_recall itself, not merely available."""
+    from skillmem import storage as S
+    seen = {}
+    real = S.recall_skills
+
+    def spy(conn, query, **kw):
+        seen["limit"] = kw.get("limit")
+        return real(conn, query, **kw)
+
+    monkeypatch.setattr(S, "recall_skills", spy)
+    _payload(mcp._tool_recall({"query": "deploy gate", "limit": 1000}))
+    assert seen["limit"] == 50                  # what the description promises
+    assert mcp._limit({"limit": 100}, 5) == 100  # other tools keep the 100 cap
+
+
+def test_learn_refusal_leaves_the_existing_record_alone(mcp):
+    """The kind check used to run after the upsert: a refused call still landed its tags."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="looks-like-skill", kind="note", title="a note",
+                                body="owner's own note about the deploy gate", tags=["before"]))
+    before = S.get(conn, "looks-like-skill")
+    err = _payload(mcp._tool_learn({"slug": "looks-like-skill", "title": "a note",
+                                    "trigger": "deploy gate rule", "steps": "an action taken",
+                                    "outcome": "success", "lessons": None,
+                                    "tags": ["after"], "check_conflicts": False}))
+    assert "already holds a note" in err.get("error", "")
+    after = S.get(conn, "looks-like-skill")
+    assert (after.kind, after.tags, after.body) == (before.kind, before.tags, before.body)
+    assert after.updated_at == before.updated_at
+
+
+def test_learn_conflict_names_no_parameter_this_tool_lacks(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="skill-dup", kind="skill", title="dup",
+                                body="the original body of this skill record"))
+    err = _payload(mcp._tool_learn({"slug": "skill-dup", "title": "dup",
+                                    "trigger": "a different trigger entirely",
+                                    "steps": "different steps", "outcome": "success",
+                                    "lessons": None}))
+    msg = err.get("error", "")
+    assert "force=" not in msg and "reason=" not in msg, msg
 
 
 def test_write_refusal_names_only_parameters_this_tool_has(mcp):
     _payload(mcp._tool_write({"slug": "w1", "title": "one", "body": "first body text here"}))
     err = _payload(mcp._tool_write({"slug": "w1", "title": "one", "body": "different body text"}))
     msg = err.get("error", "")
-    assert "mem_update" in msg and "reason=" not in msg and "force=" not in msg
+    assert "reason" in msg and "reason=" not in msg and "force=" not in msg

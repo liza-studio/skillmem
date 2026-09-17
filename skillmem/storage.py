@@ -1299,8 +1299,11 @@ def upsert(
         return MemoryItem.from_row(existing)
 
     if not reason and not force:
+        # this reaches the CLI and an MCP agent alike, and "force=True" is in
+        # neither surface's vocabulary; name the one thing both of them have
         raise MemoryConflict(
-            f"slug '{item.slug}' exists; pass reason='...' or force=True to overwrite"
+            f"slug '{item.slug}' already exists with different text; "
+            f"supply a reason to overwrite it, or pick another slug"
         )
 
     old_path = existing["body_path"] if "body_path" in existing.keys() else None
@@ -2297,23 +2300,16 @@ def set_pinned(
     ).fetchone()
     if not row:
         return None
-    # the flag only — updated_at is the text's age, and pinning is not an edit.
-    # Pinning an archived record also brings it back: "never archived" cannot
-    # be true of a row that stays out of every read.
-    restored = bool(pinned) and row["lifecycle"] == "archived"
-    if restored:
-        conn.execute(
-            "UPDATE memory_items SET pinned = 1, lifecycle = 'active', "
-            "strength = MAX(strength, ?), last_accessed_at = ? WHERE id = ?",
-            (0.5, _now(), row["id"]),
-        )
-    else:
-        conn.execute(
-            "UPDATE memory_items SET pinned = ? WHERE id = ?",
-            (1 if pinned else 0, row["id"]),
-        )
+    # the flag only — updated_at is the text's age, and pinning is not an edit,
+    # and lifecycle is not pinning's business: an archived row comes back
+    # through the one call that says so (set_archived / mem_archive), so that
+    # strength is never handed out by a side effect of a different verb.
+    conn.execute(
+        "UPDATE memory_items SET pinned = ? WHERE id = ?",
+        (1 if pinned else 0, row["id"]),
+    )
     return {"slug": slug, "pinned": pinned, "changed": bool(row["pinned"]) != pinned,
-            "restored": restored}
+            "lifecycle": row["lifecycle"]}
 
 
 def decay_stale(
@@ -2454,7 +2450,7 @@ def set_archived(
         conn.execute(
             "UPDATE memory_items SET lifecycle = 'archived' WHERE id = ?", (row["id"],)
         )
-    elif row["lifecycle"] == "archived":
+    elif row["lifecycle"] != "active":
         # only a real restore refreshes recency and floors strength, or the
         # nightly sweep_lifecycle would archive it again on its next run;
         # calling this on an active row must not hand out strength for free

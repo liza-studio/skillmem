@@ -76,9 +76,11 @@ def _frontmatter(item: S.MemoryItem, *, truncated: bool = False) -> str:
     meta["strength"] = item.strength   # always: a restore must be able to say "1.0"
     # the rest of what a row earned, so a restore is a restore
     meta["pinned"] = bool(item.pinned)
-    if getattr(item, "lifecycle", "active") != "active":
-        # without this an archived record comes back active and visible again
-        meta["lifecycle"] = item.lifecycle
+    if getattr(item, "lifecycle", "active") == "archived":
+        # without this an archived record comes back active and visible again.
+        # 'stale' is deliberately not exported: the nightly sweep derives it
+        # from recency, so writing it would promise an import that restores it.
+        meta["lifecycle"] = "archived"
     meta["access_count"] = item.access_count
     meta["confirmed_count"] = item.confirmed_count
     meta["failure_count"] = item.failure_count

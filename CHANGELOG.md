@@ -15,12 +15,17 @@
   (strength and decay are a skill's mechanics), `mem_recall` caps `limit` at
   50 as it always said, and archiving writes the lifecycle state and nothing
   else — `updated_at` is the text's age, and archiving is not an edit.
-- Restoring an archived record (`mem_archive` with `archived=false`, and
-  `skillmem skills-restore`) refreshes its recency and floors strength at 0.5, so the
-  nightly lifecycle sweep does not archive it again the same night. Pinning an
-  archived record restores it too — "never archived" cannot be true of a row
-  that stays out of every read — and a dump now carries `lifecycle`, so an
-  archived record does not come back active after an export/import round trip.
+- Restoring a hidden record (`mem_archive` with `archived=false`) refreshes its
+  recency and floors strength at 0.5, so the nightly lifecycle sweep does not
+  retire it again the same night; it now reports the state the row actually
+  ended in. `mem_pin` stays out of it: pinning writes the flag and nothing
+  else, so strength is never handed out as a side effect of a different verb.
+- A dump now carries `lifecycle`, so an archived record does not come back
+  active after an export/import round trip — including a record that was both
+  pinned and archived, which used to fail the import and land active.
+- The conflict message for an existing slug no longer names `force=True`, which
+  is in no surface's vocabulary; it names the reason both the CLI and an MCP
+  agent can actually supply.
 
 ## 0.11.0
 

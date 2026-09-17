@@ -206,11 +206,7 @@ def _tool_write(args: dict[str, Any]) -> list[TextContent]:
                       if args.get(k) is not None},
         )
     except (S.MemoryConflict, ValueError) as exc:
-        msg = str(exc)
-        if "pass reason=" in msg:      # storage speaks CLI; this tool has neither flag
-            msg = (f"slug '{args.get('slug')}' already exists with different text; "
-                   f"use mem_update with a reason, or pick another slug")
-        return _err(msg)
+        return _err(str(exc))
     return _ok({"ok": True, "slug": result.slug, "id": result.id, "kind": result.kind})
 
 
@@ -274,6 +270,12 @@ def _tool_learn(args: dict[str, Any]) -> list[TextContent]:
         visibility=args.get("visibility") or "public",
         ttl_days=args.get("ttl_days"),
     )
+    # the slug may already hold a note: check before writing, or a refused
+    # call still lands its tags and topics on somebody else's record
+    existing = S.get(conn, item.slug)
+    if existing and existing.kind != "skill":
+        return _err(f"slug '{item.slug}' already holds a {existing.kind}; "
+                    f"pick another slug or use mem_update")
     try:
         result = S.upsert(
             conn, item,
@@ -284,14 +286,9 @@ def _tool_learn(args: dict[str, Any]) -> list[TextContent]:
         )
     except (S.MemoryConflict, ValueError) as exc:
         return _err(str(exc))
-    # the slug may already hold a note with the same text: upsert keeps the
-    # existing kind, so report what is stored rather than what we asked for
     stored = S.get(conn, result.slug)
-    kind = stored.kind if stored else "skill"
-    if kind != "skill":
-        return _err(f"slug '{result.slug}' already holds a {kind}; pick another slug "
-                    f"or use mem_update")
-    return _ok({"ok": True, "slug": result.slug, "id": result.id, "kind": kind})
+    return _ok({"ok": True, "slug": result.slug, "id": result.id,
+                "kind": stored.kind if stored else "skill"})
 
 
 def _tool_recall(args: dict[str, Any]) -> list[TextContent]:
@@ -608,14 +605,18 @@ TOOLS: list[Tool] = [
             "approval and updated_at are untouched. For a rule that matters precisely "
             "because it is rarely needed — a deploy gate, a safety constraint — where "
             "decay would read rarity as irrelevance. A pinned record cannot be "
-            "archived until unpinned. Fails for an unknown slug. Returns slug and "
-            "pinned state. Use mem_reinforce for skills that should earn their "
+            "archived until unpinned; unpinning does not un-archive it, and pinning an "
+            "archived record leaves it archived — use mem_archive for that. Fails for "
+            "an unknown slug. Returns the slug, the pinned state, whether the flag "
+            "changed, and the record's current lifecycle. "
+            "Use mem_reinforce for skills that should earn their "
             "strength; use mem_archive to retire one."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "slug": {"type": "string", "description": "Skill slug to pin."},
+                "slug": {"type": "string",
+                         "description": "Slug of the record to pin (any kind)."},
                 "pinned": {"type": "boolean",
                            "description": "true to pin (default), false to unpin."},
             },
