@@ -252,6 +252,49 @@ def test_the_owner_seal_survives_export_and_import(tmp_path, monkeypatch):
     assert row["owner_seal"] == 1             # the seal does
 
 
+def test_a_stale_round_trip_does_not_reset_decay(tmp_path, monkeypatch):
+    """set_archived(False) floors strength at 0.5: firing it for every
+    non-archived dump defeated decay on every weekly export/import."""
+    from skillmem import storage as S, export as E, vault as V
+    monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SKILLMEM_DB", raising=False)
+    src = S.connect(tmp_path / "home" / "memory.db"); S.init_schema(src)
+    S.upsert(src, S.MemoryItem(slug="skill-faded", kind="skill", title="faded",
+                               body="a skill nobody has recalled in a month"))
+    old = 1_600_000_000
+    src.execute("UPDATE memory_items SET strength = 0.05, lifecycle = 'stale', "
+                "last_accessed_at = ? WHERE slug = 'skill-faded'", (old,))
+    dump = tmp_path / "dump"
+    E.export_all(src, dump)
+    # the weekly round trip: back into the same database, where the record has
+    # faded to 'stale' — the shape that used to be restored to 0.5 every time
+    res = V.import_vault(src, dump, skip_auto_memories=False)
+    assert not res.failed, res.failed
+    row = src.execute("SELECT strength, lifecycle, last_accessed_at FROM memory_items "
+                      "WHERE slug='skill-faded'").fetchone()
+    assert row["strength"] == 0.05        # the dump's strength, not a restore floor
+    assert row["lifecycle"] == "stale"    # and it is still on its way out
+    assert row["last_accessed_at"] == old  # recency untouched, or decay restarts
+
+
+def test_import_history_names_the_importer(tmp_path, monkeypatch):
+    from skillmem import storage as S, export as E, vault as V
+    monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SKILLMEM_DB", raising=False)
+    src = S.connect(tmp_path / "home" / "memory.db"); S.init_schema(src)
+    S.upsert(src, S.MemoryItem(slug="note-imp", kind="note", title="note",
+                               body="the dump's version of this note"))
+    dump = tmp_path / "dump"
+    E.export_all(src, dump)
+    dst = S.connect(tmp_path / "dst.db"); S.init_schema(dst)
+    S.upsert(dst, S.MemoryItem(slug="note-imp", kind="note", title="note",
+                               body="a different local version of this note"))
+    V.import_vault(dst, dump, skip_auto_memories=False)
+    actor = dst.execute("SELECT changed_by FROM memory_history WHERE slug='note-imp' "
+                        "ORDER BY id DESC LIMIT 1").fetchone()["changed_by"]
+    assert actor == "import"
+
+
 def test_an_active_dump_restores_an_archived_record(tmp_path, monkeypatch):
     """Otherwise the importer and skills-restore disagree about the same dump."""
     from skillmem import storage as S, export as E, vault as V

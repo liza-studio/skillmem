@@ -317,6 +317,14 @@ def inject(
     if brief["omitted"]:
         suffix = f"({brief['omitted']} omitted, budget={brief['budget_tokens']} tk)"
         lines.append(f"_… {suffix}_" if fmt == "md" else suffix)
+    if brief.get("awaiting_reapproval"):
+        # Names, not text: these are the owner's own records, rewritten by an
+        # agent, and their current words are unapproved like any other.
+        slugs = ", ".join(brief["awaiting_reapproval"])
+        note = (f"YOUR OWN rules, rewritten since you approved them, are NOT shown: "
+                f"{slugs} — review with `skillmem cat <slug>`, then "
+                f"`skillmem trust <slug>`")
+        lines.append(f"_{note}_" if fmt == "md" else note)
     if brief.get("unapproved"):
         # Said as a count, never as content: the briefing is title-only, and an
         # unapproved title belongs behind a frame, which this format has no room

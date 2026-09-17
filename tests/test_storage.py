@@ -232,3 +232,29 @@ def test_a_database_without_the_v10_columns_still_opens(tmp_path):
         assert [r["slug"] for r in rows] == ["old-rule"]
         assert rows[0]["owner_seal"] == 1    # the backfill sealed it
         conn.close()
+
+
+def test_opening_a_migrated_database_takes_no_write_lock(tmp_path):
+    """The seal migration runs on every open. A BEGIN IMMEDIATE there made
+    inject, recall and search fail with "database is locked" behind any writer."""
+    import sqlite3
+    from skillmem import storage as S
+    db = tmp_path / "m.db"
+    conn = S.connect(db)
+    S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="r1", kind="feedback", title="rule",
+                                body="a rule of the owner's own", origin="owner"))
+    conn.close()
+
+    holder = sqlite3.connect(db, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("UPDATE memory_items SET title = title WHERE slug = 'r1'")
+    try:
+        reader = S.connect(db)
+        reader.execute("PRAGMA busy_timeout = 300")
+        S.init_schema(reader)                    # must not want the write lock
+        assert reader.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0] == 1
+        reader.close()
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()

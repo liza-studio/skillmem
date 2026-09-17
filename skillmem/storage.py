@@ -525,6 +525,18 @@ def _migrate_owner_seal(conn: sqlite3.Connection) -> None:
     every open, like v10's columns: a database carrying v10 already never runs
     that migration again, and this column has to reach those databases too.
     """
+    # Read first, and take no write lock when there is nothing to do: this runs
+    # on EVERY open, and a BEGIN IMMEDIATE here made `inject`, `recall` and
+    # mem_search fail with "database is locked" behind any writer — init_schema
+    # dropped its own write-on-open for exactly that reason.
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)")}
+    if "owner_seal" in have:
+        pending = conn.execute(
+            "SELECT 1 FROM memory_items WHERE owner_seal = 0 "
+            "AND (origin = 'owner' OR trusted_at IS NOT NULL) LIMIT 1"
+        ).fetchone()
+        if pending is None:
+            return
     try:
         with tx(conn):   # BEGIN IMMEDIATE: two processes may open the same file
             have = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)")}
@@ -900,6 +912,10 @@ def scrub(text: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
+class SealedRecord(Exception):
+    """An agent tried to hide a record the owner wrote or approved."""
+
+
 class MemoryConflict(Exception):
     """Raised when writing a slug that already exists without a reason."""
 
@@ -1155,6 +1171,7 @@ def upsert(
     explicit: set[str] | None = None,
     revive: bool = False,
     actor: str | None = None,
+    by_agent: bool = False,
 ) -> MemoryItem:
     """Insert or update ``item`` by slug; returns the same (mutated) object.
 
@@ -1281,6 +1298,20 @@ def upsert(
             _publish_body_file(staged)
         _set_embedding(conn, item.id, item.title, full_body)
         return item
+
+    if (by_agent and existing["owner_seal"] and "kind" in (explicit or set())
+            and item.kind != existing["kind"]):
+        # The hooks' briefing and `skillmem inject` select by kind, so relabelling
+        # a sealed rule 'note' takes it out of the session exactly as archiving
+        # would — and on unchanged text it writes no history row at all. The check
+        # lives here, not in a handler: mem_write, mem_learn, mem_update and the
+        # HTTP routes all arrive through this function, and guarding one of them
+        # left the rest open.
+        raise SealedRecord(
+            f"'{item.slug}' is the owner's record; an agent cannot change its kind "
+            f"from {existing['kind']} to {item.kind} (the session briefing selects "
+            f"by kind). Edit the text instead, or ask the owner."
+        )
 
     if existing["content_hash"] == item.content_hash:
         # Same text — no history entry, and the owner's approval survives because
@@ -2192,10 +2223,22 @@ def briefing(
         if entries:
             sections.append({"kind": kind, "items": entries})
 
+    # A record the owner wrote or approved that an agent has since rewritten loses
+    # its approval — deliberately, the approval belonged to those words — and so
+    # it leaves this briefing. Said out loud, by slug: otherwise a rule the owner
+    # has relied on for months just stops arriving, and nothing says why.
+    revoked = [r["slug"] for r in conn.execute(
+        "SELECT slug FROM memory_items WHERE owner_seal = 1 AND trusted_at IS NULL "
+        "AND deleted_at IS NULL AND lifecycle != 'archived' "
+        f"AND kind IN ({','.join('?' * len(kinds))}) ORDER BY updated_at DESC LIMIT 20",
+        tuple(kinds),
+    ).fetchall()] if kinds else []
+
     return {
         "sections": sections,
         "approx_tokens": used // _CHARS_PER_TOKEN,
         "unapproved": unapproved,
+        "awaiting_reapproval": revoked,
         "omitted": omitted,
         "budget_tokens": budget_tokens,
     }
@@ -2433,43 +2476,48 @@ def sweep_lifecycle(
     Archived skills are excluded from recall (see _bm25_ids/_vector_ids).
     """
     now = _now()
-    stale_cut = now - STALE_AFTER_DAYS * 86400
-    archive_cut = now - ARCHIVE_AFTER_DAYS * 86400
+    # BEGIN IMMEDIATE: this appends history rows, and reading the chain head and
+    # inserting the next row must be one step — the same reason set_archived
+    # holds a transaction. Two sweeps, or a sweep and an agent archiving, used to
+    # append successors to the same predecessor and break the chain.
+    with tx(conn):
+        stale_cut = now - STALE_AFTER_DAYS * 86400
+        archive_cut = now - ARCHIVE_AFTER_DAYS * 86400
 
-    # COALESCE: a never-recalled skill counts idle time from its creation.
-    archive_rows = conn.execute(
-        "SELECT id, slug, title, body, strength, last_accessed_at FROM memory_items "
-        "WHERE kind = ? AND deleted_at IS NULL AND lifecycle != 'archived' "
-        # owner_seal, like pinned: the nightly job is the slow path to the same
-        # place mem_archive is refused, and mem_reinforce evidence='failure'
-        # lets an agent walk a record's strength down to the floor on purpose.
-        "AND pinned = 0 AND owner_seal = 0 "
-        "AND strength <= ? AND COALESCE(last_accessed_at, created_at) < ?",
-        (kind, DECAY_FLOOR, archive_cut),
-    ).fetchall()
-    _backup_skills(archive_rows, "archive")
-    archived = [r["slug"] for r in archive_rows]
-    for r in archive_rows:
-        # the same audit row an explicit archive leaves: "gone from every read"
-        # must be answerable afterwards however it happened
-        _append_lifecycle_history(conn, r["slug"], r, "archived by nightly sweep", "sweep")
-        conn.execute(
-            "UPDATE memory_items SET lifecycle = 'archived' WHERE id = ?", (r["id"],)
-        )
+        # COALESCE: a never-recalled skill counts idle time from its creation.
+        archive_rows = conn.execute(
+            "SELECT id, slug, title, body, strength, last_accessed_at FROM memory_items "
+            "WHERE kind = ? AND deleted_at IS NULL AND lifecycle != 'archived' "
+            # owner_seal, like pinned: the nightly job is the slow path to the same
+            # place mem_archive is refused, and mem_reinforce evidence='failure'
+            # lets an agent walk a record's strength down to the floor on purpose.
+            "AND pinned = 0 AND owner_seal = 0 "
+            "AND strength <= ? AND COALESCE(last_accessed_at, created_at) < ?",
+            (kind, DECAY_FLOOR, archive_cut),
+        ).fetchall()
+        _backup_skills(archive_rows, "archive")
+        archived = [r["slug"] for r in archive_rows]
+        for r in archive_rows:
+            # the same audit row an explicit archive leaves: "gone from every read"
+            # must be answerable afterwards however it happened
+            _append_lifecycle_history(conn, r["slug"], r, "archived by nightly sweep", "sweep")
+            conn.execute(
+                "UPDATE memory_items SET lifecycle = 'archived' WHERE id = ?", (r["id"],)
+            )
 
-    stale_rows = conn.execute(
-        "SELECT id, slug FROM memory_items "
-        "WHERE kind = ? AND deleted_at IS NULL AND lifecycle = 'active' "
-        # 'stale' still shows up in every read, so it needs no seal exemption
-        "AND pinned = 0 "
-        "AND COALESCE(last_accessed_at, created_at) < ?",
-        (kind, stale_cut),
-    ).fetchall()
-    staled = [r["slug"] for r in stale_rows]
-    for r in stale_rows:
-        conn.execute(
-            "UPDATE memory_items SET lifecycle = 'stale' WHERE id = ?", (r["id"],)
-        )
+        stale_rows = conn.execute(
+            "SELECT id, slug FROM memory_items "
+            "WHERE kind = ? AND deleted_at IS NULL AND lifecycle = 'active' "
+            # 'stale' still shows up in every read, so it needs no seal exemption
+            "AND pinned = 0 "
+            "AND COALESCE(last_accessed_at, created_at) < ?",
+            (kind, stale_cut),
+        ).fetchall()
+        staled = [r["slug"] for r in stale_rows]
+        for r in stale_rows:
+            conn.execute(
+                "UPDATE memory_items SET lifecycle = 'stale' WHERE id = ?", (r["id"],)
+            )
     # No commit: the connection is autocommit (isolation_level=None), so the
     # UPDATEs above are already durable. An explicit commit() here would close
     # a caller's open `with tx()` block early and break SAVEPOINT nesting.
@@ -2506,10 +2554,6 @@ def _append_lifecycle_history(
         (slug, row["title"], row["body"], now, by, reason,
          prev_hash, _chain_hash(prev_hash, payload)),
     )
-
-
-class SealedRecord(Exception):
-    """An agent tried to hide a record the owner wrote or approved."""
 
 
 def set_archived(

@@ -476,10 +476,36 @@ def test_agent_cannot_relabel_a_sealed_record_out_of_the_briefing(mcp):
     conn = mcp._shared_conn(); S.init_schema(conn)
     S.upsert(conn, S.MemoryItem(slug="rule-kind", kind="feedback", title="rule",
                                 body="a rule the briefing selects by kind", origin="owner"))
-    err = _payload(mcp._tool_update({"slug": "rule-kind", "kind": "note"}))
+    # the same-text mem_write route, which had no guard of its own
+    err = _payload(mcp._tool_write({"slug": "rule-kind", "title": "rule",
+                                    "body": "a rule the briefing selects by kind",
+                                    "kind": "note"}))
     assert "cannot change its kind" in err.get("error", ""), err
+    err2 = _payload(mcp._tool_update({"slug": "rule-kind", "kind": "note",
+                                      "body": "a slightly different rule text here",
+                                      "reason": "relabel"}))
+    assert "cannot change its kind" in err2.get("error", ""), err2
     assert conn.execute("SELECT kind FROM memory_items WHERE slug='rule-kind'"
                         ).fetchone()["kind"] == "feedback"
+
+
+def test_the_briefing_names_the_owner_rules_an_agent_rewrote(mcp):
+    """An agent update clears the approval by design, so the rule leaves the
+    briefing. Silently, it just stops arriving and nothing says why."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="gate-rule", kind="feedback", title="gate",
+                                body="deploy only through the gate, never by hand",
+                                origin="owner"))
+    S.set_trust(conn, "gate-rule", trusted=True)
+    assert any(e["slug"] == "gate-rule"
+               for sec in S.briefing(conn)["sections"] for e in sec["items"])
+    _payload(mcp._tool_update({"slug": "gate-rule", "body": "deploy through the gate, always",
+                               "reason": "tightened"}))
+    brief = S.briefing(conn)
+    assert not any(e["slug"] == "gate-rule"
+                   for sec in brief["sections"] for e in sec["items"])
+    assert "gate-rule" in brief["awaiting_reapproval"]
 
 
 def test_the_seal_is_checked_inside_the_write(mcp):

@@ -301,6 +301,7 @@ def _run_import(conn, root, assets_root, kind, project_override,
                 # restore, and a pre-0.11 dump that omitted strength meant 1.0.
                 # A plain Obsidian note carries no strength to restore — an
                 # ordinary sync must keep what the row earned.
+                actor="import",     # the only appender that named no actor
                 restore_strength="strength" in extras or _is_auto_memory(meta),
                 revive=_is_auto_memory(meta),   # a dump restores a deleted slug too
                 explicit=None,
@@ -326,10 +327,17 @@ def _run_import(conn, root, assets_root, kind, project_override,
             # the owner's must come back sealed, or export+import is a way to
             # launder exactly the records the seal protects. It is only ever
             # raised here — an import cannot clear a seal the row already has.
-            # an active dump over an archived record must restore it, or the
-            # importer and skills-restore disagree about the same dump
+            # an active dump over an ARCHIVED record must restore it, or the
+            # importer and skills-restore disagree about the same dump. Only
+            # then: set_archived(False) floors strength at 0.5 and refreshes
+            # recency, so firing it for every non-archived dump reset the decay
+            # of every stale record on each weekly export/import round trip.
             if not want_archived and _is_auto_memory(meta):
-                S.set_archived(conn, slug, False)
+                current = conn.execute(
+                    "SELECT lifecycle FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
+                    (slug,)).fetchone()
+                if current and current["lifecycle"] == "archived":
+                    S.set_archived(conn, slug, False, by="import")
             if isinstance(md, dict) and md.get("owner_seal"):
                 conn.execute(
                     "UPDATE memory_items SET owner_seal = 1 WHERE slug = ?", (slug,))

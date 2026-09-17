@@ -205,30 +205,17 @@ def _tool_write(args: dict[str, Any]) -> list[TextContent]:
             # only what the client actually sent may change an existing row
             # a JSON null is "not sent"; an empty list for tags/topics is a real clear
             actor=f"mcp:{_agent()}",
+            by_agent=True,
             explicit={k for k in ("kind", "project", "tags", "topics", "ttl_days")
                       if args.get(k) is not None},
         )
-    except (S.MemoryConflict, ValueError) as exc:
+    except (S.MemoryConflict, S.SealedRecord, ValueError) as exc:
         return _err(str(exc))
     return _ok({"ok": True, "slug": result.slug, "id": result.id, "kind": result.kind})
 
 
 def _tool_update(args: dict[str, Any]) -> list[TextContent]:
     slug = args.get("slug")
-    if slug and args.get("kind"):
-        conn = _shared_conn()
-        S.init_schema(conn)
-        row = conn.execute(
-            "SELECT kind, owner_seal FROM memory_items "
-            "WHERE slug = ? AND deleted_at IS NULL", (slug,)).fetchone()
-        if row and row["owner_seal"] and args["kind"] != row["kind"]:
-            # The hooks' inject selects by kind, so a feedback rule relabelled
-            # 'note' leaves the session briefing — the same disappearance
-            # mem_archive is refused for, and on unchanged text it writes no
-            # history row at all.
-            return _err(f"'{slug}' is the owner's record; an agent cannot change its "
-                        f"kind from {row['kind']} (the session briefing selects by "
-                        f"kind). Edit the text instead, or ask the owner.")
     body = args.get("body")
     reason = args.get("reason")
     if not (slug and body and reason):
@@ -258,9 +245,10 @@ def _tool_update(args: dict[str, Any]) -> list[TextContent]:
             conn, existing, reason=reason,
             links=S.extract_wikilinks(body),
             actor=f"mcp:{_agent()}",
+            by_agent=True,
             explicit={k for k in ("kind", "project", "tags", "topics") if args.get(k) is not None},
         )
-    except (S.MemoryConflict, ValueError) as exc:
+    except (S.MemoryConflict, S.SealedRecord, ValueError) as exc:
         return _err(str(exc))
     return _ok({"ok": True, "slug": result.slug, "history_entries": len(S.history(conn, slug))})
 
@@ -300,10 +288,11 @@ def _tool_learn(args: dict[str, Any]) -> list[TextContent]:
             check_conflicts=bool(args.get("check_conflicts", True)),
             links=S.extract_wikilinks(item.body),
             actor=f"mcp:{_agent()}",
+            by_agent=True,
             explicit={k for k in ("visibility", "project", "tags", "topics", "ttl_days")
                       if args.get(k) is not None},
         )
-    except (S.MemoryConflict, ValueError) as exc:
+    except (S.MemoryConflict, S.SealedRecord, ValueError) as exc:
         return _err(str(exc))
     stored = S.get(conn, result.slug)
     return _ok({"ok": True, "slug": result.slug, "id": result.id,

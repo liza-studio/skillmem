@@ -49,7 +49,21 @@
   so it cannot be overtaken by the owner approving the record between the check
   and the write, and a pack removal skips sealed records: an agent can file a
   record under `pack:<name>`, and the owner's own removal would otherwise delete
-  it.
+  it. The kind guard lives in `upsert`, where every surface arrives: guarding one
+  handler left `mem_write`, `mem_learn` and the HTTP routes open, and on unchanged
+  text that route wrote no history row at all. The seal migration reads before it
+  writes and takes no lock when there is nothing to do — on every open, a write
+  lock there made `inject`, `recall` and search fail with "database is locked"
+  behind any writer. The nightly sweep holds a transaction for the same reason
+  `set_archived` does.
+- `skillmem inject` names the owner's own rules that an agent has rewritten since
+  they were approved. Rewriting clears the approval, deliberately, and the rule
+  then leaves the briefing — silently, until now, so a rule relied on for months
+  simply stopped arriving. Names only, never the agent's text.
+- Importing a dump no longer resets a faded record's strength and recency: the
+  restore fires only for a record that is actually archived, not for every
+  non-archived dump, which defeated decay on every weekly export/import. The
+  importer's own history rows name it ("import") instead of no one.
 - Every change that takes a record out of every read writes a row into the
   tamper-evident history, the nightly sweep's own archiving included (the
   active-to-stale step writes none: a stale record still appears in search,
