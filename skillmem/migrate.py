@@ -227,6 +227,9 @@ def import_file(conn, path: Path, *, force: bool = True,
         reason="migrated from .md" if existed else None,
         force=force,
         links=extract_wikilinks(body),
+        # `skillmem migrate` reads the owner's own markdown at their terminal,
+        # so it may restore a record's kind as the file has it
+        owner_call=True,
     )
     return "updated" if existed else "inserted"
 

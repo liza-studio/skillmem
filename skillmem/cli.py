@@ -1931,6 +1931,7 @@ def learn(
     )
     try:
         result = S.upsert(conn, item, links=S.extract_wikilinks(item.body),
+                          owner_call=True,   # typed at the owner's terminal
                           # what was typed applies; visibility is never flipped on same text
                           explicit={p for p in ("tags", "project")
                                     if ctx.get_parameter_source(p) == click.core.ParameterSource.COMMANDLINE})

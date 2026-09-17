@@ -508,6 +508,26 @@ def test_the_briefing_names_the_owner_rules_an_agent_rewrote(mcp):
     assert "gate-rule" in brief["awaiting_reapproval"]
 
 
+def test_every_upsert_caller_is_deliberate_about_the_guard():
+    """The audit three rounds of P1s were missing: an owner surface must say
+    owner_call=True, an agent surface must never claim it. A surface added
+    without a decision is guarded by default; this only checks the decisions."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent / "skillmem"
+    owner_surfaces = {"cli.py", "migrate.py", "vault.py"}     # a person at a terminal
+    agent_surfaces = {"mcp_server.py", "server.py", "packs.py"}
+    for name in owner_surfaces | agent_surfaces:
+        lines = (root / name).read_text().splitlines()
+        for i, line in enumerate(lines):
+            if not line.strip().endswith("upsert(") and "upsert(conn" not in line:
+                continue
+            window = "\n".join(lines[i:i + 16])
+            if name in owner_surfaces:
+                assert "owner_call=True" in window, f"{name}:{i + 1} missing owner_call"
+            else:
+                assert "owner_call" not in window, f"{name}:{i + 1} claims owner_call"
+
+
 def test_the_kind_guard_is_on_by_default(mcp):
     """Three rounds running, the hole was a surface that did not pass the flag.
     The guard is on unless a caller states it is the owner's own."""
