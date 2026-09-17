@@ -307,6 +307,10 @@ def _run_import(conn, root, assets_root, kind, project_override,
             )
             if pinned is not None:
                 S.set_pinned(conn, slug, pinned)
+            if _is_auto_memory(meta) and meta.get("lifecycle") == "archived":
+                # a dump of an archived record restores it archived, or the
+                # weekly export would quietly un-retire everything
+                S.set_archived(conn, slug, True)
             counters = {k: extras[k] for k in ("access_count", "confirmed_count", "failure_count")
                         if k in extras}
             if counters and _is_auto_memory(meta):

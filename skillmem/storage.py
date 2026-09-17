@@ -774,6 +774,7 @@ class MemoryItem:
     confidence: float = 1.0
     strength: float = 1.0
     pinned: bool = False
+    lifecycle: str = "active"
     confirmed_count: int = 0
     failure_count: int = 0
     access_count: int = 0
@@ -819,6 +820,7 @@ class MemoryItem:
             confidence=row["confidence"],
             strength=row["strength"],
             pinned=bool(row["pinned"]) if "pinned" in row.keys() else False,
+            lifecycle=(row["lifecycle"] if "lifecycle" in row.keys() else "active"),
             confirmed_count=(row["confirmed_count"]
                              if "confirmed_count" in row.keys() else 0),
             failure_count=row["failure_count"] if "failure_count" in row.keys() else 0,
@@ -2290,17 +2292,28 @@ def set_pinned(
     and decay would read it as irrelevance.
     """
     row = conn.execute(
-        "SELECT id, pinned FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
+        "SELECT id, pinned, lifecycle FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
         (slug,),
     ).fetchone()
     if not row:
         return None
-    # the flag only — updated_at is the text's age, and pinning is not an edit
-    conn.execute(
-        "UPDATE memory_items SET pinned = ? WHERE id = ?",
-        (1 if pinned else 0, row["id"]),
-    )
-    return {"slug": slug, "pinned": pinned, "changed": bool(row["pinned"]) != pinned}
+    # the flag only — updated_at is the text's age, and pinning is not an edit.
+    # Pinning an archived record also brings it back: "never archived" cannot
+    # be true of a row that stays out of every read.
+    restored = bool(pinned) and row["lifecycle"] == "archived"
+    if restored:
+        conn.execute(
+            "UPDATE memory_items SET pinned = 1, lifecycle = 'active', "
+            "strength = MAX(strength, ?), last_accessed_at = ? WHERE id = ?",
+            (0.5, _now(), row["id"]),
+        )
+    else:
+        conn.execute(
+            "UPDATE memory_items SET pinned = ? WHERE id = ?",
+            (1 if pinned else 0, row["id"]),
+        )
+    return {"slug": slug, "pinned": pinned, "changed": bool(row["pinned"]) != pinned,
+            "restored": restored}
 
 
 def decay_stale(

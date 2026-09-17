@@ -16,8 +16,11 @@
   50 as it always said, and archiving writes the lifecycle state and nothing
   else — `updated_at` is the text's age, and archiving is not an edit.
 - Restoring an archived record (`mem_archive` with `archived=false`, and
-  `skillmem restore`) refreshes its recency and floors strength at 0.5, so the
-  nightly lifecycle sweep does not archive it again the same night.
+  `skillmem skills-restore`) refreshes its recency and floors strength at 0.5, so the
+  nightly lifecycle sweep does not archive it again the same night. Pinning an
+  archived record restores it too — "never archived" cannot be true of a row
+  that stays out of every read — and a dump now carries `lifecycle`, so an
+  archived record does not come back active after an export/import round trip.
 
 ## 0.11.0
 

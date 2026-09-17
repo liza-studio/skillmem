@@ -8,8 +8,8 @@
     {
       "name": "skillmem",
       "source": "./",
-      "description": "Self-improving skill memory for Claude Code: MCP server (8 tools) + 6 memory hooks. Requires the skillmem Python package on PATH (pip install skillmem).",
-      "version": "0.9.2",
+      "description": "Self-improving skill memory for Claude Code: MCP server (10 tools) + memory hooks on five events. Requires the skillmem Python package on PATH (pip install skillmem).",
+      "version": "0.11.1",
       "author": {
         "name": "Liza Studio"
       }

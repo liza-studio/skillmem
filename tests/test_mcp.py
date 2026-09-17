@@ -406,3 +406,28 @@ def test_learn_refuses_a_slug_that_already_holds_a_note(mcp):
                                     "lessons": None, "check_conflicts": False}))
     assert "already holds a note" in err.get("error", "")
     assert S.get(conn, "looks-like-skill").kind == "note"
+
+
+def test_pinning_an_archived_record_brings_it_back(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    _payload(mcp._tool_learn({"slug": "skill-gate", "title": "gate", "trigger": "deploy gate rule",
+                              "steps": "always through the gate", "outcome": "success", "lessons": "none"}))
+    _payload(mcp._tool_archive({"slug": "skill-gate"}))
+    r = _payload(mcp._tool_pin({"slug": "skill-gate"}))
+    assert r["pinned"] and r.get("restored") is True
+    row = conn.execute("SELECT lifecycle, pinned FROM memory_items WHERE slug='skill-gate'").fetchone()
+    assert row["lifecycle"] == "active" and row["pinned"]     # "never archived" must be true
+    assert any(i["slug"] == "skill-gate" for i in _payload(mcp._tool_list({"limit": 50}))["items"])
+
+
+def test_recall_limit_argument_is_clamped_to_fifty(mcp):
+    assert mcp._limit({"limit": 100}, 5, cap=50) == 50        # what the description promises
+    assert mcp._limit({"limit": 100}, 5) == 100               # other tools keep the 100 cap
+
+
+def test_write_refusal_names_only_parameters_this_tool_has(mcp):
+    _payload(mcp._tool_write({"slug": "w1", "title": "one", "body": "first body text here"}))
+    err = _payload(mcp._tool_write({"slug": "w1", "title": "one", "body": "different body text"}))
+    msg = err.get("error", "")
+    assert "mem_update" in msg and "reason=" not in msg and "force=" not in msg

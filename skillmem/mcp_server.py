@@ -206,7 +206,11 @@ def _tool_write(args: dict[str, Any]) -> list[TextContent]:
                       if args.get(k) is not None},
         )
     except (S.MemoryConflict, ValueError) as exc:
-        return _err(str(exc))
+        msg = str(exc)
+        if "pass reason=" in msg:      # storage speaks CLI; this tool has neither flag
+            msg = (f"slug '{args.get('slug')}' already exists with different text; "
+                   f"use mem_update with a reason, or pick another slug")
+        return _err(msg)
     return _ok({"ok": True, "slug": result.slug, "id": result.id, "kind": result.kind})
 
 

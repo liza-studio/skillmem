@@ -211,3 +211,20 @@ def test_dump_file_names_never_collide_between_a_sanitised_and_a_literal_slug():
     assert sanitised.startswith("a-b__")
     assert _safe_filename(sanitised) != sanitised        # the literal look-alike gets its own hash
     assert _safe_filename("plain-slug") == "plain-slug"
+
+
+def test_archived_record_stays_archived_through_export_and_import(tmp_path, monkeypatch):
+    import os
+    from skillmem import storage as S, export as E, vault as V
+    monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SKILLMEM_DB", raising=False)
+    conn = S.connect(tmp_path / "home" / "memory.db"); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="skill-exp", kind="skill", title="exp",
+                                body="a retired procedure nobody runs any more"))
+    S.set_archived(conn, "skill-exp", True)
+    dump = tmp_path / "dump"
+    E.export_all(conn, dump)
+    fresh = S.connect(tmp_path / "fresh.db"); S.init_schema(fresh)
+    V.import_vault(fresh, dump, skip_auto_memories=False)   # restoring a dump, not reading a vault
+    row = fresh.execute("SELECT lifecycle FROM memory_items WHERE slug='skill-exp'").fetchone()
+    assert row["lifecycle"] == "archived"          # a dump must not un-retire a record
