@@ -414,7 +414,7 @@ def test_learn_refuses_a_slug_that_already_holds_a_note(mcp):
     assert S.get(conn, "looks-like-skill").kind == "note"
 
 
-def test_agent_cannot_archive_what_the_owner_approved(mcp):
+def test_agent_cannot_archive_what_the_owner_approved(mcp, at_terminal, monkeypatch):
     """Archiving hides a record from every read without touching text or approval,
     so an agent doing it to the owner's own rule leaves nothing a later read shows."""
     from skillmem import storage as S
@@ -425,8 +425,9 @@ def test_agent_cannot_archive_what_the_owner_approved(mcp):
     conn.execute("UPDATE memory_items SET trusted_at = ?, trusted_by = 'owner' "
                  "WHERE slug = 'rule-gate'", (1_700_000_000,))
     import pytest
+    monkeypatch.setattr(S, "owner_present", lambda: False)   # the agent's side
     with pytest.raises(S.SealedRecord) as exc:
-        S.set_archived(conn, "rule-gate", True)     # no allow_sealed: refused
+        S.set_archived(conn, "rule-gate", True)
     assert "skills-archive" in str(exc.value)
     row = conn.execute("SELECT lifecycle FROM memory_items WHERE slug='rule-gate'").fetchone()
     assert row["lifecycle"] == "active"
@@ -459,7 +460,7 @@ def test_update_does_not_open_the_way_to_archive_an_owner_record(mcp):
                         ).fetchone()["lifecycle"] == "active"
 
 
-def test_owner_writing_a_record_seals_it(mcp):
+def test_owner_writing_a_record_seals_it(mcp, at_terminal, monkeypatch):
     """The update path is what clears trusted_at, so it must set the seal there."""
     from skillmem import storage as S
     conn = mcp._shared_conn(); S.init_schema(conn)
@@ -477,6 +478,7 @@ def test_owner_writing_a_record_seals_it(mcp):
                        "WHERE slug='owner-edit'").fetchone()
     assert (row["origin"], row["trusted_at"], row["owner_seal"]) == ("owner", None, 1)
     import pytest
+    monkeypatch.setattr(S, "owner_present", lambda: False)   # the agent's side
     with pytest.raises(S.SealedRecord):
         S.set_archived(conn, "owner-edit", True)
 
@@ -518,7 +520,7 @@ def test_the_briefing_names_the_owner_rules_an_agent_rewrote(mcp):
     assert "gate-rule" in brief["awaiting_reapproval"]
 
 
-def test_the_owner_check_lives_in_the_mutation_not_the_caller(mcp, monkeypatch):
+def test_the_owner_check_lives_in_the_mutation_not_the_caller(mcp, monkeypatch, at_terminal):
     """Eleven callers had to remember to pass the flag and the eleventh did not.
     The mutation asks the owner signal itself now."""
     from skillmem import storage as S
@@ -609,7 +611,7 @@ def test_approval_refuses_an_archived_record(mcp):
                         ).fetchone()["trusted_at"] is None
 
 
-def test_hiding_and_deleting_default_to_refusing(mcp):
+def test_hiding_and_deleting_default_to_refusing(mcp, at_terminal, monkeypatch):
     """A caller that says nothing must be refused: every hole in this feature was
     a caller that said nothing."""
     from skillmem import storage as S
@@ -619,8 +621,9 @@ def test_hiding_and_deleting_default_to_refusing(mcp):
         S.upsert(conn, S.MemoryItem(slug=slug, kind="feedback", title="rule",
                                     body=f"the owner's rule {slug} kept here",
                                     origin="owner"), owner_call=True)
+    monkeypatch.setattr(S, "owner_present", lambda: False)   # the agent's side
     with pytest.raises(S.SealedRecord):
-        S.set_archived(conn, "def-arch", True)          # no allow_sealed
+        S.set_archived(conn, "def-arch", True)
     with pytest.raises(S.SealedRecord):
         S.soft_delete(conn, "def-del", "cleanup")       # no allow_sealed
     rows = conn.execute("SELECT slug, lifecycle, deleted_at FROM memory_items "
@@ -811,7 +814,7 @@ def test_an_owner_write_of_the_same_text_still_seals(mcp):
         S.set_archived(conn, "same-rule", True)
 
 
-def test_the_seal_is_checked_inside_the_write(mcp):
+def test_the_seal_is_checked_inside_the_write(mcp, at_terminal):
     """A gate that reads the seal and then archives loses the race against the
     owner approving the record in between, so storage enforces it."""
     from skillmem import storage as S
@@ -839,7 +842,7 @@ def test_update_history_names_the_surface_not_the_client(mcp):
     assert actor.startswith("mcp:"), actor
 
 
-def test_pack_removal_spares_a_sealed_record(mcp):
+def test_pack_removal_spares_a_sealed_record(mcp, at_terminal):
     """An agent can set project='pack:x' on a record whose slug matches the
     prefix; the owner's own pack removal must not then delete it."""
     from skillmem import storage as S
@@ -861,7 +864,7 @@ def test_pack_removal_spares_a_sealed_record(mcp):
     assert row["deleted_at"] is None and row["owner_seal"] == 1
 
 
-def test_nightly_sweep_never_hides_an_owner_record(mcp):
+def test_nightly_sweep_never_hides_an_owner_record(mcp, at_terminal):
     """The slow path to the same place: an agent can drive strength to the floor."""
     from skillmem import storage as S
     conn = mcp._shared_conn(); S.init_schema(conn)

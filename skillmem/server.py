@@ -473,17 +473,21 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
                                   visible=_predicate(agent))
         visible = [r for r in results if _visible_to(r, agent)]
         if req.auto_reinforce:
+            locked_out = False    # a writer holds the lock: stop trying
             for r in visible:
-                try:
-                    # 150 ms, not the ten-second default: this is a read path
-                    prev_to = conn.execute("PRAGMA busy_timeout").fetchone()[0]
-                    conn.execute("PRAGMA busy_timeout = 150")
+                bumped = None
+                if not locked_out:
                     try:
-                        bumped = S.reinforce(conn, r["slug"])
-                    finally:
-                        conn.execute(f"PRAGMA busy_timeout = {int(prev_to)}")
-                except sqlite3.OperationalError:
-                    bumped = None      # bookkeeping never fails a read
+                        # 150 ms once per REQUEST, not per result: five results
+                        # behind a writer waited five times over
+                        prev_to = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+                        conn.execute("PRAGMA busy_timeout = 150")
+                        try:
+                            bumped = S.reinforce(conn, r["slug"])
+                        finally:
+                            conn.execute(f"PRAGMA busy_timeout = {int(prev_to)}")
+                    except sqlite3.OperationalError:
+                        locked_out = True    # bookkeeping never fails a read
                 if bumped:
                     r["strength"] = bumped["strength"]
                     r["access_count"] = bumped["access_count"]

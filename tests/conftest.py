@@ -41,3 +41,16 @@ def fakehome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path / ".skillmem"))
     return tmp_path
+
+@pytest.fixture
+def at_terminal(monkeypatch):
+    """Pretend a person is at the terminal.
+
+    Writing a record with origin='owner' mints the owner seal, and that is gated
+    on a TTY in production: a file an agent can write must not be able to declare
+    itself the owner's. pytest has no terminal, so tests that mean "the owner
+    typed this" say so with this fixture.
+    """
+    from skillmem import storage as S
+    monkeypatch.setattr(S, "owner_present", lambda: True)
+    return True

@@ -234,7 +234,7 @@ def test_a_database_without_the_v10_columns_still_opens(tmp_path):
         conn.close()
 
 
-def test_opening_a_migrated_database_takes_no_write_lock(tmp_path):
+def test_opening_a_migrated_database_takes_no_write_lock(tmp_path, at_terminal):
     """The seal migration runs on every open. A BEGIN IMMEDIATE there made
     inject, recall and search fail with "database is locked" behind any writer."""
     import sqlite3

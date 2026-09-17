@@ -296,7 +296,12 @@ def _run_import(conn, root, assets_root, kind, project_override,
                     # export/import) but never raise it — see migrate._origin_from.
                     # A skillmem dump restores its recorded origin exactly, "unknown"
                     # included (the importer's default used to relabel it "owner").
+                    # ...and `owner` only with a person at the terminal: a file
+                    # an agent can write must not be able to declare itself the
+                    # owner's, because origin=owner sets the seal on insert and
+                    # the record is then undecayable and undeletable for good.
                     origin=(dump_origin if dump_origin in S.ORIGINS
+                            and (dump_origin != "owner" or S.owner_present())
                             else _migrate_origin(meta, item_kind, default_origin)),
                     slug=slug,
                     kind=item_kind,

@@ -1452,9 +1452,13 @@ def upsert(
                         item.wordcount, item.content_hash, item.supersedes_id,
                         item.confidence, item.strength,
                         _valid_origin(item.origin), item.trusted_at, item.trusted_by,
-                        # the seal follows the owner, not the current label
-                        1 if (_valid_origin(item.origin) == "owner"
-                              or item.trusted_at) else 0,
+                        # The seal is minted here and nowhere else, so the owner
+                        # signal is asked here. origin='owner' alone is not enough:
+                        # a file an agent can write (a dump, a markdown source)
+                        # reaches this path, and a minted seal makes the record
+                        # undecayable and undeletable for good.
+                        1 if ((_valid_origin(item.origin) == "owner"
+                               and owner_present()) or item.trusted_at) else 0,
                         item.created_at, item.updated_at,
                     ),
                 )
@@ -1487,9 +1491,17 @@ def upsert(
         # and the relabel went through anyway.
         with tx(conn):
             sealed_now = conn.execute(
-                "SELECT owner_seal, kind FROM memory_items "
+                "SELECT owner_seal, kind, content_hash FROM memory_items "
                 "WHERE id = ? AND deleted_at IS NULL", (existing["id"],)
             ).fetchone()
+            if (sealed_now is not None
+                    and sealed_now["content_hash"] != existing["content_hash"]):
+                # the text changed between the caller's read and this lock, so
+                # this is no longer a same-text write at all
+                raise MemoryConflict(
+                    f"slug '{item.slug}' changed while it was being written; "
+                    f"read it again"
+                )
             if sealed_now is None and not revive:
                 # the row went away between the read and this lock; failing open
                 # here let a sealed record's kind change on the way out. A revive
@@ -1582,7 +1594,6 @@ def _upsert_update_tx(
     explicit: set[str] | None = None,
 ) -> None:
     with tx(conn):
-        changes_before = conn.total_changes
         # Re-read inside the lock for the history row only: `existing` was
         # fetched before the transaction, so two concurrent updates both recorded
         # the same previous text and the intermediate version vanished from
@@ -1614,9 +1625,13 @@ def _upsert_update_tx(
             # would sign someone else's text into the chain, and comparing
             # against the pre-transaction row missed both a title change and a
             # concurrent update.
-            hist_body = (disk if disk is not None
-                         and _hash(fresh["title"], disk) == fresh["content_hash"]
-                         else old_body)
+            if disk is not None and _hash(fresh["title"], disk) == fresh["content_hash"]:
+                hist_body = disk
+            else:
+                # the file failed its hash: `old_body` was read from that same
+                # file by the caller, so falling back to it signs the rejected
+                # text in anyway. The row's own excerpt is the honest record.
+                hist_body = fresh["body"]
         else:
             hist_body = fresh["body"]
         prev_hash = _last_chain_hash(conn)
@@ -1641,7 +1656,7 @@ def _upsert_update_tx(
                 prev_hash, self_hash,
             ),
         )
-        conn.execute(
+        main_update = conn.execute(
             """
             UPDATE memory_items SET
                 -- the owner writing over a record seals it; nothing clears it
@@ -1667,7 +1682,8 @@ def _upsert_update_tx(
             WHERE id = ? AND (deleted_at IS NULL OR ?)
             """,
             (
-                1 if (_valid_origin(item.origin) == "owner" or item.trusted_at) else 0,
+                1 if ((_valid_origin(item.origin) == "owner" and owner_present())
+                      or item.trusted_at) else 0,
                 1 if (explicit is None or "kind" in explicit) else 0, item.kind,
                 item.title, item.body, item.body_path, stemmed, item.project,
                 _json_list(item.tags), _json_list(item.topics),
@@ -1679,7 +1695,7 @@ def _upsert_update_tx(
                 existing["id"], 1 if revive else 0,
             ),
         )
-        if conn.total_changes == changes_before:
+        if main_update.rowcount == 0:
             # deleted (or otherwise gone) between the read and this write: the
             # row is not there, and reporting success left the caller believing
             # text was stored that no read will ever return
