@@ -254,6 +254,7 @@ def write(
     try:
         result = S.upsert(
             conn, item, reason=reason, force=force,
+            owner_call=True,   # the CLI is the owner's own surface (a TTY)
             check_conflicts=check_conflicts,
             links=S.extract_wikilinks(body_text),
             explicit={p for p in ("kind", "project", "ttl_days")
@@ -358,7 +359,17 @@ def trust_cmd(ctx: click.Context, slug: str, untrust: bool) -> None:
             "Run it yourself, not through an agent."
         )
     conn = _conn(ctx.obj["db_path"])
-    item = S.set_trust(conn, slug, trusted=not untrust)
+    # Pin the approval to the text this terminal just saw: an agent rewrite
+    # landing between the read and the approval would otherwise become approved
+    # text, and the hooks would inject the agent's version as the owner's rule.
+    seen = S.get(conn, slug)
+    if seen is None:
+        raise click.ClickException(f"no memory with slug '{slug}'")
+    try:
+        item = S.set_trust(conn, slug, trusted=not untrust,
+                           expect_hash=None if untrust else seen.content_hash)
+    except S.MemoryConflict as exc:
+        raise click.ClickException(str(exc))
     conn.commit()
     if item is None:
         raise click.ClickException(f"no memory with slug '{slug}'")

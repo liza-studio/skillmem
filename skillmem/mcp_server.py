@@ -205,7 +205,6 @@ def _tool_write(args: dict[str, Any]) -> list[TextContent]:
             # only what the client actually sent may change an existing row
             # a JSON null is "not sent"; an empty list for tags/topics is a real clear
             actor=f"mcp:{_agent()}",
-            by_agent=True,
             explicit={k for k in ("kind", "project", "tags", "topics", "ttl_days")
                       if args.get(k) is not None},
         )
@@ -245,7 +244,6 @@ def _tool_update(args: dict[str, Any]) -> list[TextContent]:
             conn, existing, reason=reason,
             links=S.extract_wikilinks(body),
             actor=f"mcp:{_agent()}",
-            by_agent=True,
             explicit={k for k in ("kind", "project", "tags", "topics") if args.get(k) is not None},
         )
     except (S.MemoryConflict, S.SealedRecord, ValueError) as exc:
@@ -288,7 +286,6 @@ def _tool_learn(args: dict[str, Any]) -> list[TextContent]:
             check_conflicts=bool(args.get("check_conflicts", True)),
             links=S.extract_wikilinks(item.body),
             actor=f"mcp:{_agent()}",
-            by_agent=True,
             explicit={k for k in ("visibility", "project", "tags", "topics", "ttl_days")
                       if args.get(k) is not None},
         )

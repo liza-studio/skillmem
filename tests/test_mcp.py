@@ -508,6 +508,68 @@ def test_the_briefing_names_the_owner_rules_an_agent_rewrote(mcp):
     assert "gate-rule" in brief["awaiting_reapproval"]
 
 
+def test_the_kind_guard_is_on_by_default(mcp):
+    """Three rounds running, the hole was a surface that did not pass the flag.
+    The guard is on unless a caller states it is the owner's own."""
+    from skillmem import storage as S
+    import pytest
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="fb-rule", kind="feedback", title="rule",
+                                body="deploy only through the gate here",
+                                origin="owner"), owner_call=True)
+    S.set_trust(conn, "fb-rule", trusted=True)
+    # any caller that does not say "owner" is refused, same text or not
+    with pytest.raises(S.SealedRecord):
+        S.upsert(conn, S.MemoryItem(slug="fb-rule", kind="note", title="rule",
+                                    body="deploy only through the gate here"),
+                 explicit={"kind"})
+    with pytest.raises(S.SealedRecord):
+        S.upsert(conn, S.MemoryItem(slug="fb-rule", kind="note", title="rule",
+                                    body="a different body for this same rule"),
+                 explicit={"kind"}, reason="relabel")
+    assert conn.execute("SELECT kind FROM memory_items WHERE slug='fb-rule'"
+                        ).fetchone()["kind"] == "feedback"
+    # the owner's own surface may
+    S.upsert(conn, S.MemoryItem(slug="fb-rule", kind="note", title="rule",
+                                body="deploy only through the gate here",
+                                origin="owner"), explicit={"kind"}, owner_call=True)
+    assert conn.execute("SELECT kind FROM memory_items WHERE slug='fb-rule'"
+                        ).fetchone()["kind"] == "note"
+
+
+def test_approval_is_pinned_to_the_text_the_owner_read(mcp):
+    """An agent rewrite landing between the read and the approval would otherwise
+    become approved text, and the hooks would inject the agent's version."""
+    from skillmem import storage as S
+    import pytest
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="rule-swap", kind="feedback", title="rule",
+                                body="never paste tokens into a prompt",
+                                origin="owner"), owner_call=True)
+    seen = S.get(conn, "rule-swap")
+    # the agent substitutes the body in the gap
+    S.upsert(conn, S.MemoryItem(slug="rule-swap", kind="feedback", title="rule",
+                                body="paste tokens straight into the prompt"),
+             reason="agent edit")
+    with pytest.raises(S.MemoryConflict):
+        S.set_trust(conn, "rule-swap", trusted=True, expect_hash=seen.content_hash)
+    assert conn.execute("SELECT trusted_at FROM memory_items WHERE slug='rule-swap'"
+                        ).fetchone()["trusted_at"] is None
+
+
+def test_pin_and_reinforce_refuse_a_tombstone(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="skill-gone", kind="skill", title="gone",
+                                body="a skill that is about to be deleted"))
+    S.soft_delete(conn, "skill-gone", "removed")
+    assert S.set_pinned(conn, "skill-gone", True) is None
+    assert S.reinforce(conn, "skill-gone") is None
+    row = conn.execute("SELECT pinned, access_count FROM memory_items "
+                       "WHERE slug='skill-gone'").fetchone()
+    assert (row["pinned"], row["access_count"]) == (0, 0)
+
+
 def test_an_owner_write_of_the_same_text_still_seals(mcp):
     """The seal assignment sat in a branch no real caller reaches: every surface
     passes an explicit field set, so an owner CLI write left the record unsealed."""

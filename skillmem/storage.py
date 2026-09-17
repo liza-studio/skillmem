@@ -1024,6 +1024,15 @@ def _stage_body_file(conn: sqlite3.Connection, slug: str, body: str,
     return dest, dest
 
 
+def _read_body_file(body_path: str) -> str | None:
+    """Read an externalised body, or None if it is not there (a GC'd or moved
+    file must not take down the write that only wanted it for history)."""
+    try:
+        return (docs_dir() / body_path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 def _publish_body_file(staged: tuple[Path, Path]) -> str:
     return staged[1].name
 
@@ -1136,26 +1145,116 @@ def _valid_visibility(visibility: str | None) -> str:
 
 
 def set_trust(conn: sqlite3.Connection, slug: str, *, trusted: bool,
-              by: str = "owner") -> MemoryItem | None:
-    """Grant or withdraw the owner's approval. The only way trust is ever set."""
-    row = conn.execute(
-        "SELECT id FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
-        (slug,),
-    ).fetchone()
-    if not row:
-        return None
-    if trusted:
-        conn.execute(
-            "UPDATE memory_items SET trusted_at = ?, trusted_by = ?, owner_seal = 1 "
-            "WHERE id = ?",
-            (_now(), by, row["id"]),
-        )
-    else:
-        conn.execute(
-            "UPDATE memory_items SET trusted_at = NULL, trusted_by = NULL "
-            "WHERE id = ?", (row["id"],),
-        )
+              by: str = "owner", expect_hash: str | None = None) -> MemoryItem | None:
+    """Grant or withdraw the owner's approval. The only way trust is ever set.
+
+    The approval is given to the words the owner just read, so the write is
+    pinned to them: `expect_hash` (the content_hash they saw) makes an agent
+    rewrite that lands between the read and the approval fail instead of
+    silently becoming approved text. Without it, an agent could swap the body in
+    that gap and the hooks would inject its version as an owner-approved rule.
+    """
+    with tx(conn):     # one step: read, check the text, write
+        row = conn.execute(
+            "SELECT id, content_hash FROM memory_items "
+            "WHERE slug = ? AND deleted_at IS NULL",
+            (slug,),
+        ).fetchone()
+        if not row:
+            return None
+        if trusted and expect_hash is not None and row["content_hash"] != expect_hash:
+            raise MemoryConflict(
+                f"'{slug}' changed since you read it; review it again "
+                f"(`skillmem cat {slug}`) before approving"
+            )
+        if trusted:
+            conn.execute(
+                "UPDATE memory_items SET trusted_at = ?, trusted_by = ?, owner_seal = 1 "
+                "WHERE id = ? AND deleted_at IS NULL",
+                (_now(), by, row["id"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE memory_items SET trusted_at = NULL, trusted_by = NULL "
+                "WHERE id = ? AND deleted_at IS NULL", (row["id"],),
+            )
     return get(conn, slug)
+
+
+def _upsert_same_text(
+    conn: sqlite3.Connection, *, item: "MemoryItem", existing: Any, now: int,
+    explicit: set[str] | None, links: Iterable[str] | None,
+    restore_strength: bool, full_body: str, owner_call: bool, revive: bool,
+) -> "MemoryItem":
+    """Metadata-only update for a write whose text is byte-identical.
+
+    Called inside the caller's transaction: the seal check above it and this
+    write are one step.
+    """
+    # Same text — no history entry, and the owner's approval survives because
+    # it was given to these words. But metadata may still have changed, and
+    # returning the old row unchanged reported success for a write that never
+    # happened.
+    meta = {
+        "project": item.project, "visibility": item.visibility,
+        "kind": item.kind, "ttl_days": item.ttl_days,
+    }
+    if explicit is None:
+        changed = {k: v for k, v in meta.items()
+                   if v is not None and v != existing[k]}
+        if item.agent is not None and item.agent != existing["agent"]:
+            changed["agent"] = item.agent
+        if restore_strength and item.origin and _valid_origin(item.origin) != existing["origin"]:
+            # only a RESTORE (a skillmem dump) rewrites provenance on same
+            # text; an ordinary library write with the default "unknown",
+            # or a migrate of a hand-written file, must not relabel a row
+            changed["origin"] = _valid_origin(item.origin)
+    else:
+        changed = {k: v for k, v in meta.items()
+                   if k in explicit and v is not None and v != existing[k]}
+        if "ttl_days" in explicit and item.ttl_days is None and existing["ttl_days"] is not None:
+            changed["ttl_days"] = None    # an explicit null clears the TTL (HTTP sends it as such)
+    tags, topics = _json_list(item.tags), _json_list(item.topics)
+    tags_given = ("tags" in explicit) if explicit is not None else bool(item.tags)
+    topics_given = ("topics" in explicit) if explicit is not None else bool(item.topics)
+    if tags_given and tags != existing["tags"]:
+        changed["tags"] = tags
+    if topics_given and topics != existing["topics"]:
+        changed["topics"] = topics
+    if revive and existing["deleted_at"] is not None:
+        changed["deleted_at"] = None
+    if "ttl_days" in changed:
+        # a new TTL is a new deadline; storing ttl_days alone left
+        # freshness_until as it was and the expiry never came
+        ttl = changed["ttl_days"]
+        changed["freshness_until"] = now + ttl * 86400 if ttl else None
+    if "tags" in changed or "topics" in changed:
+        # tags/topics are part of the lexical index — a tag added to an
+        # unchanged body must be searchable, so the stems follow. Built
+        # from the RESULTING metadata: a field not supplied keeps the
+        # row's value, one supplied (even empty) replaces it.
+        eff_tags = item.tags if tags_given else _parse_json_list(existing["tags"])
+        eff_topics = item.topics if topics_given else _parse_json_list(existing["topics"])
+        changed["stemmed"] = _stem_text(
+            f"{item.title}\n{full_body}\n" + " ".join(eff_tags + eff_topics)
+        )
+    if restore_strength and item.strength != existing["strength"]:
+        changed["strength"] = item.strength   # an explicit restore applies to same text too
+    if changed:
+        changed["updated_at"] = now
+    # The owner writing the same text is still the owner writing it: the seal
+    # belongs to both branches, and it used to be set only when the caller
+    # passed no explicit field set — which no real caller does.
+    if _valid_origin(item.origin) == "owner" or item.trusted_at:
+        changed["owner_seal"] = 1
+    if changed:
+        sets = ", ".join(f"{k} = ?" for k in changed)
+        conn.execute(f"UPDATE memory_items SET {sets} WHERE id = ?",
+                     (*changed.values(), existing["id"]))
+        if links is not None:
+            _replace_links_inner(conn, item.slug, links)
+        return get(conn, item.slug) or MemoryItem.from_row(existing)
+    return MemoryItem.from_row(existing)
 
 
 def upsert(
@@ -1171,7 +1270,7 @@ def upsert(
     explicit: set[str] | None = None,
     revive: bool = False,
     actor: str | None = None,
-    by_agent: bool = False,
+    owner_call: bool = False,
 ) -> MemoryItem:
     """Insert or update ``item`` by slug; returns the same (mutated) object.
 
@@ -1299,85 +1398,40 @@ def upsert(
         _set_embedding(conn, item.id, item.title, full_body)
         return item
 
-    if (by_agent and existing["owner_seal"] and "kind" in (explicit or set())
-            and item.kind != existing["kind"]):
-        # The hooks' briefing and `skillmem inject` select by kind, so relabelling
-        # a sealed rule 'note' takes it out of the session exactly as archiving
-        # would — and on unchanged text it writes no history row at all. The check
-        # lives here, not in a handler: mem_write, mem_learn, mem_update and the
-        # HTTP routes all arrive through this function, and guarding one of them
-        # left the rest open.
+    if existing["content_hash"] == item.content_hash:
+        # Same text, so no history row — but the seal check and the metadata
+        # UPDATE still have to be one step. The owner approving (and sealing) the
+        # record between the read above and the write below used to be ignored,
+        # and the relabel went through anyway.
+        with tx(conn):
+            sealed_now = conn.execute(
+                "SELECT owner_seal, kind FROM memory_items "
+                "WHERE id = ? AND deleted_at IS NULL", (existing["id"],)
+            ).fetchone()
+            if (sealed_now is not None and not owner_call and sealed_now["owner_seal"]
+                    and "kind" in (explicit or set())
+                    and item.kind != sealed_now["kind"]):
+                raise SealedRecord(
+                    f"'{item.slug}' is the owner's record; an agent cannot change "
+                    f"its kind from {sealed_now['kind']} to {item.kind} (the session "
+                    f"briefing selects by kind). Edit the text instead, or ask the owner."
+                )
+            return _upsert_same_text(
+                conn, item=item, existing=existing, now=now, explicit=explicit,
+                links=links, restore_strength=restore_strength,
+                full_body=full_body, owner_call=owner_call, revive=revive,
+            )
+
+    if not owner_call and existing["owner_seal"] and "kind" in (explicit or set()) \
+            and item.kind != existing["kind"]:
+        # A text change goes through _upsert_update_tx, which re-reads under its
+        # own lock; this pre-check gives the caller the same message without
+        # staging a body file first.
         raise SealedRecord(
             f"'{item.slug}' is the owner's record; an agent cannot change its kind "
             f"from {existing['kind']} to {item.kind} (the session briefing selects "
             f"by kind). Edit the text instead, or ask the owner."
         )
-
-    if existing["content_hash"] == item.content_hash:
-        # Same text — no history entry, and the owner's approval survives because
-        # it was given to these words. But metadata may still have changed, and
-        # returning the old row unchanged reported success for a write that never
-        # happened.
-        meta = {
-            "project": item.project, "visibility": item.visibility,
-            "kind": item.kind, "ttl_days": item.ttl_days,
-        }
-        if explicit is None:
-            changed = {k: v for k, v in meta.items()
-                       if v is not None and v != existing[k]}
-            if item.agent is not None and item.agent != existing["agent"]:
-                changed["agent"] = item.agent
-            if restore_strength and item.origin and _valid_origin(item.origin) != existing["origin"]:
-                # only a RESTORE (a skillmem dump) rewrites provenance on same
-                # text; an ordinary library write with the default "unknown",
-                # or a migrate of a hand-written file, must not relabel a row
-                changed["origin"] = _valid_origin(item.origin)
-        else:
-            changed = {k: v for k, v in meta.items()
-                       if k in explicit and v is not None and v != existing[k]}
-            if "ttl_days" in explicit and item.ttl_days is None and existing["ttl_days"] is not None:
-                changed["ttl_days"] = None    # an explicit null clears the TTL (HTTP sends it as such)
-        tags, topics = _json_list(item.tags), _json_list(item.topics)
-        tags_given = ("tags" in explicit) if explicit is not None else bool(item.tags)
-        topics_given = ("topics" in explicit) if explicit is not None else bool(item.topics)
-        if tags_given and tags != existing["tags"]:
-            changed["tags"] = tags
-        if topics_given and topics != existing["topics"]:
-            changed["topics"] = topics
-        if revive and existing["deleted_at"] is not None:
-            changed["deleted_at"] = None
-        if "ttl_days" in changed:
-            # a new TTL is a new deadline; storing ttl_days alone left
-            # freshness_until as it was and the expiry never came
-            ttl = changed["ttl_days"]
-            changed["freshness_until"] = now + ttl * 86400 if ttl else None
-        if "tags" in changed or "topics" in changed:
-            # tags/topics are part of the lexical index — a tag added to an
-            # unchanged body must be searchable, so the stems follow. Built
-            # from the RESULTING metadata: a field not supplied keeps the
-            # row's value, one supplied (even empty) replaces it.
-            eff_tags = item.tags if tags_given else _parse_json_list(existing["tags"])
-            eff_topics = item.topics if topics_given else _parse_json_list(existing["topics"])
-            changed["stemmed"] = _stem_text(
-                f"{item.title}\n{full_body}\n" + " ".join(eff_tags + eff_topics)
-            )
-        if restore_strength and item.strength != existing["strength"]:
-            changed["strength"] = item.strength   # an explicit restore applies to same text too
-        if changed:
-            changed["updated_at"] = now
-        # The owner writing the same text is still the owner writing it: the seal
-        # belongs to both branches, and it used to be set only when the caller
-        # passed no explicit field set — which no real caller does.
-        if _valid_origin(item.origin) == "owner" or item.trusted_at:
-            changed["owner_seal"] = 1
-        if changed:
-            sets = ", ".join(f"{k} = ?" for k in changed)
-            conn.execute(f"UPDATE memory_items SET {sets} WHERE id = ?",
-                         (*changed.values(), existing["id"]))
-            if links is not None:
-                _replace_links_inner(conn, item.slug, links)
-            return get(conn, item.slug) or MemoryItem.from_row(existing)
-        return MemoryItem.from_row(existing)
 
     if not reason and not force:
         # this reaches the CLI, MCP and HTTP alike, and the create surfaces
@@ -1447,8 +1501,15 @@ def _upsert_update_tx(
             (existing["id"],),
         ).fetchone()
         hist_title = fresh["title"] if fresh is not None else existing["title"]
-        hist_body = (fresh["body"] if fresh is not None and not fresh["body_path"]
-                     else old_body)
+        if fresh is None:
+            hist_body = old_body
+        elif fresh["body_path"]:
+            # An externalised body lives in a file, and `old_body` was read
+            # before the lock: two concurrent updates both recorded the older
+            # version as predecessor, and the middle one was then GC'd off disk.
+            hist_body = _read_body_file(fresh["body_path"]) or old_body
+        else:
+            hist_body = fresh["body"]
         prev_hash = _last_chain_hash(conn)
         now = _chain_clock(conn, now)
         history_payload = {
@@ -2377,7 +2438,8 @@ def reinforce(
         conn.execute(
             "UPDATE memory_items SET strength = MAX(?, strength * ?), "
             "access_count = access_count + 1, last_accessed_at = ?, "
-            "failure_count = failure_count + 1 WHERE id = ?",
+            "failure_count = failure_count + 1 "
+            "WHERE id = ? AND deleted_at IS NULL",
             (DECAY_FLOOR, FAILURE_FACTOR, now, row["id"]),
         )
     else:
@@ -2385,7 +2447,8 @@ def reinforce(
         conn.execute(
             "UPDATE memory_items SET strength = MIN(?, strength + ?), "
             "access_count = access_count + 1, last_accessed_at = ?, "
-            "confirmed_count = confirmed_count + ? WHERE id = ?",
+            "confirmed_count = confirmed_count + ? "
+            "WHERE id = ? AND deleted_at IS NULL",
             (STRENGTH_CAP, boost, now, 1 if boost > 0 else 0, row["id"]),
         )
     fresh = conn.execute(
@@ -2408,22 +2471,29 @@ def set_pinned(
     through the gate", "never force-push to main" — rarity is the whole point,
     and decay would read it as irrelevance.
     """
-    row = conn.execute(
-        "SELECT id, pinned, lifecycle FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
-        (slug,),
-    ).fetchone()
-    if not row:
-        return None
-    # the flag only — updated_at is the text's age, and pinning is not an edit,
-    # and lifecycle is not pinning's business: an archived row comes back
-    # through the one call that says so (set_archived / mem_archive), so that
-    # strength is never handed out by a side effect of a different verb.
-    conn.execute(
-        "UPDATE memory_items SET pinned = ? WHERE id = ?",
-        (1 if pinned else 0, row["id"]),
-    )
+    with tx(conn):     # read and write as one step, like every other mutation
+        row = conn.execute(
+            "SELECT id, pinned, lifecycle FROM memory_items "
+            "WHERE slug = ? AND deleted_at IS NULL",
+            (slug,),
+        ).fetchone()
+        if not row:
+            return None
+        # the flag only — updated_at is the text's age, and pinning is not an
+        # edit, and lifecycle is not pinning's business: an archived row comes
+        # back through the one call that says so (set_archived / mem_archive), so
+        # that strength is never handed out by a side effect of a different verb.
+        conn.execute(
+            "UPDATE memory_items SET pinned = ? WHERE id = ? AND deleted_at IS NULL",
+            (1 if pinned else 0, row["id"]),
+        )
+        # after the write: the caller prints this, and a pre-write value made
+        # `skillmem pin` describe a state that no longer held
+        after = conn.execute(
+            "SELECT lifecycle FROM memory_items WHERE id = ?", (row["id"],)
+        ).fetchone()
     return {"slug": slug, "pinned": pinned, "changed": bool(row["pinned"]) != pinned,
-            "lifecycle": row["lifecycle"]}
+            "lifecycle": after["lifecycle"] if after else row["lifecycle"]}
 
 
 def decay_stale(
@@ -2436,6 +2506,14 @@ def decay_stale(
     now = _now()
     days_threshold = max(1, int(days_threshold))   # 0 or negative compounded on every run
     cutoff = now - days_threshold * 86400
+    with tx(conn):    # a pin or an approval landing between the SELECT and the
+        # UPDATE used to be ignored, and the record decayed anyway
+        return _decay_stale_rows(conn, kind=kind, cutoff=cutoff, now=now)
+
+
+def _decay_stale_rows(
+    conn: sqlite3.Connection, *, kind: str, cutoff: int, now: int
+) -> list[dict[str, Any]]:
     # A skill nobody has recalled yet is measured from its birth, not from
     # "never" — otherwise the first nightly run hits a day-old skill. And one
     # decay step per elapsed threshold: running the job twice in a night, or

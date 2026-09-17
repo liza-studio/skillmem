@@ -64,6 +64,19 @@
   restore fires only for a record that is actually archived, not for every
   non-archived dump, which defeated decay on every weekly export/import. The
   importer's own history rows name it ("import") instead of no one.
+- The owner gate fails closed: `upsert` guards unless the caller states it is the
+  owner's own surface (`owner_call=True`, the CLI). Three rounds running, the hole
+  was a surface that simply did not pass the old opt-in flag — MCP, then HTTP
+  `/update`, then HTTP `/write` and `/learn`.
+- Approval is pinned to the text the owner read. `skillmem trust` passes the hash
+  it just displayed, and an agent rewrite landing between the read and the
+  approval is refused instead of quietly becoming approved text that the hooks
+  then inject as the owner's own rule.
+- Every mutation that touches lifecycle, approval, pinning, strength or deletion
+  now reads and writes inside one transaction, and never writes to a tombstone:
+  `set_trust`, `set_pinned`, `reinforce`, `decay_stale`, `sweep_lifecycle`,
+  `remove_pack`, `set_archived`, the same-text metadata write. Every one of them
+  was a read followed by a write with a gap the owner's approval could land in.
 - Pack removal and the update path both hold a transaction over the whole step.
   Between a selection and its write, the owner can approve a record in another
   process: a pack removal tombstoned a record that had just been approved, and

@@ -318,7 +318,7 @@ def _run_import(conn, root, assets_root, kind, project_override,
                     S.set_pinned(conn, slug, False)
                 # a dump of an archived record restores it archived, or the
                 # weekly export would quietly un-retire everything
-                S.set_archived(conn, slug, True)
+                S.set_archived(conn, slug, True, by="import")
                 if pinned is None and was_pinned and was_pinned["pinned"]:
                     S.set_pinned(conn, slug, True)     # the row's own flag, untouched
             if pinned is not None:
