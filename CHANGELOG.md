@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.1
+
+- `mem_archive`: an agent can retire a record that no longer applies — it
+  leaves search, recall, list and the hooks' inject, keeps its text, history
+  and approval, stays readable by slug, and comes back with `archived=false`.
+  Nothing is deleted; deletion stays with the owner at the CLI. A pinned
+  record is refused until unpinned. Ten tools.
+- Every tool description rewritten to the same shape: what it does, whether it
+  writes and what the side effect is, what the parameters mean beyond the
+  schema, what it returns, and which sibling tool to use instead and when.
+
 ## 0.11.0
 
 Two independent reviewers (one on the Claude side, one on the GPT side) read the

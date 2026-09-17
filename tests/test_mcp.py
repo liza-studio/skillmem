@@ -42,8 +42,8 @@ def _payload(result) -> dict:
 
 def test_tools_and_handlers_match(mcp):
     names = [t.name for t in mcp.TOOLS]
-    assert len(names) == 9
-    assert len(set(names)) == 9
+    assert len(names) == 10
+    assert len(set(names)) == 10
     assert set(names) == set(mcp.TOOL_HANDLERS)
 
 
@@ -297,3 +297,33 @@ def test_identical_rewrite_is_described_honestly(mcp):
     """mem_write returns the existing record when the text is byte-identical
     instead of raising — the description has to say so."""
     assert "byte-identical" in _desc(mcp, "mem_write")
+
+
+# --------------------------------------------------------------------------- #
+# archive (0.11.1)
+# --------------------------------------------------------------------------- #
+
+
+def test_archive_hides_from_search_recall_list_but_get_still_reads(mcp):
+    _payload(mcp._tool_learn({"slug": "skill-retire-me", "title": "retire me",
+                              "trigger": "quartz calibration bench", "steps": "step one step two",
+                              "outcome": "success", "lessons": "none"}))
+    r = _payload(mcp._tool_archive({"slug": "skill-retire-me"}))
+    assert r["lifecycle"] == "archived" and r["was"] == "active"
+    assert all(h["slug"] != "skill-retire-me" for h in _payload(mcp._tool_search({"query": "quartz calibration"}))["results"])
+    assert all(h["slug"] != "skill-retire-me" for h in _payload(mcp._tool_recall({"query": "quartz calibration", "auto_reinforce": False}))["skills"])
+    assert all(i["slug"] != "skill-retire-me" for i in _payload(mcp._tool_list({"limit": 50}))["items"])
+    got = _payload(mcp._tool_get({"slug": "skill-retire-me"}))
+    assert got["slug"] == "skill-retire-me"
+    back = _payload(mcp._tool_archive({"slug": "skill-retire-me", "archived": False}))
+    assert back["lifecycle"] == "active" and back["was"] == "archived"
+    assert any(i["slug"] == "skill-retire-me" for i in _payload(mcp._tool_list({"limit": 50}))["items"])
+
+
+def test_archive_refuses_pinned_and_unknown(mcp):
+    _payload(mcp._tool_write({"slug": "gate-rule", "title": "deploy gate", "body": "only through the gate"}))
+    _payload(mcp._tool_pin({"slug": "gate-rule"}))
+    err = _payload(mcp._tool_archive({"slug": "gate-rule"}))
+    assert "pinned" in err.get("error", "")
+    err = _payload(mcp._tool_archive({"slug": "no-such-slug"}))
+    assert "not found" in err.get("error", "")

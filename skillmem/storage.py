@@ -1633,7 +1633,7 @@ def list_items(
             kind = _valid_kind(kind)  # "Reference" filters find "reference" rows
         except ValueError:
             return []                 # a filter nothing can match matches nothing
-    where = ["deleted_at IS NULL"]
+    where = ["deleted_at IS NULL", "lifecycle != 'archived'"]
     params: list[Any] = []
     if kind:
         where.append("kind = ?")
@@ -2110,6 +2110,7 @@ def briefing(
             """
             SELECT slug, title, updated_at FROM memory_items
             WHERE kind = ? AND deleted_at IS NULL AND trusted_at IS NOT NULL
+              AND lifecycle != 'archived'
             ORDER BY updated_at DESC LIMIT ?
             """,
             (kind, per_kind_limit),
@@ -2412,6 +2413,31 @@ def lifecycle_counts(conn: sqlite3.Connection, *, kind: str = "skill") -> dict[s
         (kind,),
     ).fetchall()
     return {r["lifecycle"]: r["c"] for r in rows}
+
+
+def set_archived(
+    conn: sqlite3.Connection, slug: str, archived: bool
+) -> dict[str, Any] | None:
+    """Archive a record (out of search, recall and inject; kept, reversible)
+    or bring it back. A pinned record is refused — pin means "never archive".
+
+    Deletion stays with the owner at the CLI; an agent gets to say "this no
+    longer applies" without erasing anything.
+    """
+    row = conn.execute(
+        "SELECT id, pinned, lifecycle FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
+        (slug,),
+    ).fetchone()
+    if not row:
+        return None
+    if archived and row["pinned"]:
+        raise ValueError(f"'{slug}' is pinned; unpin it first (mem_pin pinned=false)")
+    conn.execute(
+        "UPDATE memory_items SET lifecycle = ?, updated_at = ? WHERE id = ?",
+        ("archived" if archived else "active", _now(), row["id"]),
+    )
+    return {"slug": slug, "lifecycle": "archived" if archived else "active",
+            "was": row["lifecycle"]}
 
 
 def restore_skill(conn: sqlite3.Connection, slug: str) -> bool:
