@@ -2145,6 +2145,15 @@ def skills_lifecycle(ctx: click.Context) -> None:
         return
     for state in ("active", "stale", "archived"):
         click.echo(f"  {state:9} {counts.get(state, 0)}")
+    hidden = conn.execute(
+        "SELECT slug, kind FROM memory_items "
+        "WHERE lifecycle = 'archived' AND deleted_at IS NULL ORDER BY slug"
+    ).fetchall()
+    if hidden:
+        # a count alone cannot answer "what is out of every read right now"
+        click.echo("\narchived (out of search, recall and inject):")
+        for r in hidden:
+            click.echo(f"  {r['slug']}  [{r['kind']}]")
 
 
 @main.command("skills-restore")

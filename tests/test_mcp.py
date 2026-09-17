@@ -427,6 +427,81 @@ def test_agent_cannot_archive_what_the_owner_approved(mcp):
     assert S.set_archived(conn, "rule-gate", True, by="owner-cli")["lifecycle"] == "archived"
 
 
+def test_update_does_not_open_the_way_to_archive_an_owner_record(mcp):
+    """mem_update relabels origin to 'agent' and drops the approval by design, so
+    the gate cannot rest on those two fields: two calls would lift any rule."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="deploy-gate", kind="feedback", title="deploy gate",
+                                body="deploy only through the gate, never by hand",
+                                origin="owner"))
+    conn.execute("UPDATE memory_items SET trusted_at = ?, trusted_by = 'owner' "
+                 "WHERE slug = 'deploy-gate'", (1_700_000_000,))
+    _payload(mcp._tool_update({"slug": "deploy-gate", "title": "deploy gate (v2)",
+                               "body": "deploy only through the gate, never by hand at all",
+                               "reason": "clarified"}))
+    row = conn.execute("SELECT origin, trusted_at, owner_seal FROM memory_items "
+                       "WHERE slug='deploy-gate'").fetchone()
+    assert (row["origin"], row["trusted_at"]) == ("agent", None)   # both moved, as designed
+    assert row["owner_seal"] == 1                                  # the seal did not
+    err = _payload(mcp._tool_archive({"slug": "deploy-gate"}))
+    assert "cannot archive" in err.get("error", ""), err
+    assert conn.execute("SELECT lifecycle FROM memory_items WHERE slug='deploy-gate'"
+                        ).fetchone()["lifecycle"] == "active"
+
+
+def test_nightly_sweep_never_hides_an_owner_record(mcp):
+    """The slow path to the same place: an agent can drive strength to the floor."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    old_ts = 1_600_000_000
+    for slug, origin in (("owner-rule", "owner"), ("agent-skill", "agent")):
+        S.upsert(conn, S.MemoryItem(slug=slug, kind="skill", title=slug,
+                                    body=f"the body of {slug} kept for the sweep test",
+                                    origin=origin))
+        conn.execute("UPDATE memory_items SET strength = ?, last_accessed_at = ?, "
+                     "created_at = ? WHERE slug = ?",
+                     (S.DECAY_FLOOR, old_ts, old_ts, slug))
+    swept = S.sweep_lifecycle(conn)
+    assert "agent-skill" in swept["archived"]
+    assert "owner-rule" not in swept["archived"]
+    # and what it did archive left the same audit row an explicit archive leaves
+    rows = conn.execute("SELECT changed_by, reason FROM memory_history "
+                        "WHERE slug='agent-skill' ORDER BY id").fetchall()
+    assert rows and rows[-1]["reason"] == "archived by nightly sweep"
+    assert rows[-1]["changed_by"] == "sweep"
+    _, broken = S.verify_history(conn)
+    assert broken == []
+
+
+def test_history_actor_cannot_be_spoofed_by_the_client(mcp, monkeypatch):
+    """_agent() falls back to clientInfo.name, which the agent supplies."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    monkeypatch.setattr(mcp, "_ENV_AGENT", "owner-cli", raising=False)
+    monkeypatch.setattr(mcp, "_client_agent", "owner-cli", raising=False)
+    _payload(mcp._tool_learn({"slug": "skill-spoof", "title": "spoof", "trigger": "a trigger",
+                              "steps": "the steps", "outcome": "success", "lessons": None}))
+    _payload(mcp._tool_archive({"slug": "skill-spoof"}))
+    actor = conn.execute("SELECT changed_by FROM memory_history WHERE slug='skill-spoof' "
+                         "ORDER BY id DESC LIMIT 1").fetchone()["changed_by"]
+    assert actor == "mcp:owner-cli"          # the surface stamps itself, not the caller
+
+
+def test_restoring_an_active_record_writes_no_history(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    _payload(mcp._tool_learn({"slug": "skill-live", "title": "live", "trigger": "a trigger",
+                              "steps": "the steps", "outcome": "success", "lessons": None}))
+    before = conn.execute("SELECT COUNT(*) c FROM memory_history "
+                          "WHERE slug='skill-live'").fetchone()["c"]
+    r = _payload(mcp._tool_archive({"slug": "skill-live", "archived": False}))
+    assert r["was"] == "active"
+    after = conn.execute("SELECT COUNT(*) c FROM memory_history "
+                         "WHERE slug='skill-live'").fetchone()["c"]
+    assert after == before                   # no transition, no row
+
+
 def test_archiving_leaves_a_history_row(mcp):
     """The owner's only trace of a record leaving every read."""
     from skillmem import storage as S

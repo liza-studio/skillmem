@@ -174,6 +174,7 @@ CREATE TABLE IF NOT EXISTS memory_items (
     origin          TEXT NOT NULL DEFAULT 'unknown', -- owner|agent|imported|derived (v10)
     trusted_at      INTEGER,                       -- set only by the owner (v10)
     trusted_by      TEXT,
+    owner_seal      INTEGER NOT NULL DEFAULT 0,    -- was the owner's; never cleared (0.11.1)
     last_decayed_at INTEGER,                       -- one decay step per threshold (0.11)
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
@@ -309,6 +310,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # never landed would otherwise fail every read with "no such column: origin".
     if not {"origin", "trusted_at", "trusted_by"} <= live_cols:
         _migrate_v10(conn)
+    if "owner_seal" not in live_cols:
+        _migrate_owner_seal(conn)
 
     if _current_schema_version(conn) >= CURRENT_SCHEMA_VERSION:
         return
@@ -511,6 +514,33 @@ def _backup_before_v10(conn: sqlite3.Connection) -> None:
         log.warning("could not write the pre-v10 backup: %s", exc)
 
 
+def _migrate_owner_seal(conn: sqlite3.Connection) -> None:
+    """Add owner_seal and seal what the owner already wrote or approved.
+
+    Set once, never cleared: this record was the owner's, whatever happens to it
+    later. `origin` and `trusted_at` both move under an agent's own writes
+    (mem_update relabels origin to 'agent' and drops the approval, by design), so
+    neither can carry a rule the same agent must not be able to lift. Checked on
+    every open, like v10's columns: a database carrying v10 already never runs
+    that migration again, and this column has to reach those databases too.
+    """
+    try:
+        with tx(conn):   # BEGIN IMMEDIATE: two processes may open the same file
+            have = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)")}
+            if "owner_seal" in have:
+                return
+            conn.execute(
+                "ALTER TABLE memory_items ADD COLUMN owner_seal INTEGER NOT NULL DEFAULT 0"
+            )
+            conn.execute(
+                "UPDATE memory_items SET owner_seal = 1 "
+                "WHERE origin = 'owner' OR trusted_at IS NOT NULL"
+            )
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+
 def _migrate_v10(conn: sqlite3.Connection) -> None:
     """Add provenance + approval, atomically, once.
 
@@ -596,7 +626,8 @@ def _backfill_origin(conn: sqlite3.Connection) -> None:
     # release exists to distrust, and approving 7809 of them at once would empty
     # the marker of meaning on day one.
     conn.execute(
-        "UPDATE memory_items SET trusted_at = ?, trusted_by = 'migration-v10' "
+        "UPDATE memory_items SET trusted_at = ?, trusted_by = 'migration-v10', "
+        "owner_seal = 1 "
         "WHERE trusted_at IS NULL AND origin IN ('owner', 'agent')", (now,))
 
 
@@ -1091,7 +1122,8 @@ def set_trust(conn: sqlite3.Connection, slug: str, *, trusted: bool,
         return None
     if trusted:
         conn.execute(
-            "UPDATE memory_items SET trusted_at = ?, trusted_by = ? WHERE id = ?",
+            "UPDATE memory_items SET trusted_at = ?, trusted_by = ?, owner_seal = 1 "
+            "WHERE id = ?",
             (_now(), by, row["id"]),
         )
     else:
@@ -1201,8 +1233,8 @@ def upsert(
                         topics, visibility, agent, source_session, attachments, ttl_days,
                         freshness_until, wordcount, content_hash, supersedes_id,
                         confidence, strength, origin, trusted_at, trusted_by,
-                        created_at, updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        owner_seal, created_at, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         item.slug, item.kind, item.title, item.body, item.body_path,
@@ -1213,6 +1245,9 @@ def upsert(
                         item.wordcount, item.content_hash, item.supersedes_id,
                         item.confidence, item.strength,
                         _valid_origin(item.origin), item.trusted_at, item.trusted_by,
+                        # the seal follows the owner, not the current label
+                        1 if (_valid_origin(item.origin) == "owner"
+                              or item.trusted_at) else 0,
                         item.created_at, item.updated_at,
                     ),
                 )
@@ -1252,6 +1287,8 @@ def upsert(
                        if v is not None and v != existing[k]}
             if item.agent is not None and item.agent != existing["agent"]:
                 changed["agent"] = item.agent
+            if _valid_origin(item.origin) == "owner":
+                changed["owner_seal"] = 1
             if restore_strength and item.origin and _valid_origin(item.origin) != existing["origin"]:
                 # only a RESTORE (a skillmem dump) rewrites provenance on same
                 # text; an ordinary library write with the default "unknown",
@@ -2387,15 +2424,21 @@ def sweep_lifecycle(
 
     # COALESCE: a never-recalled skill counts idle time from its creation.
     archive_rows = conn.execute(
-        "SELECT id, slug, title, strength, last_accessed_at FROM memory_items "
+        "SELECT id, slug, title, body, strength, last_accessed_at FROM memory_items "
         "WHERE kind = ? AND deleted_at IS NULL AND lifecycle != 'archived' "
-        "AND pinned = 0 "
+        # owner_seal, like pinned: the nightly job is the slow path to the same
+        # place mem_archive is refused, and mem_reinforce evidence='failure'
+        # lets an agent walk a record's strength down to the floor on purpose.
+        "AND pinned = 0 AND owner_seal = 0 "
         "AND strength <= ? AND COALESCE(last_accessed_at, created_at) < ?",
         (kind, DECAY_FLOOR, archive_cut),
     ).fetchall()
     _backup_skills(archive_rows, "archive")
     archived = [r["slug"] for r in archive_rows]
     for r in archive_rows:
+        # the same audit row an explicit archive leaves: "gone from every read"
+        # must be answerable afterwards however it happened
+        _append_lifecycle_history(conn, r["slug"], r, "archived by nightly sweep", "sweep")
         conn.execute(
             "UPDATE memory_items SET lifecycle = 'archived' WHERE id = ?", (r["id"],)
         )
@@ -2403,6 +2446,7 @@ def sweep_lifecycle(
     stale_rows = conn.execute(
         "SELECT id, slug FROM memory_items "
         "WHERE kind = ? AND deleted_at IS NULL AND lifecycle = 'active' "
+        # 'stale' still shows up in every read, so it needs no seal exemption
         "AND pinned = 0 "
         "AND COALESCE(last_accessed_at, created_at) < ?",
         (kind, stale_cut),
@@ -2467,15 +2511,19 @@ def set_archived(
     if not row:
         return None
     if archived and row["pinned"]:
-        raise ValueError(f"'{slug}' is pinned; unpin it first (mem_pin pinned=false)")
+        raise ValueError(f"'{slug}' is pinned; unpin it before archiving it")
     # Hiding a record from every read is a change the owner must be able to see
     # afterwards: mem_update leaves a history row, and so does this. The text is
     # untouched, so the row records what was hidden, not a new version.
-    _append_lifecycle_history(
-        conn, slug, row,
-        "archived" if archived else f"restored from {row['lifecycle']}",
-        by,
-    )
+    moving = (row["lifecycle"] != "archived") if archived else (row["lifecycle"] != "active")
+    if moving:
+        # only a real transition gets a row: "restored from active" recorded a
+        # change that never happened, and an agent could repeat it at will
+        _append_lifecycle_history(
+            conn, slug, row,
+            "archived" if archived else f"restored from {row['lifecycle']}",
+            by,
+        )
     if archived:
         # lifecycle only — updated_at is the text's age, and archiving is not
         # an edit; touching it would reorder listings and reset freshness

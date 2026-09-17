@@ -27,14 +27,24 @@
   to say `force=True`, which no surface accepts, and then `reason=`, which only
   the update tools carry — the two tools that actually raise it, `mem_write` and
   `mem_learn`, have neither.
-- `mem_archive` refuses a record the owner wrote or approved, and names
+- `mem_archive` refuses a record the owner ever wrote or approved, and names
   `skillmem skills-archive` instead. Archiving hides a record from search,
   recall, list and the session briefing while leaving its text, approval and
   origin untouched, so an agent retiring the owner's own rule left nothing that
-  a later read would show. Every lifecycle change now also writes a row into
-  the tamper-evident history, and `skillmem skills-lifecycle` counts every kind
-  rather than skills alone, so an archived note or feedback rule is visible
-  where the lifecycle is reported.
+  a later read would show. The refusal reads a new `owner_seal` column, set once
+  and never cleared: `origin` and `trusted_at` both move under an agent's own
+  writes (`mem_update` relabels origin to `agent` and drops the approval, by
+  design), so a gate resting on those two was one extra call from open. The
+  nightly lifecycle sweep exempts sealed records for the same reason —
+  `mem_reinforce evidence="failure"` lets an agent walk a record's strength down
+  to the floor, which is the slow way to the same place. Existing databases gain
+  the column and its backfill on first open.
+- Every real lifecycle change writes a row into the tamper-evident history, the
+  nightly sweep included, with the acting surface stamped by that surface rather
+  than taken from the caller (an MCP client supplies its own name). A call that
+  changes nothing writes nothing. `skillmem skills-lifecycle` counts every kind
+  rather than skills alone and lists the archived slugs, so what is out of every
+  read right now is visible where the lifecycle is reported.
 - `skillmem pin` on an archived record says so: pinning does not un-archive, and
   archiving is refused while pinned, so the record would otherwise stay out of
   every read without a word. `restore_skill` and `set_archived(archived=false)`

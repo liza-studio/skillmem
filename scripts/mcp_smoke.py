@@ -21,6 +21,9 @@ import tempfile
 HERE = Path(__file__).resolve().parent.parent
 _bin = os.environ.get("SKILLMEM_MCP_BIN") or shutil.which("skillmem-mcp")
 SERVER = Path(_bin) if _bin else HERE / ".venv" / "bin" / "skillmem-mcp"
+# Unique per run: the cleanup below is a hard DELETE, and a fixed slug could
+# name a real record in whatever database this was pointed at.
+RUN = f"{int(time.time())}-{os.getpid()}"
 DB_PATH = os.environ.get(
     "SKILLMEM_DB", str(Path(tempfile.gettempdir()) / "skillmem-test" / "memory.db")
 )
@@ -110,7 +113,7 @@ def main() -> int:
             _send(proc, {
                 "jsonrpc": "2.0", "id": 100 + i, "method": "tools/call",
                 "params": {"name": "mem_write", "arguments": {
-                    "slug": f"smoke-feedback-{i}",
+                    "slug": f"smoke-{RUN}-feedback-{i}",
                     "title": f"smoke feedback {i}",
                     "body": f"Правило {i}: проверять галлюцинации командой, "
                             f"а не рассуждением — случай номер {i}. "
@@ -148,7 +151,7 @@ def main() -> int:
             "params": {
                 "name": "mem_write",
                 "arguments": {
-                    "slug": "smoke-test-marker",
+                    "slug": f"smoke-{RUN}-marker",
                     "title": "smoke marker",
                     "body": "Inserted by mcp_smoke.py at run time.",
                     "kind": "note",
@@ -176,8 +179,8 @@ def main() -> int:
             db = sqlite3.connect(DB_PATH)
             db.executemany(
                 "DELETE FROM memory_items WHERE slug = ?",
-                [(s,) for s in ("smoke-test-marker", "smoke-feedback-0",
-                                "smoke-feedback-1", "smoke-feedback-2")],
+                [(f"smoke-{RUN}-marker",)]
+                + [(f"smoke-{RUN}-feedback-{i}",) for i in range(3)],
             )
             db.commit(); db.close()
         except Exception as exc:                   # a failed cleanup is not a failed smoke
