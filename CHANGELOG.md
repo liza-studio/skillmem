@@ -10,6 +10,14 @@
 - Every tool description rewritten to the same shape: what it does, whether it
   writes and what the side effect is, what the parameters mean beyond the
   schema, what it returns, and which sibling tool to use instead and when.
+  Where a description promised more than the code delivered, the code was
+  brought up to it: `mem_reinforce` now refuses a record that is not a skill
+  (strength and decay are a skill's mechanics), `mem_recall` caps `limit` at
+  50 as it always said, and archiving writes the lifecycle state and nothing
+  else — `updated_at` is the text's age, and archiving is not an edit.
+- Restoring an archived record (`mem_archive` with `archived=false`, and
+  `skillmem restore`) refreshes its recency and floors strength at 0.5, so the
+  nightly lifecycle sweep does not archive it again the same night.
 
 ## 0.11.0
 

@@ -327,3 +327,53 @@ def test_archive_refuses_pinned_and_unknown(mcp):
     assert "pinned" in err.get("error", "")
     err = _payload(mcp._tool_archive({"slug": "no-such-slug"}))
     assert "not found" in err.get("error", "")
+
+
+def test_reinforce_refuses_a_record_that_is_not_a_skill(mcp):
+    _payload(mcp._tool_write({"slug": "plain-note", "title": "note", "body": "just a note"}))
+    err = _payload(mcp._tool_reinforce({"slug": "plain-note", "evidence": "test_passed"}))
+    assert "not a skill" in err.get("error", "")
+    from skillmem import storage as S
+    assert S.get(mcp._shared_conn(), "plain-note").strength == 1.0
+
+
+def test_recall_limit_is_capped_at_fifty(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    for i in range(70):
+        S.upsert(conn, S.MemoryItem(slug=f"skill-c-{i}", kind="skill", title=f"common skill {i}",
+                                    body="common words for every skill " * 3), check_conflicts=False)
+    assert len(_payload(mcp._tool_recall({"query": "common words", "limit": 100,
+                                          "auto_reinforce": False}))["skills"]) <= 50
+
+
+def test_learn_same_text_returns_the_existing_skill_and_conflicts_name_notes(mcp):
+    body = "the exact same steps written once and repeated verbatim here"
+    a = _payload(mcp._tool_learn({"slug": "skill-same", "title": "same", "trigger": body,
+                                  "steps": body, "outcome": "success", "lessons": "none"}))
+    b = _payload(mcp._tool_learn({"slug": "skill-same", "title": "same", "trigger": body,
+                                  "steps": body, "outcome": "success", "lessons": "none"}))
+    assert a["ok"] and b["ok"]                       # byte-identical is not a conflict
+    _payload(mcp._tool_write({"slug": "a-note", "title": "note",
+                              "body": "deployment rollback checklist for the release train"}))
+    err = _payload(mcp._tool_learn({"slug": "skill-dup", "title": "dup",
+                                    "trigger": "deployment rollback checklist for the release train",
+                                    "steps": "deployment rollback checklist for the release train",
+                                    "outcome": "success", "lessons": "none"}))
+    assert "a-note" in err.get("error", "")          # a plain note is named, as the description says
+
+
+def test_archive_keeps_updated_at_and_restore_survives_the_sweep(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    _payload(mcp._tool_learn({"slug": "skill-idle", "title": "idle", "trigger": "rarely used path",
+                              "steps": "step", "outcome": "success", "lessons": "none"}))
+    old = S._now() - 100 * 86400
+    conn.execute("UPDATE memory_items SET updated_at = ?, last_accessed_at = ?, strength = 0.05 "
+                 "WHERE slug = 'skill-idle'", (old, old))
+    _payload(mcp._tool_archive({"slug": "skill-idle"}))
+    assert S.get(conn, "skill-idle").updated_at == old      # archiving is not an edit
+    _payload(mcp._tool_archive({"slug": "skill-idle", "archived": False}))
+    S.sweep_lifecycle(conn)
+    row = conn.execute("SELECT lifecycle FROM memory_items WHERE slug = 'skill-idle'").fetchone()
+    assert row["lifecycle"] == "active"                     # the sweep does not undo a restore

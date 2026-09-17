@@ -2241,9 +2241,11 @@ def reinforce(
             f"unknown evidence {evidence!r}; expected one of "
             f"{', '.join(sorted(EVIDENCE_WEIGHTS))}"
         )
+    # skills only: strength and decay are a skill's mechanics, and every
+    # channel's description promises a non-skill is refused
     row = conn.execute(
         "SELECT id, strength, access_count, confirmed_count, failure_count "
-        "FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
+        "FROM memory_items WHERE slug = ? AND deleted_at IS NULL AND kind = 'skill'",
         (slug,),
     ).fetchone()
     if not row:
@@ -2432,10 +2434,20 @@ def set_archived(
         return None
     if archived and row["pinned"]:
         raise ValueError(f"'{slug}' is pinned; unpin it first (mem_pin pinned=false)")
-    conn.execute(
-        "UPDATE memory_items SET lifecycle = ?, updated_at = ? WHERE id = ?",
-        ("archived" if archived else "active", _now(), row["id"]),
-    )
+    if archived:
+        # lifecycle only — updated_at is the text's age, and archiving is not
+        # an edit; touching it would reorder listings and reset freshness
+        conn.execute(
+            "UPDATE memory_items SET lifecycle = 'archived' WHERE id = ?", (row["id"],)
+        )
+    else:
+        # restoring refreshes recency and floors strength, or the nightly
+        # sweep_lifecycle would archive it again on its next run
+        conn.execute(
+            "UPDATE memory_items SET lifecycle = 'active', "
+            "strength = MAX(strength, ?), last_accessed_at = ? WHERE id = ?",
+            (0.5, _now(), row["id"]),
+        )
     return {"slug": slug, "lifecycle": "archived" if archived else "active",
             "was": row["lifecycle"]}
 
