@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import os
 from pathlib import Path
 
@@ -170,6 +171,7 @@ def test_db_flag_reaches_scheduled_job_env(home, monkeypatch):
     assert sch._job_env().get("SKILLMEM_DB") == str(home / "x.db")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX cwd; Windows resolves /Users/x to C:\\Users\\x")
 def test_transcript_dir_name_matches_claude_code_sanitiser(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     proj = tmp_path / ".claude" / "projects" / "-Users-x--claude-projects--Users-x"
@@ -307,7 +309,7 @@ def test_prune_matches_quoted_and_exe_paths_but_not_foreign_tools(home):
     settings.parent.mkdir(parents=True)
     settings.write_text(json.dumps({"hooks": {
         "Stop": [{"hooks": [
-            {"type": "command", "command": "'/Users/first last/.venv/bin/skillmem' migrate"},
+            {"type": "command", "command": cli_mod._hook_cmd(Path("/Users/first last/.venv/bin/skillmem"), ["migrate"])},
             {"type": "command", "command": "/x/bin/skillmem hook session-recap"}]}],
         "PreToolUse": [{"hooks": [{"type": "command", "command": "my-skillmem migrate"}]}],
     }}), encoding="utf-8")
@@ -723,7 +725,8 @@ def test_atomic_write_follows_symlink_and_keeps_mode_and_crlf(home):
     link.symlink_to(target)
     cli_mod._atomic_write_text(link, 'model = "y"\r\n')
     assert link.is_symlink() and target.read_bytes() == b'model = "y"\r\n'
-    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    if sys.platform != "win32":                       # st_mode bits are POSIX
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
 
 
 # --- round 9: last P3s from the first clean gate ---------------------------
@@ -842,7 +845,8 @@ def test_codex_move_advice_is_one_line_by_hand_and_nothing_else(home, monkeypatc
     assert "uninstall --no-claude-code" not in r.output and "Done. Open `codex`" not in r.output
     # the printed line, applied by hand, is all it takes
     toml = home / ".codex" / "config.toml"
-    text = toml.read_text(encoding="utf-8").replace(str(home / "a.db"), str(home / "b.db"))
+    from skillmem.cli import _toml_str
+    text = toml.read_text(encoding="utf-8").replace(_toml_str(str(home / "a.db")), _toml_str(str(home / "b.db")))
     toml.write_text(text, encoding="utf-8")
     assert tomllib.loads(text)["mcp_servers"]["skillmem"]["env"]["SKILLMEM_DB"] == str(home / "b.db")
     # --all-agents with Codex refused must not claim 6 agents
@@ -911,12 +915,13 @@ def test_idempotent_all_agents_counts_codex(home, monkeypatch):
 # --- round 14: uninstall removes skillmem's hooks, not hooks that mention it --
 
 def test_uninstall_matches_hooks_by_binary_not_substring(home, monkeypatch):
+    from skillmem import cli as cli_mod
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     settings = home / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True)
     settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
         {"type": "command", "command": "/usr/local/bin/audit --log /var/log/skillmem-audit.log"},
-        {"type": "command", "command": "'/Users/first last/.venv/bin/skillmem' hook session-recap"},
+        {"type": "command", "command": cli_mod._hook_cmd(Path("/Users/first last/.venv/bin/skillmem"), ["hook", "session-recap"])},
         {"type": "command", "command": "my-skillmem migrate"},
         {"type": "command", "command": "/x/bin/skillmem migrate"}]}]}}), encoding="utf-8")
     r = CliRunner().invoke(cli_main, ["uninstall", "--no-editors", "--no-codex"])

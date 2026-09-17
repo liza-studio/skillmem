@@ -220,13 +220,16 @@ def test_init_does_not_mistake_a_differently_scoped_hook_for_ours(fakehome: Path
     pre = json.loads(settings_json.read_text())["hooks"]["PreToolUse"]
     by_matcher = {g["matcher"]: g["hooks"][0]["command"] for g in pre}
     assert by_matcher["Read"] == "/old/venv/bin/skillmem hook tool-recall"
-    assert by_matcher["Bash|Edit|Write|NotebookEdit"].endswith("skillmem hook tool-recall")
+    assert by_matcher["Bash|Edit|Write|NotebookEdit"].endswith(("skillmem hook tool-recall", "skillmem.exe hook tool-recall"))
     assert "/old/" not in by_matcher["Bash|Edit|Write|NotebookEdit"]
 
 
 def test_init_repoints_the_mcp_entry_with_the_hooks(fakehome: Path):
+    import shutil
     base = Path(sys.executable).parent
-    mcp = str(next(p for p in (base / "skillmem-mcp", base / "skillmem-mcp.exe") if p.exists()))
+    mcp = next((str(p) for p in (base / "skillmem-mcp", base / "skillmem-mcp.exe") if p.exists()),
+               shutil.which("skillmem-mcp"))          # Windows venvs keep scripts under Scripts/
+    assert mcp
     claude_json = fakehome / ".claude.json"
     claude_json.write_text(json.dumps({"mcpServers": {
         "skillmem": {"command": "/old/venv/bin/skillmem-mcp", "args": [], "env": {"X": "1"}},
