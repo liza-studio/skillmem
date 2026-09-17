@@ -518,6 +518,47 @@ def test_the_briefing_names_the_owner_rules_an_agent_rewrote(mcp):
     assert "gate-rule" in brief["awaiting_reapproval"]
 
 
+def test_the_owner_check_lives_in_the_mutation_not_the_caller(mcp, monkeypatch):
+    """Eleven callers had to remember to pass the flag and the eleventh did not.
+    The mutation asks the owner signal itself now."""
+    from skillmem import storage as S
+    import pytest
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    for slug in ("mut-arch", "mut-del"):
+        S.upsert(conn, S.MemoryItem(slug=slug, kind="feedback", title="rule",
+                                    body=f"the owner's rule {slug} kept here",
+                                    origin="owner"), owner_call=True)
+    monkeypatch.setattr(S, "owner_present", lambda: False)
+    with pytest.raises(S.SealedRecord):
+        S.set_archived(conn, "mut-arch", True)     # no flag at all
+    with pytest.raises(S.SealedRecord):
+        S.soft_delete(conn, "mut-del", "cleanup")  # no flag at all
+    monkeypatch.setattr(S, "owner_present", lambda: True)
+    assert S.set_archived(conn, "mut-arch", True)["lifecycle"] == "archived"
+    assert S.soft_delete(conn, "mut-del", "cleanup") is True
+
+
+def test_deleting_twice_reports_the_second_as_nothing(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="twice", kind="skill", title="t",
+                                body="a skill to delete twice over"))
+    assert S.soft_delete(conn, "twice", "first") is True
+    assert S.soft_delete(conn, "twice", "second") is False
+    rows = conn.execute("SELECT COUNT(*) c FROM memory_history WHERE slug='twice'"
+                        ).fetchone()["c"]
+    assert rows == 1                       # one record, one deletion, one row
+
+
+def test_every_owner_only_command_is_denied_by_init(mcp):
+    """The TTY check is accident protection; the deny rules are the wall."""
+    from skillmem import cli as C
+    assert set(C._OWNER_DENY_RULES) == {
+        "Bash(skillmem trust*)", "Bash(skillmem skills-archive*)",
+        "Bash(skillmem rm*)", "Bash(skillmem import-vault*)",
+    }
+
+
 def test_a_body_file_with_no_recorded_hash_is_not_served(tmp_path, monkeypatch):
     """An empty content_hash used to switch the comparison off entirely."""
     from skillmem import storage as S

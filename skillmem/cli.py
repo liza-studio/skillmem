@@ -567,7 +567,17 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 
-_TRUST_DENY_RULE = "Bash(skillmem trust*)"
+# Every command that only the owner may run. The TTY check inside each one is
+# accident protection — a pseudo-terminal is one pty.openpty() away — so the deny
+# rules are what actually stop an agent. `trust` alone was listed, while
+# `skills-archive`, `rm` and `import-vault` reached the same outcomes.
+_OWNER_DENY_RULES = (
+    "Bash(skillmem trust*)",
+    "Bash(skillmem skills-archive*)",
+    "Bash(skillmem rm*)",
+    "Bash(skillmem import-vault*)",
+)
+_TRUST_DENY_RULE = _OWNER_DENY_RULES[0]   # kept: older settings carry this one
 
 
 def _fresh(path: Path) -> Path:
@@ -1296,8 +1306,8 @@ def init(
         # session-recap already indexes the note it writes. Hand-written
         # memory files are a `skillmem migrate --source <dir>` job.
         if hooks_mode != "none":
-            hook_reports.append(_patch_settings_deny(
-                settings_json, _TRUST_DENY_RULE))
+            for _rule in _OWNER_DENY_RULES:
+                hook_reports.append(_patch_settings_deny(settings_json, _rule))
             hook_reports.append(_prune_settings_hook(
                 settings_json, command_prefix="skillmem migrate"))
         if hooks_mode == "full":
@@ -1435,9 +1445,11 @@ def uninstall(ctx: click.Context, claude_code: bool, codex: bool,
                         changed = True
                 perms = data.get("permissions")
                 deny = perms.get("deny") if isinstance(perms, dict) else None
-                if isinstance(deny, list) and _TRUST_DENY_RULE in deny:
-                    deny.remove(_TRUST_DENY_RULE)   # init added it; uninstall reverses init
-                    changed = True
+                if isinstance(deny, list):
+                    for _rule in _OWNER_DENY_RULES:
+                        if _rule in deny:
+                            deny.remove(_rule)   # init added it; uninstall reverses init
+                            changed = True
                 if changed:
                     backup = _backup_file(settings_json)
                     _atomic_write_json(settings_json, data)

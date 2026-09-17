@@ -475,7 +475,13 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         if req.auto_reinforce:
             for r in visible:
                 try:
-                    bumped = S.reinforce(conn, r["slug"])
+                    # 150 ms, not the ten-second default: this is a read path
+                    prev_to = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+                    conn.execute("PRAGMA busy_timeout = 150")
+                    try:
+                        bumped = S.reinforce(conn, r["slug"])
+                    finally:
+                        conn.execute(f"PRAGMA busy_timeout = {int(prev_to)}")
                 except sqlite3.OperationalError:
                     bumped = None      # bookkeeping never fails a read
                 if bumped:

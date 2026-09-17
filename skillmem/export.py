@@ -146,8 +146,13 @@ def export_all(conn, destination: Path) -> int:
         if not path.resolve().is_relative_to(root):
             raise ValueError(f"refusing to export {item.slug!r} outside {root}")
         folder.mkdir(parents=True, exist_ok=True)
-        truncated = bool(item.body_path) and not (S.docs_dir() / item.body_path).exists()
         body = S.load_body(item)  # full body even for externalized docs
+        # `truncated` used to mean only "the file is missing". load_body also
+        # falls back to the excerpt when the file no longer matches the approved
+        # hash — and an unmarked excerpt written as a whole document made the
+        # excerpt the record's real text on restore, silently dropping the rest of
+        # an approved rule from the owner's unattended weekly backup.
+        truncated = bool(item.body_path) and body != S.read_body_file(item.body_path)
         # body verbatim (plus the one newline the file needs): stripping it
         # changed the content hash on re-import and dropped the owner's approval
         content = ("---\n" + _frontmatter(item, truncated=truncated)

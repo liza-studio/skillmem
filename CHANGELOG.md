@@ -47,6 +47,23 @@
 - `skillmem trust` refuses a record that is archived: the nightly sweep can retire
   one between the owner reading it and approving it, and approving something out
   of every read is not what they meant.
+- The owner check lives inside `set_archived` and `soft_delete`, which ask the
+  owner signal themselves. Eleven callers had to remember to pass a flag and the
+  eleventh did not, which is why the finding curve went up rather than down.
+- `import-vault` archives nothing without a person at the terminal, and cannot
+  mint a seal. Checking the seal was not enough: an import can CREATE the row, so
+  a forged `.md` landed a new record already hidden from every read, and a forged
+  seal made an agent's own record undecayable and undeletable for good.
+- `export-all` marks a body it could only read as an excerpt. `truncated` used to
+  mean "the file is missing" alone, so a body that failed its hash check was
+  written out as a whole document — and restoring that dump made the excerpt the
+  record's real text, dropping the rest of an approved rule from an unattended
+  weekly backup. The importer refuses a dump marked that way.
+- `skillmem init --claude-code` denies every owner-only command, not just `trust`:
+  `skills-archive`, `rm` and `import-vault` reached the same outcomes, and the TTY
+  check in each is accident protection rather than a wall.
+- Deleting twice reports the second call as nothing done, instead of appending
+  another history row for the same record.
 - `import-vault` restores a dump's archived state only with a person at the
   terminal. An agent can write a `.md` carrying `lifecycle: archived` and run the
   import, which is hiding a record by another route; without a terminal the

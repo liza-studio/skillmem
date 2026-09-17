@@ -257,6 +257,15 @@ def _run_import(conn, root, assets_root, kind, project_override,
                     report.skipped += 1
                     continue
                 slug = _slug_from_meta_or_path(meta, root, path)
+                if meta.get("truncated"):
+                    # the dump carries an excerpt, not the record: importing it
+                    # would make that excerpt the record's real text and re-hash
+                    # it as approved. Skip and say so.
+                    report.failed.append(
+                        (str(path.relative_to(root)),
+                         "truncated dump: body is an excerpt, not the record; "
+                         "restore the body file first"))
+                    continue
                 # Frontmatter project wins over the folder name; an exported dump
                 # (node_type=memory) never falls back to the folder — that folder
                 # is the kind, not a project.
@@ -335,14 +344,16 @@ def _run_import(conn, root, assets_root, kind, project_override,
                     # and run the import, which is hiding a record by another
                     # route. Without a terminal the record stays visible and the
                     # report says so: visible-but-unretired is the safe failure.
+                    # Only with a person at the terminal, and regardless of the
+                    # seal: checking the seal is not enough here, because an
+                    # import can CREATE the row — a forged .md would otherwise
+                    # land a brand new record already hidden from every read.
+                    # Without a terminal nothing is archived and the report names
+                    # what stayed visible.
                     if S.owner_present():
-                        S.set_archived(conn, slug, True, by="import",
-                                       allow_sealed=True)
+                        S.set_archived(conn, slug, True, by="import")
                     else:
-                        try:
-                            S.set_archived(conn, slug, True, by="import")
-                        except S.SealedRecord:
-                            report.skipped_archive.append(slug)
+                        report.skipped_archive.append(slug)
                     if pinned is None and was_pinned and was_pinned["pinned"]:
                         S.set_pinned(conn, slug, True)     # the row's own flag, untouched
                 if pinned is not None:
@@ -362,7 +373,11 @@ def _run_import(conn, root, assets_root, kind, project_override,
                         (slug,)).fetchone()
                     if current and current["lifecycle"] == "archived":
                         S.set_archived(conn, slug, False, by="import")
-                if isinstance(md, dict) and md.get("owner_seal"):
+                if (isinstance(md, dict) and md.get("owner_seal")
+                        and S.owner_present()):
+                    # Only with a person at the terminal. A forged dump otherwise
+                    # MINTS the seal on a record the agent wrote, and that record
+                    # is then undecayable and undeletable for good.
                     conn.execute(
                         "UPDATE memory_items SET owner_seal = 1 WHERE slug = ?", (slug,))
                 counters = {k: extras[k] for k in ("access_count", "confirmed_count", "failure_count")

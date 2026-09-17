@@ -225,6 +225,7 @@ def test_archived_record_stays_archived_through_export_and_import(tmp_path, monk
     dump = tmp_path / "dump"
     E.export_all(conn, dump)
     fresh = S.connect(tmp_path / "fresh.db"); S.init_schema(fresh)
+    monkeypatch.setattr(S, "owner_present", lambda: True)  # the owner restores
     V.import_vault(fresh, dump, skip_auto_memories=False)   # restoring a dump, not reading a vault
     row = fresh.execute("SELECT lifecycle FROM memory_items WHERE slug='skill-exp'").fetchone()
     assert row["lifecycle"] == "archived"          # a dump must not un-retire a record
@@ -244,12 +245,22 @@ def test_the_owner_seal_survives_export_and_import(tmp_path, monkeypatch):
     dump = tmp_path / "dump"
     E.export_all(conn, dump)
     fresh = S.connect(tmp_path / "fresh.db"); S.init_schema(fresh)
+    # the owner restoring their own dump at a terminal
+    monkeypatch.setattr(S, "owner_present", lambda: True)
     res = V.import_vault(fresh, dump, skip_auto_memories=False)
     assert not res.failed, res.failed
     row = fresh.execute("SELECT origin, trusted_at, owner_seal FROM memory_items "
                         "WHERE slug='skill-approved'").fetchone()
     assert row["trusted_at"] is None          # approval never travels, by design
     assert row["owner_seal"] == 1             # the seal does
+
+    # without a terminal a dump cannot MINT the seal: a forged file would make an
+    # agent's own record undecayable and undeletable for good
+    other = S.connect(tmp_path / "other.db"); S.init_schema(other)
+    monkeypatch.setattr(S, "owner_present", lambda: False)
+    V.import_vault(other, dump, skip_auto_memories=False)
+    assert other.execute("SELECT owner_seal FROM memory_items "
+                         "WHERE slug='skill-approved'").fetchone()["owner_seal"] == 0
 
 
 def test_a_stale_round_trip_does_not_reset_decay(tmp_path, monkeypatch):
@@ -330,6 +341,7 @@ def test_pinned_archived_record_survives_the_round_trip(tmp_path, monkeypatch):
     dump = tmp_path / "dump"
     E.export_all(conn, dump)
     fresh = S.connect(tmp_path / "fresh.db"); S.init_schema(fresh)
+    monkeypatch.setattr(S, "owner_present", lambda: True)  # the owner restores
     res = V.import_vault(fresh, dump, skip_auto_memories=False)
     assert not res.failed, res.failed
     row = fresh.execute("SELECT lifecycle, pinned, strength FROM memory_items "

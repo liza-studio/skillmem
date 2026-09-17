@@ -1490,6 +1490,15 @@ def upsert(
                 "SELECT owner_seal, kind FROM memory_items "
                 "WHERE id = ? AND deleted_at IS NULL", (existing["id"],)
             ).fetchone()
+            if sealed_now is None and not revive:
+                # the row went away between the read and this lock; failing open
+                # here let a sealed record's kind change on the way out. A revive
+                # (a pack reinstall, a dump restoring a deleted slug) reads None
+                # legitimately, because the row it is bringing back is a tombstone.
+                raise MemoryConflict(
+                    f"slug '{item.slug}' disappeared while it was being written "
+                    f"(deleted concurrently); nothing was stored"
+                )
             if (sealed_now is not None and not owner_call and sealed_now["owner_seal"]
                     and _kind_is_a_change(item, sealed_now, explicit)):
                 raise SealedRecord(
@@ -1579,8 +1588,8 @@ def _upsert_update_tx(
         # the same previous text and the intermediate version vanished from
         # history while the chain still verified.
         fresh = conn.execute(
-            "SELECT title, body, body_path, kind, owner_seal FROM memory_items "
-            "WHERE id = ?",
+            "SELECT title, body, body_path, kind, owner_seal, content_hash "
+            "FROM memory_items WHERE id = ?",
             (existing["id"],),
         ).fetchone()
         if (fresh is not None and not owner_call and fresh["owner_seal"]
@@ -1600,11 +1609,13 @@ def _upsert_update_tx(
             # before the lock: two concurrent updates both recorded the older
             # version as predecessor, and the middle one was then GC'd off disk.
             disk = _read_body_file(fresh["body_path"])
-            # a file that does not match the hash the row carries is not the
-            # previous version of anything: recording it would sign someone
-            # else's text into the chain
+            # A file that does not match the hash THIS ROW carries, read in this
+            # same lock, is not the previous version of anything: recording it
+            # would sign someone else's text into the chain, and comparing
+            # against the pre-transaction row missed both a title change and a
+            # concurrent update.
             hist_body = (disk if disk is not None
-                         and _hash(fresh["title"], disk) == existing["content_hash"]
+                         and _hash(fresh["title"], disk) == fresh["content_hash"]
                          else old_body)
         else:
             hist_body = fresh["body"]
@@ -1741,7 +1752,7 @@ def reindex_embeddings(
 
 
 def soft_delete(conn: sqlite3.Connection, slug: str, reason: str, *,
-                allow_sealed: bool = False) -> bool:
+                allow_sealed: bool | None = None) -> bool:
     row = conn.execute(
         "SELECT * FROM memory_items WHERE slug = ?", (slug,)
     ).fetchone()
@@ -1751,9 +1762,15 @@ def soft_delete(conn: sqlite3.Connection, slug: str, reason: str, *,
     with tx(conn):
         # re-read under the lock: the row may have changed since the SELECT above
         fresh = conn.execute(
-            "SELECT title, body, owner_seal FROM memory_items WHERE id = ?", (row["id"],)
+            "SELECT title, body, owner_seal, deleted_at FROM memory_items "
+            "WHERE id = ?", (row["id"],)
         ).fetchone() or row
-        if not allow_sealed and fresh["owner_seal"]:
+        if fresh["deleted_at"] is not None:
+            # already a tombstone: `rm` used to succeed again and again, each time
+            # appending another history row for one record
+            return False
+        if not (owner_present() if allow_sealed is None else allow_sealed) \
+                and fresh["owner_seal"]:
             # Deleting a record the owner wrote or approved is the owner's call,
             # exactly as archiving it is — and this is the harder of the two to
             # notice afterwards.
@@ -1774,9 +1791,14 @@ def soft_delete(conn: sqlite3.Connection, slug: str, reason: str, *,
             (row["slug"], fresh["title"], fresh["body"], now,
              f"deleted: {reason}", prev_hash, self_hash),
         )
-        conn.execute(
-            "UPDATE memory_items SET deleted_at = ? WHERE id = ?", (now, row["id"]),
+        cur = conn.execute(
+            "UPDATE memory_items SET deleted_at = ? "
+            # already a tombstone: `rm` used to succeed three times over and
+            # write three history rows for one record
+            "WHERE id = ? AND deleted_at IS NULL", (now, row["id"]),
         )
+        if cur.rowcount == 0:
+            return False
     return True
 
 
@@ -2789,7 +2811,7 @@ def _append_lifecycle_history(
 
 def set_archived(
     conn: sqlite3.Connection, slug: str, archived: bool = True, *,
-    by: str | None = None, allow_sealed: bool = False
+    by: str | None = None, allow_sealed: bool | None = None
 ) -> dict[str, Any] | None:
     """Archive a record (out of search, recall and inject; kept, reversible)
     or bring it back. A pinned record is refused — pin means "never archive".
@@ -2810,7 +2832,8 @@ def set_archived(
         ).fetchone()
         if not row:
             return None
-        if archived and not allow_sealed and row["owner_seal"]:
+        may_seal = owner_present() if allow_sealed is None else allow_sealed
+        if archived and not may_seal and row["owner_seal"]:
             raise SealedRecord(
                 f"'{slug}' is the owner's record (written or approved by them); "
                 f"an agent cannot archive it. The owner can: skillmem skills-archive {slug}"
