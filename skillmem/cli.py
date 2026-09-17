@@ -2207,15 +2207,15 @@ def skills_restore(ctx: click.Context, slug: str) -> None:
 def skills_archive(ctx: click.Context, slug: str, restore: bool) -> None:
     """Archive any record, including the owner's own approved rules.
 
-    mem_archive lets an agent retire what it learned, but refuses a record the
-    owner wrote or approved — hiding one of those from every read is the owner's
-    call, and this is where it is made.
+    Taking a record out of search, recall, list and the session briefing is the
+    owner's call, and this is the only place it is made: there is no MCP tool for
+    it. Ten review rounds established that an agent able to hide a record leaves
+    the owner no trace of it, and each gate we built was one call from open.
     """
     at_terminal = S.owner_present()
     if not restore and not at_terminal:
-        # mem_archive refuses a sealed record and names this command as the
-        # owner's way. Reachable from Bash, it was simply the same hole with a
-        # different name — and it signed the history row "owner-cli".
+        # Reachable from Bash this was the same hole under another name, and it
+        # signed the history row "owner-cli" whoever ran it.
         raise SystemExit(
             "refusing: `skills-archive` needs a person at a terminal (no TTY). "
             "Run it yourself, not through an agent."

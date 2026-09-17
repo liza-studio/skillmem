@@ -42,8 +42,8 @@ def _payload(result) -> dict:
 
 def test_tools_and_handlers_match(mcp):
     names = [t.name for t in mcp.TOOLS]
-    assert len(names) == 10
-    assert len(set(names)) == 10
+    assert len(names) == 9
+    assert len(set(names)) == 9
     assert set(names) == set(mcp.TOOL_HANDLERS)
 
 
@@ -305,28 +305,34 @@ def test_identical_rewrite_is_described_honestly(mcp):
 
 
 def test_archive_hides_from_search_recall_list_but_get_still_reads(mcp):
+    """The owner's own command. There is no tool for this by design."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
     _payload(mcp._tool_learn({"slug": "skill-retire-me", "title": "retire me",
                               "trigger": "quartz calibration bench", "steps": "step one step two",
                               "outcome": "success", "lessons": "none"}))
-    r = _payload(mcp._tool_archive({"slug": "skill-retire-me"}))
+    r = S.set_archived(conn, "skill-retire-me", True, by="owner-cli")
     assert r["lifecycle"] == "archived" and r["was"] == "active"
     assert all(h["slug"] != "skill-retire-me" for h in _payload(mcp._tool_search({"query": "quartz calibration"}))["results"])
     assert all(h["slug"] != "skill-retire-me" for h in _payload(mcp._tool_recall({"query": "quartz calibration", "auto_reinforce": False}))["skills"])
     assert all(i["slug"] != "skill-retire-me" for i in _payload(mcp._tool_list({"limit": 50}))["items"])
     got = _payload(mcp._tool_get({"slug": "skill-retire-me"}))
     assert got["slug"] == "skill-retire-me"
-    back = _payload(mcp._tool_archive({"slug": "skill-retire-me", "archived": False}))
+    back = S.set_archived(conn, "skill-retire-me", False, by="owner-cli")
     assert back["lifecycle"] == "active" and back["was"] == "archived"
     assert any(i["slug"] == "skill-retire-me" for i in _payload(mcp._tool_list({"limit": 50}))["items"])
 
 
 def test_archive_refuses_pinned_and_unknown(mcp):
-    _payload(mcp._tool_write({"slug": "gate-rule", "title": "deploy gate", "body": "only through the gate"}))
+    from skillmem import storage as S
+    import pytest
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    _payload(mcp._tool_write({"slug": "gate-rule", "title": "deploy gate",
+                              "body": "only through the gate"}))
     _payload(mcp._tool_pin({"slug": "gate-rule"}))
-    err = _payload(mcp._tool_archive({"slug": "gate-rule"}))
-    assert "pinned" in err.get("error", "")
-    err = _payload(mcp._tool_archive({"slug": "no-such-slug"}))
-    assert "not found" in err.get("error", "")
+    with pytest.raises(ValueError, match="pinned"):
+        S.set_archived(conn, "gate-rule", True, by="owner-cli")
+    assert S.set_archived(conn, "no-such-slug", True, by="owner-cli") is None
 
 
 def test_reinforce_refuses_a_record_that_is_not_a_skill(mcp):
@@ -371,9 +377,9 @@ def test_archive_keeps_updated_at_and_restore_survives_the_sweep(mcp):
     old = S._now() - 100 * 86400
     conn.execute("UPDATE memory_items SET updated_at = ?, last_accessed_at = ?, strength = 0.05 "
                  "WHERE slug = 'skill-idle'", (old, old))
-    _payload(mcp._tool_archive({"slug": "skill-idle"}))
+    S.set_archived(conn, "skill-idle", True, allow_sealed=True, by="owner-cli")
     assert S.get(conn, "skill-idle").updated_at == old      # archiving is not an edit
-    _payload(mcp._tool_archive({"slug": "skill-idle", "archived": False}))
+    S.set_archived(conn, "skill-idle", False, by="owner-cli")
     S.sweep_lifecycle(conn)
     row = conn.execute("SELECT lifecycle FROM memory_items WHERE slug = 'skill-idle'").fetchone()
     assert row["lifecycle"] == "active"                     # the sweep does not undo a restore
@@ -389,7 +395,7 @@ def test_pin_and_archive_do_not_touch_updated_at_or_hand_out_strength(mcp):
     _payload(mcp._tool_pin({"slug": "skill-flags"}))
     assert S.get(conn, "skill-flags").updated_at == old          # pinning is not an edit
     _payload(mcp._tool_pin({"slug": "skill-flags", "pinned": False}))
-    r = _payload(mcp._tool_archive({"slug": "skill-flags", "archived": False}))
+    r = S.set_archived(conn, "skill-flags", False, by="owner-cli")
     assert r["was"] == "active" and r["lifecycle"] == "active"
     assert S.get(conn, "skill-flags").strength == 0.05           # no strength without evidence
 
@@ -418,9 +424,10 @@ def test_agent_cannot_archive_what_the_owner_approved(mcp):
                                 origin="owner"))
     conn.execute("UPDATE memory_items SET trusted_at = ?, trusted_by = 'owner' "
                  "WHERE slug = 'rule-gate'", (1_700_000_000,))
-    err = _payload(mcp._tool_archive({"slug": "rule-gate"}))
-    assert "cannot archive" in err.get("error", ""), err
-    assert "skills-archive" in err["error"]
+    import pytest
+    with pytest.raises(S.SealedRecord) as exc:
+        S.set_archived(conn, "rule-gate", True)     # no allow_sealed: refused
+    assert "skills-archive" in str(exc.value)
     row = conn.execute("SELECT lifecycle FROM memory_items WHERE slug='rule-gate'").fetchone()
     assert row["lifecycle"] == "active"
     # the owner's own path still works
@@ -445,8 +452,9 @@ def test_update_does_not_open_the_way_to_archive_an_owner_record(mcp):
                        "WHERE slug='deploy-gate'").fetchone()
     assert (row["origin"], row["trusted_at"]) == ("agent", None)   # both moved, as designed
     assert row["owner_seal"] == 1                                  # the seal did not
-    err = _payload(mcp._tool_archive({"slug": "deploy-gate"}))
-    assert "cannot archive" in err.get("error", ""), err
+    import pytest
+    with pytest.raises(S.SealedRecord):
+        S.set_archived(conn, "deploy-gate", True)
     assert conn.execute("SELECT lifecycle FROM memory_items WHERE slug='deploy-gate'"
                         ).fetchone()["lifecycle"] == "active"
 
@@ -468,8 +476,9 @@ def test_owner_writing_a_record_seals_it(mcp):
     row = conn.execute("SELECT origin, trusted_at, owner_seal FROM memory_items "
                        "WHERE slug='owner-edit'").fetchone()
     assert (row["origin"], row["trusted_at"], row["owner_seal"]) == ("owner", None, 1)
-    err = _payload(mcp._tool_archive({"slug": "owner-edit"}))
-    assert "cannot archive" in err.get("error", ""), err
+    import pytest
+    with pytest.raises(S.SealedRecord):
+        S.set_archived(conn, "owner-edit", True)
 
 
 def test_agent_cannot_relabel_a_sealed_record_out_of_the_briefing(mcp):
@@ -599,7 +608,7 @@ def test_reinforce_refuses_an_archived_record(mcp):
                               "steps": "the steps", "outcome": "success", "lessons": None}))
     before = conn.execute("SELECT strength FROM memory_items WHERE slug='skill-arch'"
                           ).fetchone()["strength"]
-    _payload(mcp._tool_archive({"slug": "skill-arch"}))
+    S.set_archived(conn, "skill-arch", True, allow_sealed=True, by="owner-cli")
     assert S.reinforce(conn, "skill-arch", evidence="user_confirmed") is None
     after = conn.execute("SELECT strength, access_count FROM memory_items "
                          "WHERE slug='skill-arch'").fetchone()
@@ -706,8 +715,9 @@ def test_an_owner_write_of_the_same_text_still_seals(mcp):
              explicit={"kind"})
     assert conn.execute("SELECT owner_seal FROM memory_items WHERE slug='same-rule'"
                         ).fetchone()["owner_seal"] == 1
-    err = _payload(mcp._tool_archive({"slug": "same-rule"}))
-    assert "cannot archive" in err.get("error", ""), err
+    import pytest
+    with pytest.raises(S.SealedRecord):
+        S.set_archived(conn, "same-rule", True)
 
 
 def test_the_seal_is_checked_inside_the_write(mcp):
@@ -792,10 +802,11 @@ def test_history_actor_cannot_be_spoofed_by_the_client(mcp, monkeypatch):
     monkeypatch.setattr(mcp, "_client_agent", "owner-cli", raising=False)
     _payload(mcp._tool_learn({"slug": "skill-spoof", "title": "spoof", "trigger": "a trigger",
                               "steps": "the steps", "outcome": "success", "lessons": None}))
-    _payload(mcp._tool_archive({"slug": "skill-spoof"}))
+    S.set_archived(conn, "skill-spoof", True, allow_sealed=True, by="owner-cli")
     actor = conn.execute("SELECT changed_by FROM memory_history WHERE slug='skill-spoof' "
                          "ORDER BY id DESC LIMIT 1").fetchone()["changed_by"]
-    assert actor == "mcp:owner-cli"          # the surface stamps itself, not the caller
+    # an agent write stamps the surface; the archive above is the owner's own path
+    assert actor == "owner-cli"
 
 
 def test_restoring_an_active_record_writes_no_history(mcp):
@@ -805,7 +816,7 @@ def test_restoring_an_active_record_writes_no_history(mcp):
                               "steps": "the steps", "outcome": "success", "lessons": None}))
     before = conn.execute("SELECT COUNT(*) c FROM memory_history "
                           "WHERE slug='skill-live'").fetchone()["c"]
-    r = _payload(mcp._tool_archive({"slug": "skill-live", "archived": False}))
+    r = S.set_archived(conn, "skill-live", False, by="owner-cli")
     assert r["was"] == "active"
     after = conn.execute("SELECT COUNT(*) c FROM memory_history "
                          "WHERE slug='skill-live'").fetchone()["c"]
@@ -819,8 +830,8 @@ def test_archiving_leaves_a_history_row(mcp):
     _payload(mcp._tool_learn({"slug": "skill-temp", "title": "temp", "trigger": "a trigger here",
                               "steps": "the steps taken", "outcome": "success", "lessons": None}))
     before = conn.execute("SELECT COUNT(*) c FROM memory_history WHERE slug='skill-temp'").fetchone()["c"]
-    _payload(mcp._tool_archive({"slug": "skill-temp"}))
-    _payload(mcp._tool_archive({"slug": "skill-temp", "archived": False}))
+    S.set_archived(conn, "skill-temp", True, allow_sealed=True, by="owner-cli")
+    S.set_archived(conn, "skill-temp", False, by="owner-cli")
     rows = conn.execute("SELECT reason FROM memory_history WHERE slug='skill-temp' "
                         "ORDER BY id").fetchall()
     assert len(rows) == before + 2, [r["reason"] for r in rows]
@@ -837,7 +848,7 @@ def test_pinning_writes_the_flag_and_nothing_else(mcp):
     _payload(mcp._tool_learn({"slug": "skill-gate", "title": "gate", "trigger": "deploy gate rule",
                               "steps": "always through the gate", "outcome": "success", "lessons": "none"}))
     conn.execute("UPDATE memory_items SET strength = 0.05 WHERE slug = 'skill-gate'")
-    _payload(mcp._tool_archive({"slug": "skill-gate"}))
+    S.set_archived(conn, "skill-gate", True, allow_sealed=True, by="owner-cli")
     before = conn.execute("SELECT lifecycle, strength, last_accessed_at, updated_at "
                           "FROM memory_items WHERE slug='skill-gate'").fetchone()
     _payload(mcp._tool_pin({"slug": "skill-gate"}))
@@ -848,7 +859,7 @@ def test_pinning_writes_the_flag_and_nothing_else(mcp):
     assert after["last_accessed_at"] == before["last_accessed_at"]
     assert after["updated_at"] == before["updated_at"]
     # the explicit verb is the way back, and it works on a pinned row
-    r = _payload(mcp._tool_archive({"slug": "skill-gate", "archived": False}))
+    r = S.set_archived(conn, "skill-gate", False, by="owner-cli")
     assert r["lifecycle"] == "active"
     assert any(i["slug"] == "skill-gate" for i in _payload(mcp._tool_list({"limit": 50}))["items"])
 

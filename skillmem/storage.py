@@ -2540,7 +2540,7 @@ def set_pinned(
             return None
         # the flag only — updated_at is the text's age, and pinning is not an
         # edit, and lifecycle is not pinning's business: an archived row comes
-        # back through the one call that says so (set_archived / mem_archive), so
+        # back through the one call that says so (set_archived / an archive call), so
         # that strength is never handed out by a side effect of a different verb.
         conn.execute(
             "UPDATE memory_items SET pinned = ? WHERE id = ? AND deleted_at IS NULL",
@@ -2645,7 +2645,7 @@ def sweep_lifecycle(
             "SELECT id, slug, title, body, strength, last_accessed_at FROM memory_items "
             "WHERE kind = ? AND deleted_at IS NULL AND lifecycle != 'archived' "
             # owner_seal, like pinned: the nightly job is the slow path to the same
-            # place mem_archive is refused, and mem_reinforce evidence='failure'
+            # place an archive is refused, and mem_reinforce evidence='failure'
             # lets an agent walk a record's strength down to the floor on purpose.
             "AND pinned = 0 AND owner_seal = 0 "
             "AND strength <= ? AND COALESCE(last_accessed_at, created_at) < ?",

@@ -101,7 +101,7 @@ def main() -> int:
         _send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         tools = _read(proc)
         names = sorted(t["name"] for t in tools["result"]["tools"])
-        expected = ["mem_archive", "mem_get", "mem_learn", "mem_list", "mem_pin",
+        expected = ["mem_get", "mem_learn", "mem_list", "mem_pin",
                     "mem_recall", "mem_reinforce", "mem_search", "mem_update",
                     "mem_write"]
         assert names == expected, f"got {names}, want {expected}"

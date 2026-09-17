@@ -2,126 +2,55 @@
 
 ## 0.11.1
 
-- `mem_archive`: an agent can retire a record that no longer applies — it
-  leaves search, recall, list and the hooks' inject, keeps its text, history
-  and approval, stays readable by slug, and comes back with `archived=false`.
-  Nothing is deleted; deletion stays with the owner at the CLI. A pinned
-  record is refused until unpinned. Ten tools.
 - Every tool description rewritten to the same shape: what it does, whether it
   writes and what the side effect is, what the parameters mean beyond the
   schema, what it returns, and which sibling tool to use instead and when.
   Where a description promised more than the code delivered, the code was
   brought up to it: `mem_reinforce` now refuses a record that is not a skill
-  (strength and decay are a skill's mechanics), `mem_recall` caps `limit` at
-  50 as it always said, and archiving writes the lifecycle state and nothing
-  else — `updated_at` is the text's age, and archiving is not an edit.
-- Restoring a hidden record (`mem_archive` with `archived=false`) refreshes its
-  recency and floors strength at 0.5, so the nightly lifecycle sweep does not
-  retire it again the same night; it now reports the state the row actually
-  ended in. `mem_pin` stays out of it: pinning writes the flag and nothing
-  else, so strength is never handed out as a side effect of a different verb.
-- A dump now carries `lifecycle`, so an archived record does not come back
-  active after an export/import round trip — including a record that was both
-  pinned and archived, which used to fail the import and land active.
-- The conflict message for an existing slug names no parameter at all. It used
-  to say `force=True`, which no surface accepts, and then `reason=`, which only
-  the update tools carry — the two tools that actually raise it, `mem_write` and
-  `mem_learn`, have neither.
-- `mem_archive` refuses a record the owner ever wrote or approved, and names
-  `skillmem skills-archive` instead. Archiving hides a record from search,
-  recall, list and the session briefing while leaving its text, approval and
-  origin untouched, so an agent retiring the owner's own rule left nothing that
-  a later read would show. The refusal reads a new `owner_seal` column, set once
-  and never cleared: `origin` and `trusted_at` both move under an agent's own
-  writes (`mem_update` relabels origin to `agent` and drops the approval, by
-  design), so a gate resting on those two was one extra call from open. The
-  nightly lifecycle sweep exempts sealed records for the same reason —
-  `mem_reinforce evidence="failure"` lets an agent walk a record's strength down
-  to the floor, which is the slow way to the same place. The seal is set whenever
-  the owner writes or approves a record — including a rewrite at the terminal,
-  the very path that clears the approval — and it travels in a dump, so an
-  export and import round trip cannot launder the records it protects. An agent
-  also cannot change a sealed record's kind: the session briefing selects by
-  kind, so a relabelled rule leaves it exactly as archiving would. Existing
-  databases gain the column and its backfill on first open, whatever their
-  schema version, and a database whose column landed without the backfill is
-  repaired on the next open. The seal check runs inside the write transaction,
-  so it cannot be overtaken by the owner approving the record between the check
-  and the write, and a pack removal skips sealed records: an agent can file a
-  record under `pack:<name>`, and the owner's own removal would otherwise delete
-  it. The kind guard lives in `upsert`, where every surface arrives: guarding one
-  handler left `mem_write`, `mem_learn` and the HTTP routes open, and on unchanged
-  text that route wrote no history row at all. The seal migration reads before it
-  writes and takes no lock when there is nothing to do — on every open, a write
-  lock there made `inject`, `recall` and search fail with "database is locked"
-  behind any writer. The nightly sweep holds a transaction for the same reason
-  `set_archived` does.
-- `skillmem inject` names the owner's own rules that an agent has rewritten since
-  they were approved. Rewriting clears the approval, deliberately, and the rule
-  then leaves the briefing — silently, until now, so a rule relied on for months
-  simply stopped arriving. Names only, never the agent's text.
-- Importing a dump no longer resets a faded record's strength and recency: the
-  restore fires only for a record that is actually archived, not for every
-  non-archived dump, which defeated decay on every weekly export/import. The
-  importer's own history rows name it ("import") instead of no one.
-- The owner gate fails closed, and the owner signal is the terminal. `upsert`
-  guards unless the caller passes `owner_call`, and the CLI, `migrate` and the
-  vault importer derive it from `owner_present()` — a TTY — rather than asserting
-  it, because an agent runs `skillmem write` through Bash as easily as a person
-  types it. The guard also fires when the caller names no fields at all
-  (`explicit=None` means "apply everything", which includes the kind), so
-  `migrate`, packs and the importer are no longer exempt by omission.
-- `skillmem skills-archive` needs a terminal, like `trust` does. The refusal from
-  `mem_archive` names it as the owner's way, and reachable from Bash it was the
-  same hole under another name — with a history row signed "owner-cli".
-- `skillmem trust` prints the record and asks before approving. A hash pin is
-  worth nothing if the owner approves a slug without seeing the words: an agent
-  rewrite between a separate `cat` and the approval used to become approved text.
-- `mem_reinforce` refuses an archived record and reads and writes inside one
-  transaction: it handed strength and recency to a record that is out of every
-  read, and its `kind = 'skill'` filter was a read-then-write gap of its own.
-- Every write that touches lifecycle, strength, approval or pinning carries
-  `deleted_at IS NULL`, so none of them can land on a record deleted since the
-  read.
-- Hiding and deleting a sealed record both default to refusing. `set_archived`
-  and `soft_delete` used to serve a caller that said nothing, which is what every
-  hole in this feature has been; the owner's surfaces now say so explicitly, from
-  the terminal. Deleting one is refused the same way archiving it is.
-- The seal is re-checked inside the update transaction, not only in the same-text
-  branch: an approval landing between a caller's read and its write was ignored.
-- `mem_recall` never fails or stalls on its own bookkeeping. Recording recency
-  takes a write lock, so a writer holding one turned a read the hooks run on
-  every prompt into "database is locked"; the recency write is now best-effort
-  and gives up once per call rather than once per row. Three rounds running, the hole
-  was a surface that simply did not pass the old opt-in flag — MCP, then HTTP
-  `/update`, then HTTP `/write` and `/learn`.
-- Approval is pinned to the text the owner read. `skillmem trust` passes the hash
-  it just displayed, and an agent rewrite landing between the read and the
-  approval is refused instead of quietly becoming approved text that the hooks
-  then inject as the owner's own rule.
+  (strength and decay are a skill's mechanics) and `mem_recall` caps `limit` at
+  50 as it always said. Nine tools, unchanged.
+- **Retiring a record is the owner's, at a terminal.** `skillmem skills-archive
+  <slug>` (with `--restore`) takes a record out of search, recall, list and the
+  session briefing while keeping its text, history and approval, readable by
+  slug. There is deliberately no tool for it: ten review rounds established that
+  an agent able to hide a record leaves the owner no trace of it, and every gate
+  we built around that was one call away from open. `skills-lifecycle` lists
+  what is currently hidden.
+- A new `owner_seal` column, set when the owner writes or approves a record and
+  never cleared, protects those records from the paths that could hide or delete
+  them without anyone asking: the nightly lifecycle sweep, a pack removal, a
+  delete, and any change of a record's `kind` (the briefing selects by kind).
+  `origin` and `trusted_at` both move under an agent's own writes, so neither
+  could carry the rule. Existing databases gain the column and its backfill on
+  first open, whatever their schema version.
+- **The owner is a terminal, not a caller's word for it.** One signal,
+  `owner_present()`, shared by every surface: an agent runs `skillmem write`
+  through Bash as easily as a person types it. `skillmem trust` now prints the
+  record and asks before approving, pinned to the hash it displayed — an agent
+  rewrite between reading a rule and approving it used to become approved text,
+  and the hooks then injected the agent's version as the owner's own.
 - Every mutation that touches lifecycle, approval, pinning, strength or deletion
-  now reads and writes inside one transaction, and never writes to a tombstone:
+  reads and writes inside one transaction, and carries `deleted_at IS NULL`:
   `set_trust`, `set_pinned`, `reinforce`, `decay_stale`, `sweep_lifecycle`,
-  `remove_pack`, `set_archived`, the same-text metadata write. Every one of them
-  was a read followed by a write with a gap the owner's approval could land in.
-- Pack removal and the update path both hold a transaction over the whole step.
-  Between a selection and its write, the owner can approve a record in another
-  process: a pack removal tombstoned a record that had just been approved, and
-  two concurrent updates recorded the same previous text, losing the middle
-  version from history while the chain still verified.
-- Every change that takes a record out of every read writes a row into the
-  tamper-evident history, the nightly sweep's own archiving included (the
-  active-to-stale step writes none: a stale record still appears in search,
-  recall, list and the briefing), with the acting surface stamped by that surface rather
-  than taken from the caller (an MCP client supplies its own name). A call that
-  changes nothing writes nothing. `skillmem skills-lifecycle` counts every kind
-  rather than skills alone and lists the archived slugs, so what is out of every
-  read right now is visible where the lifecycle is reported.
-- `skillmem pin` on an archived record says so: pinning does not un-archive, and
-  archiving is refused while pinned, so the record would otherwise stay out of
-  every read without a word. `restore_skill` and `set_archived(archived=false)`
-  are now one implementation — the duplicate pair let only one of them learn not
-  to hand strength to a record that was never hidden.
+  `remove_pack`, `soft_delete`, `set_archived` and the same-text metadata write.
+  Each was a read followed by a write with a gap an approval could land in.
+  Archiving and deleting a sealed record both default to refusing.
+- `mem_recall` never fails or waits on its own bookkeeping. Recording recency
+  takes a write lock, and behind a writer that turned a read the hooks run on
+  every prompt into "database is locked".
+- `mem_learn` refuses a slug that holds a note **without writing anything**; the
+  kind check used to run after the write, so a refused call still landed its
+  tags. The conflict message for an existing slug names no parameter at all —
+  `force=True` was in no surface's vocabulary and `reason=` is in neither tool
+  that raises it.
+- A dump carries `lifecycle` and `owner_seal`, so neither an archived record nor
+  a sealed one comes back unprotected after an export/import round trip, and an
+  import no longer resets a faded record's strength and recency.
+- `scripts/mcp_smoke.py` runs anywhere: it seeds what it asserts through the
+  server's own stdio, finds the binary through `SKILLMEM_MCP_BIN` or PATH, sends
+  the server's stderr to a file (the embedding model's download progress used to
+  fill the pipe and stall the server), enforces its deadline with a timer, and
+  deletes its own records.
 
 ## 0.11.0
 

@@ -203,7 +203,6 @@ Claude Code mechanism and do not run in the chat app.
 | `mem_recall` | Find relevant skills for a task, strength-weighted; refreshes recency |
 | `mem_reinforce` | Record how a skill turned out; only outside evidence moves strength |
 | `mem_pin` | Exempt a skill from decay and archiving (and undo it) |
-| `mem_archive` | Retire a record out of search/recall without deleting it (and undo it) |
 
 ## Skill packs
 

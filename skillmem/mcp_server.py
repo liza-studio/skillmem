@@ -10,7 +10,6 @@ Tools:
     mem_recall    — find relevant skills for a task, strength-weighted
     mem_reinforce — record a skill's outcome; outside evidence moves strength
     mem_pin       — exempt a skill from decay and archiving
-    mem_archive   — retire a record out of search/recall, reversibly (no deletion)
 
 Designed to be wired into ~/.claude.json under mcpServers.
 """
@@ -354,39 +353,6 @@ def _tool_pin(args: dict[str, Any]) -> list[TextContent]:
     return _ok(result)
 
 
-def _tool_archive(args: dict[str, Any]) -> list[TextContent]:
-    """Archive a record (out of search/recall, kept and reversible) or restore it."""
-    slug = args.get("slug")
-    if not slug:
-        return _err("slug is required")
-    conn = _shared_conn()
-    S.init_schema(conn)
-    archived = bool(args.get("archived", True))
-    try:
-        # An agent retires what it learned. Hiding a rule the owner wrote or
-        # approved is the owner's call: archiving leaves the text, the approval
-        # and the origin intact, so nothing in a later read would show that an
-        # agent had taken it out of every search, recall and briefing.
-        #
-        # allow_sealed=False: storage checks the seal inside the write
-        # transaction. Checking it here and archiving afterwards loses the race
-        # against the owner approving the record in between. The seal, not
-        # origin/trusted_at: mem_update legitimately relabels origin to 'agent'
-        # and drops the approval, so an agent could otherwise clear its own way
-        # to the gate with one extra call.
-        #
-        # "mcp:" is stamped here, not taken from the caller: _agent() falls back
-        # to clientInfo.name, so an agent could otherwise sign the audit row
-        # "owner-cli" and the one trace of the change would name the wrong party.
-        result = S.set_archived(conn, slug, archived,
-                                by=f"mcp:{_agent()}", allow_sealed=False)
-    except (S.SealedRecord, ValueError) as exc:
-        return _err(str(exc))
-    if not result:
-        return _err(f"not found: {slug}")
-    return _ok(result)
-
-
 # --------------------------------------------------------------------------- #
 # tool descriptors
 # --------------------------------------------------------------------------- #
@@ -504,7 +470,7 @@ TOOLS: list[Tool] = [
             "keeps approval. Fields omitted stay as they were; `ttl_days` cannot be "
             "changed here. Fails for an unknown or deleted slug (create with "
             "mem_write). Returns ok, slug and the history length. Use mem_reinforce "
-            "to report how a skill worked instead of editing it; use mem_archive to "
+            "to report how a skill worked instead of editing it; retiring a record "
             "retire a record without editing."
         ),
         inputSchema={
@@ -628,11 +594,12 @@ TOOLS: list[Tool] = [
             "because it is rarely needed — a deploy gate, a safety constraint — where "
             "decay would read rarity as irrelevance. A pinned record cannot be "
             "archived until unpinned; unpinning does not un-archive it, and pinning an "
-            "archived record leaves it archived — use mem_archive for that. Fails for "
+            "archived record leaves it archived. Fails for "
             "an unknown slug. Returns the slug, the pinned state, whether the flag "
             "changed, and the record's current lifecycle. "
             "Use mem_reinforce for skills that should earn their "
-            "strength; use mem_archive to retire one."
+            "strength. Retiring a record is the owner's own call at a terminal "
+            "(`skillmem skills-archive <slug>`), not an agent's."
         ),
         inputSchema={
             "type": "object",
@@ -641,35 +608,6 @@ TOOLS: list[Tool] = [
                          "description": "Slug of the record to pin (any kind)."},
                 "pinned": {"type": "boolean",
                            "description": "true to pin (default), false to unpin."},
-            },
-            "required": ["slug"],
-        },
-    ),
-    Tool(
-        name="mem_archive",
-        description=(
-            "Retire a record that no longer applies, or bring it back "
-            "(archived=false). WRITES: archiving sets the lifecycle state and nothing "
-            "else — an archived record leaves mem_search, mem_recall, mem_list and "
-            "the hooks' recall, but keeps its text, history and approval and is still "
-            "readable by slug with mem_get, and every call leaves a history row so the "
-            "owner can see what was retired. Nothing is deleted — deletion stays with "
-            "the owner at the CLI (`skillmem rm`), and so does retiring a record the "
-            "owner wrote or approved: this tool refuses those and names the CLI "
-            "command instead. Refuses a pinned record (unpin "
-            "first) and an unknown slug. Restoring a genuinely archived record also "
-            "refreshes its recency and floors strength at 0.5, or the nightly sweep "
-            "would archive it again; on a record that is already active it changes "
-            "nothing. Returns slug, the new lifecycle and the previous one. Use "
-            "mem_update to correct a record instead of retiring it; use mem_pin for "
-            "the opposite — never archive."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "slug": {"type": "string", "description": "Slug of the record to archive or restore."},
-                "archived": {"type": "boolean",
-                             "description": "true to archive (default), false to bring it back to active."},
             },
             "required": ["slug"],
         },
@@ -687,7 +625,6 @@ TOOL_HANDLERS = {
     "mem_recall": _tool_recall,
     "mem_reinforce": _tool_reinforce,
     "mem_pin": _tool_pin,
-    "mem_archive": _tool_archive,
 }
 
 
