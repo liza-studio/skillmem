@@ -322,6 +322,13 @@ def _run_import(conn, root, assets_root, kind, project_override,
                     S.set_pinned(conn, slug, True)     # the row's own flag, untouched
             if pinned is not None:
                 S.set_pinned(conn, slug, pinned)
+            # The seal is restored, never dropped: a dump of a record that was
+            # the owner's must come back sealed, or export+import is a way to
+            # launder exactly the records the seal protects. It is only ever
+            # raised here — an import cannot clear a seal the row already has.
+            if isinstance(md, dict) and md.get("owner_seal"):
+                conn.execute(
+                    "UPDATE memory_items SET owner_seal = 1 WHERE slug = ?", (slug,))
             counters = {k: extras[k] for k in ("access_count", "confirmed_count", "failure_count")
                         if k in extras}
             if counters and _is_auto_memory(meta):

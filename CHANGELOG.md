@@ -37,8 +37,15 @@
   design), so a gate resting on those two was one extra call from open. The
   nightly lifecycle sweep exempts sealed records for the same reason —
   `mem_reinforce evidence="failure"` lets an agent walk a record's strength down
-  to the floor, which is the slow way to the same place. Existing databases gain
-  the column and its backfill on first open.
+  to the floor, which is the slow way to the same place. The seal is set whenever
+  the owner writes or approves a record — including a rewrite at the terminal,
+  the very path that clears the approval — and it travels in a dump, so an
+  export and import round trip cannot launder the records it protects. An agent
+  also cannot change a sealed record's kind: the session briefing selects by
+  kind, so a relabelled rule leaves it exactly as archiving would. Existing
+  databases gain the column and its backfill on first open, whatever their
+  schema version, and a database whose column landed without the backfill is
+  repaired on the next open.
 - Every real lifecycle change writes a row into the tamper-evident history, the
   nightly sweep included, with the acting surface stamped by that surface rather
   than taken from the caller (an MCP client supplies its own name). A call that

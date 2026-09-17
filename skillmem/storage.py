@@ -310,8 +310,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # never landed would otherwise fail every read with "no such column: origin".
     if not {"origin", "trusted_at", "trusted_by"} <= live_cols:
         _migrate_v10(conn)
-    if "owner_seal" not in live_cols:
-        _migrate_owner_seal(conn)
+    # after v10: the backfill reads origin and trusted_at, and repairs a database
+    # whose column landed without them
+    _migrate_owner_seal(conn)
 
     if _current_schema_version(conn) >= CURRENT_SCHEMA_VERSION:
         return
@@ -527,14 +528,17 @@ def _migrate_owner_seal(conn: sqlite3.Connection) -> None:
     try:
         with tx(conn):   # BEGIN IMMEDIATE: two processes may open the same file
             have = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)")}
-            if "owner_seal" in have:
-                return
-            conn.execute(
-                "ALTER TABLE memory_items ADD COLUMN owner_seal INTEGER NOT NULL DEFAULT 0"
-            )
+            if "owner_seal" not in have:
+                conn.execute(
+                    "ALTER TABLE memory_items ADD COLUMN owner_seal "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            # Run the backfill whether or not the column is new: an interrupted
+            # migration can leave the column present and unsealed, and taking
+            # presence as proof of the backfill would never repair that.
             conn.execute(
                 "UPDATE memory_items SET owner_seal = 1 "
-                "WHERE origin = 'owner' OR trusted_at IS NOT NULL"
+                "WHERE owner_seal = 0 AND (origin = 'owner' OR trusted_at IS NOT NULL)"
             )
     except sqlite3.OperationalError as exc:
         if "duplicate column" not in str(exc).lower():
@@ -626,8 +630,10 @@ def _backfill_origin(conn: sqlite3.Connection) -> None:
     # release exists to distrust, and approving 7809 of them at once would empty
     # the marker of meaning on day one.
     conn.execute(
-        "UPDATE memory_items SET trusted_at = ?, trusted_by = 'migration-v10', "
-        "owner_seal = 1 "
+        # owner_seal is NOT set here: this runs inside the v10 migration, before
+        # that column exists, and SQLite resolves names at prepare time.
+        # _migrate_owner_seal seals these same rows right afterwards.
+        "UPDATE memory_items SET trusted_at = ?, trusted_by = 'migration-v10' "
         "WHERE trusted_at IS NULL AND origin IN ('owner', 'agent')", (now,))
 
 
@@ -806,6 +812,7 @@ class MemoryItem:
     strength: float = 1.0
     pinned: bool = False
     lifecycle: str = "active"
+    owner_seal: int = 0
     confirmed_count: int = 0
     failure_count: int = 0
     access_count: int = 0
@@ -852,6 +859,7 @@ class MemoryItem:
             strength=row["strength"],
             pinned=bool(row["pinned"]) if "pinned" in row.keys() else False,
             lifecycle=(row["lifecycle"] if "lifecycle" in row.keys() else "active"),
+            owner_seal=(row["owner_seal"] if "owner_seal" in row.keys() else 0),
             confirmed_count=(row["confirmed_count"]
                              if "confirmed_count" in row.keys() else 0),
             failure_count=row["failure_count"] if "failure_count" in row.keys() else 0,
@@ -1417,6 +1425,8 @@ def _upsert_update_tx(
         conn.execute(
             """
             UPDATE memory_items SET
+                -- the owner writing over a record seals it; nothing clears it
+                owner_seal = CASE WHEN ? THEN 1 ELSE owner_seal END,
                 kind = ?, title = ?, body = ?, body_path = ?, stemmed = ?, project = ?,
                 tags = ?, topics = ?, visibility = ?, agent = ?, source_session = ?,
                 attachments = ?, ttl_days = ?, freshness_until = ?, wordcount = ?,
@@ -1432,6 +1442,7 @@ def _upsert_update_tx(
             WHERE id = ?
             """,
             (
+                1 if (_valid_origin(item.origin) == "owner" or item.trusted_at) else 0,
                 item.kind, item.title, item.body, item.body_path, stemmed, item.project,
                 _json_list(item.tags), _json_list(item.topics),
                 item.visibility, item.agent, item.source_session,

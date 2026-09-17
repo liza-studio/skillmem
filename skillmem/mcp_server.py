@@ -169,7 +169,9 @@ def _normalize_agent(name: str) -> str:
 
 
 def _agent() -> str:
-    return _ENV_AGENT or _client_agent or "claude-code"
+    # normalise here too: _ENV_AGENT comes from the environment, which the agent
+    # may control, and an unnormalised value put a newline into the audit row
+    return _normalize_agent(_ENV_AGENT or _client_agent or "claude-code")
 
 
 def _tool_write(args: dict[str, Any]) -> list[TextContent]:
@@ -212,6 +214,20 @@ def _tool_write(args: dict[str, Any]) -> list[TextContent]:
 
 def _tool_update(args: dict[str, Any]) -> list[TextContent]:
     slug = args.get("slug")
+    if slug and args.get("kind"):
+        conn = _shared_conn()
+        S.init_schema(conn)
+        row = conn.execute(
+            "SELECT kind, owner_seal FROM memory_items "
+            "WHERE slug = ? AND deleted_at IS NULL", (slug,)).fetchone()
+        if row and row["owner_seal"] and args["kind"] != row["kind"]:
+            # The hooks' inject selects by kind, so a feedback rule relabelled
+            # 'note' leaves the session briefing — the same disappearance
+            # mem_archive is refused for, and on unchanged text it writes no
+            # history row at all.
+            return _err(f"'{slug}' is the owner's record; an agent cannot change its "
+                        f"kind from {row['kind']} (the session briefing selects by "
+                        f"kind). Edit the text instead, or ask the owner.")
     body = args.get("body")
     reason = args.get("reason")
     if not (slug and body and reason):

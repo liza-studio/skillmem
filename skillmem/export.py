@@ -51,8 +51,13 @@ def _frontmatter(item: S.MemoryItem, *, truncated: bool = False) -> str:
             "type": item.kind,
             "originSessionId": item.source_session,
             # Provenance travels with the file: a re-import must know that a pack
-            # is a pack. Approval never travels — only the owner grants it.
+            # is a pack. Approval never travels — only the owner grants it. The
+            # seal does travel: it records that this record WAS the owner's, and
+            # a restore that dropped it would hand an agent the one thing the
+            # seal exists to deny — including for an approved record, whose
+            # origin stays 'agent' and whose approval is deliberately not here.
             "origin": item.origin,
+            "owner_seal": bool(getattr(item, "owner_seal", 0)),
         },
         "exported_at": dt.datetime.fromtimestamp(int(time.time()), tz=dt.timezone.utc)
             .strftime("%Y-%m-%dT%H:%M:%SZ"),

@@ -230,6 +230,28 @@ def test_archived_record_stays_archived_through_export_and_import(tmp_path, monk
     assert row["lifecycle"] == "archived"          # a dump must not un-retire a record
 
 
+def test_the_owner_seal_survives_export_and_import(tmp_path, monkeypatch):
+    """Otherwise export+import launders exactly the records the seal protects."""
+    from skillmem import storage as S, export as E, vault as V
+    monkeypatch.setenv("SKILLMEM_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("SKILLMEM_DB", raising=False)
+    conn = S.connect(tmp_path / "home" / "memory.db"); S.init_schema(conn)
+    # an owner-APPROVED record: origin stays 'agent', and approval is never exported
+    S.upsert(conn, S.MemoryItem(slug="skill-approved", kind="skill", title="approved",
+                                body="a skill the owner approved at a terminal"))
+    conn.execute("UPDATE memory_items SET trusted_at = ?, trusted_by = 'owner', "
+                 "owner_seal = 1 WHERE slug = 'skill-approved'", (1_700_000_000,))
+    dump = tmp_path / "dump"
+    E.export_all(conn, dump)
+    fresh = S.connect(tmp_path / "fresh.db"); S.init_schema(fresh)
+    res = V.import_vault(fresh, dump, skip_auto_memories=False)
+    assert not res.failed, res.failed
+    row = fresh.execute("SELECT origin, trusted_at, owner_seal FROM memory_items "
+                        "WHERE slug='skill-approved'").fetchone()
+    assert row["trusted_at"] is None          # approval never travels, by design
+    assert row["owner_seal"] == 1             # the seal does
+
+
 def test_pinned_archived_record_survives_the_round_trip(tmp_path, monkeypatch):
     """The state 0.11.0's pin bug produced: the import used to fail and un-retire it."""
     from skillmem import storage as S, export as E, vault as V

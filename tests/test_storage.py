@@ -204,3 +204,31 @@ def test_metadata_only_write_is_applied_not_silently_dropped(conn):
     assert item.project == "liza", "metadata change was dropped"
     assert "deploy" in item.tags
     assert item.trusted_at is not None, "unchanged text must keep its approval"
+
+
+def test_a_database_without_the_v10_columns_still_opens(tmp_path):
+    """The seal's backfill used to run inside the v10 migration, before its own
+    column existed: SQLite resolves names at prepare time, so a database missing
+    the v10 columns threw on open, and the rolled-back ALTERs made it throw
+    forever. Built by dropping the columns from a real schema, which is the
+    shape a pre-0.10 database has."""
+    from skillmem import storage as S
+    db = tmp_path / "old.db"
+    conn = S.connect(db)
+    S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="old-rule", kind="feedback", title="old rule",
+                                body="a rule from before the seal existed",
+                                origin="owner"))
+    for col in ("owner_seal", "trusted_by", "trusted_at", "origin"):
+        conn.execute(f"ALTER TABLE memory_items DROP COLUMN {col}")
+    conn.close()
+
+    for _ in range(2):                       # a repeatable failure was the bug
+        conn = S.connect(db)
+        S.init_schema(conn)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(memory_items)")}
+        assert {"origin", "trusted_at", "owner_seal"} <= cols
+        rows = conn.execute("SELECT slug, owner_seal FROM memory_items").fetchall()
+        assert [r["slug"] for r in rows] == ["old-rule"]
+        assert rows[0]["owner_seal"] == 1    # the backfill sealed it
+        conn.close()

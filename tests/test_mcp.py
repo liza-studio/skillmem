@@ -450,6 +450,38 @@ def test_update_does_not_open_the_way_to_archive_an_owner_record(mcp):
                         ).fetchone()["lifecycle"] == "active"
 
 
+def test_owner_writing_a_record_seals_it(mcp):
+    """The update path is what clears trusted_at, so it must set the seal there."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    # the record starts as the agent's: nothing to seal yet
+    S.upsert(conn, S.MemoryItem(slug="owner-edit", kind="feedback", title="rule",
+                                body="the first text, written by an agent", origin="agent"))
+    assert conn.execute("SELECT owner_seal FROM memory_items WHERE slug='owner-edit'"
+                        ).fetchone()["owner_seal"] == 0
+    # the owner rewrites it at a TTY — the path that also clears any approval
+    S.upsert(conn, S.MemoryItem(slug="owner-edit", kind="feedback", title="rule",
+                                body="the second text, rewritten by the owner",
+                                origin="owner"),
+             reason="owner edit")
+    row = conn.execute("SELECT origin, trusted_at, owner_seal FROM memory_items "
+                       "WHERE slug='owner-edit'").fetchone()
+    assert (row["origin"], row["trusted_at"], row["owner_seal"]) == ("owner", None, 1)
+    err = _payload(mcp._tool_archive({"slug": "owner-edit"}))
+    assert "cannot archive" in err.get("error", ""), err
+
+
+def test_agent_cannot_relabel_a_sealed_record_out_of_the_briefing(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="rule-kind", kind="feedback", title="rule",
+                                body="a rule the briefing selects by kind", origin="owner"))
+    err = _payload(mcp._tool_update({"slug": "rule-kind", "kind": "note"}))
+    assert "cannot change its kind" in err.get("error", ""), err
+    assert conn.execute("SELECT kind FROM memory_items WHERE slug='rule-kind'"
+                        ).fetchone()["kind"] == "feedback"
+
+
 def test_nightly_sweep_never_hides_an_owner_record(mcp):
     """The slow path to the same place: an agent can drive strength to the floor."""
     from skillmem import storage as S
