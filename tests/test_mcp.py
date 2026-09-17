@@ -377,3 +377,32 @@ def test_archive_keeps_updated_at_and_restore_survives_the_sweep(mcp):
     S.sweep_lifecycle(conn)
     row = conn.execute("SELECT lifecycle FROM memory_items WHERE slug = 'skill-idle'").fetchone()
     assert row["lifecycle"] == "active"                     # the sweep does not undo a restore
+
+
+def test_pin_and_archive_do_not_touch_updated_at_or_hand_out_strength(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    _payload(mcp._tool_learn({"slug": "skill-flags", "title": "flags", "trigger": "rare path",
+                              "steps": "step", "outcome": "success", "lessons": "none"}))
+    old = S._now() - 50 * 86400
+    conn.execute("UPDATE memory_items SET updated_at = ?, strength = 0.05 WHERE slug = 'skill-flags'", (old,))
+    _payload(mcp._tool_pin({"slug": "skill-flags"}))
+    assert S.get(conn, "skill-flags").updated_at == old          # pinning is not an edit
+    _payload(mcp._tool_pin({"slug": "skill-flags", "pinned": False}))
+    r = _payload(mcp._tool_archive({"slug": "skill-flags", "archived": False}))
+    assert r["was"] == "active" and r["lifecycle"] == "active"
+    assert S.get(conn, "skill-flags").strength == 0.05           # no strength without evidence
+
+
+def test_learn_refuses_a_slug_that_already_holds_a_note(mcp):
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    body = S.skill_body("a condition worth recording", "an action taken", "success", None)
+    S.upsert(conn, S.MemoryItem(slug="looks-like-skill", kind="note", title="taken",
+                                body=body), check_conflicts=False)
+    err = _payload(mcp._tool_learn({"slug": "looks-like-skill", "title": "taken",
+                                    "trigger": "a condition worth recording",
+                                    "steps": "an action taken", "outcome": "success",
+                                    "lessons": None, "check_conflicts": False}))
+    assert "already holds a note" in err.get("error", "")
+    assert S.get(conn, "looks-like-skill").kind == "note"

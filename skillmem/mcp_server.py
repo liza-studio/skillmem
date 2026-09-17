@@ -280,7 +280,14 @@ def _tool_learn(args: dict[str, Any]) -> list[TextContent]:
         )
     except (S.MemoryConflict, ValueError) as exc:
         return _err(str(exc))
-    return _ok({"ok": True, "slug": result.slug, "id": result.id, "kind": "skill"})
+    # the slug may already hold a note with the same text: upsert keeps the
+    # existing kind, so report what is stored rather than what we asked for
+    stored = S.get(conn, result.slug)
+    kind = stored.kind if stored else "skill"
+    if kind != "skill":
+        return _err(f"slug '{result.slug}' already holds a {kind}; pick another slug "
+                    f"or use mem_update")
+    return _ok({"ok": True, "slug": result.slug, "id": result.id, "kind": kind})
 
 
 def _tool_recall(args: dict[str, Any]) -> list[TextContent]:
@@ -501,11 +508,13 @@ TOOLS: list[Tool] = [
             "UNAPPROVED until the owner runs `skillmem trust`. `slug` must be new, "
             "conventionally 'skill-<topic>'; an existing slug with different text is "
             "refused (use mem_update), byte-identical text returns the existing skill "
-            "unchanged. `check_conflicts` (default true) refuses a near-duplicate of "
-            "any record it can see, a plain note included, and names it. Write "
-            "bilingually (EN+RU) if you work in both — lexical search is "
-            "per-language. Returns ok and slug. Use mem_write for a plain note or "
-            "rule; use mem_reinforce afterwards to record whether the skill held up."
+            "with its approval intact, applying only the metadata you pass (tags, "
+            "topics, project). A slug that already holds a note is refused. "
+            "`check_conflicts` (default true) refuses a near-duplicate of any record "
+            "it can see, a plain note included, and names it. Write bilingually "
+            "(EN+RU) if you work in both — lexical search is per-language. Returns ok "
+            "and slug. Use mem_write for a plain note or rule; use mem_reinforce "
+            "afterwards to record whether the skill held up."
         ),
         inputSchema={
             "type": "object",
@@ -591,13 +600,13 @@ TOOLS: list[Tool] = [
         name="mem_pin",
         description=(
             "Pin a record so it never decays and is never archived, or unpin it "
-            "(pinned=false). WRITES one flag; reversible; approval and text "
-            "untouched. For a rule that matters precisely because it is rarely needed "
-            "— a deploy gate, a safety constraint — where decay would read rarity as "
-            "irrelevance. A pinned record cannot be archived until unpinned. Fails "
-            "for an unknown slug. Returns slug and pinned state. Use mem_reinforce "
-            "for skills that should earn their strength; use mem_archive to retire "
-            "one."
+            "(pinned=false). WRITES the flag and nothing else — reversible, and text, "
+            "approval and updated_at are untouched. For a rule that matters precisely "
+            "because it is rarely needed — a deploy gate, a safety constraint — where "
+            "decay would read rarity as irrelevance. A pinned record cannot be "
+            "archived until unpinned. Fails for an unknown slug. Returns slug and "
+            "pinned state. Use mem_reinforce for skills that should earn their "
+            "strength; use mem_archive to retire one."
         ),
         inputSchema={
             "type": "object",
@@ -618,11 +627,12 @@ TOOLS: list[Tool] = [
             "the hooks' recall, but keeps its text, history and approval and is still "
             "readable by slug with mem_get. Nothing is deleted — deletion stays with "
             "the owner at the CLI (`skillmem rm`). Refuses a pinned record (unpin "
-            "first) and an unknown slug. Restoring also refreshes recency and floors "
-            "strength at 0.5, or the nightly sweep would archive it again. Returns "
-            "slug, the new lifecycle and the previous one. Use mem_update to correct "
-            "a record instead of retiring it; use mem_pin for the opposite — never "
-            "archive."
+            "first) and an unknown slug. Restoring a genuinely archived record also "
+            "refreshes its recency and floors strength at 0.5, or the nightly sweep "
+            "would archive it again; on a record that is already active it changes "
+            "nothing. Returns slug, the new lifecycle and the previous one. Use "
+            "mem_update to correct a record instead of retiring it; use mem_pin for "
+            "the opposite — never archive."
         ),
         inputSchema={
             "type": "object",

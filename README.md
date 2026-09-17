@@ -21,7 +21,7 @@ skillmem gives Claude Code and the Codex CLI a local, persistent skill & memory 
 - **Ebbinghaus strength model, earned not claimed** — strength rises only on evidence from outside the agent's own judgement, falls after a failure, and fades on a schedule when unused; dead skills are swept to a backed-up archive (never deleted). Rules that are rare by nature can be pinned out of decay.
 - **Provenance, and trust the owner grants** — every memory records where it came from (`owner` / `agent` / `imported` / `derived`), and only the owner approves one as a rule (`skillmem trust <slug>`). Anything unapproved — an imported pack, a summary of a transcript that quoted a web page, a rule an agent was talked into saving — is injected inside a marked block that says it is data, not instructions. Editing an approved memory drops the approval with it.
 - **Tamper-evident history** — every edit is appended to a SHA256 hash-chain; `skillmem verify` detects any after-the-fact tampering.
-- **Deep Claude Code integration** — hooks on five events + 9 MCP tools installed with one command.
+- **Deep Claude Code integration** — hooks on five events + 10 MCP tools installed with one command.
 - **One memory, several agents** — Claude Code and Codex share a single database, and every
   record carries the agent that wrote it, taken from the MCP handshake, so authorship stays
   readable when they learn side by side.
@@ -67,7 +67,7 @@ a hosted tier. skillmem is narrower on purpose and different on four axes:
 | **Where strength comes from** | outside evidence only — a passing test, an accepted diff, your confirmation. An agent saying "that helped" moves recency, never strength, so it cannot promote its own mistake. `reinforce` is not idempotent: a retried confirmation counts again (evidence ids are a later release) |
 | **Who is trusted** | you. Provenance is recorded, approval is yours to give, and unapproved memory arrives framed as data |
 | **Where it runs** | your disk. SQLite + FTS5 + a local ONNX embedding model. No API key, no cloud, no Docker, no graph database |
-| **How it reaches the agent** | hooks on five events (SessionStart, UserPromptSubmit, PreToolUse, Stop, SessionEnd) — recall happens whether or not the agent thinks to ask, plus 9 MCP tools when it does |
+| **How it reaches the agent** | hooks on five events (SessionStart, UserPromptSubmit, PreToolUse, Stop, SessionEnd) — recall happens whether or not the agent thinks to ask, plus 10 MCP tools when it does |
 
 Retrieval quality is measured, not asserted: **hit@5 0.871 / MRR 0.622** on the full LongMemEval
 oracle set, hybrid retrieval, k=5, CPU only, reproducible from this repo — see
@@ -169,7 +169,7 @@ The MCP server also works in the Claude Desktop chat app — add to
 }
 ```
 
-You get all 9 `mem_*` tools on demand (search, learn, recall, reinforce…).
+You get all 10 `mem_*` tools on demand (search, learn, recall, reinforce…).
 The automatic hooks (auto-recall on every prompt, session recap) are a
 Claude Code mechanism and do not run in the chat app.
 

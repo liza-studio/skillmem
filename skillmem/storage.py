@@ -2295,9 +2295,10 @@ def set_pinned(
     ).fetchone()
     if not row:
         return None
+    # the flag only — updated_at is the text's age, and pinning is not an edit
     conn.execute(
-        "UPDATE memory_items SET pinned = ?, updated_at = ? WHERE id = ?",
-        (1 if pinned else 0, _now(), row["id"]),
+        "UPDATE memory_items SET pinned = ? WHERE id = ?",
+        (1 if pinned else 0, row["id"]),
     )
     return {"slug": slug, "pinned": pinned, "changed": bool(row["pinned"]) != pinned}
 
@@ -2440,9 +2441,10 @@ def set_archived(
         conn.execute(
             "UPDATE memory_items SET lifecycle = 'archived' WHERE id = ?", (row["id"],)
         )
-    else:
-        # restoring refreshes recency and floors strength, or the nightly
-        # sweep_lifecycle would archive it again on its next run
+    elif row["lifecycle"] == "archived":
+        # only a real restore refreshes recency and floors strength, or the
+        # nightly sweep_lifecycle would archive it again on its next run;
+        # calling this on an active row must not hand out strength for free
         conn.execute(
             "UPDATE memory_items SET lifecycle = 'active', "
             "strength = MAX(strength, ?), last_accessed_at = ? WHERE id = ?",
