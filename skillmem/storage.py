@@ -1119,6 +1119,30 @@ def gc_body_files(conn: sqlite3.Connection) -> int:
     return removed
 
 
+def mismatched_bodies(conn: sqlite3.Connection) -> list[str]:
+    """Slugs whose externalised body no longer matches the approved text.
+
+    `verify` walks the history chain, which says nothing about a file on disk;
+    one file write changed approved words with every column and every hash in
+    the database left intact.
+    """
+    bad: list[str] = []
+    rows = conn.execute(
+        "SELECT slug, title, body_path, content_hash FROM memory_items "
+        "WHERE body_path IS NOT NULL AND deleted_at IS NULL"
+    ).fetchall()
+    for r in rows:
+        path = docs_dir() / r["body_path"]
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            bad.append(r["slug"])
+            continue
+        if r["content_hash"] and _hash(r["title"], text) != r["content_hash"]:
+            bad.append(r["slug"])
+    return bad
+
+
 def load_body(item: "MemoryItem") -> str:
     """Return the full body, materialising from disk when externalized."""
     if not item.body_path:
@@ -1133,7 +1157,20 @@ def load_body(item: "MemoryItem") -> str:
             item.slug, path,
         )
         return item.body
-    return path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    # The file is content-addressed and the row carries the hash of the text the
+    # owner approved, but nothing compared them: one file write swapped approved
+    # words underneath the approval, with trusted_at, content_hash, updated_at and
+    # the history chain all untouched. Serve the stored excerpt instead, so text
+    # nobody approved never reaches a model as a rule.
+    if item.content_hash and _hash(item.title, text) != item.content_hash:
+        log.warning(
+            "body file for '%s' does not match the approved text (%s) — "
+            "serving the stored excerpt; run `skillmem verify` and re-approve",
+            item.slug, path,
+        )
+        return item.body
+    return text
 
 
 ORIGINS = ("owner", "agent", "imported", "derived", "unknown")
@@ -1587,7 +1624,10 @@ def _upsert_update_tx(
                 trusted_at = NULL, trusted_by = NULL,
                 deleted_at = CASE WHEN ? THEN NULL ELSE deleted_at END,
                 updated_at = ?
-            WHERE id = ?
+            -- the row may have been soft-deleted after the caller's read: the
+            -- tombstone check above runs outside this lock, and a write that
+            -- lands on a deleted row is acknowledged and then invisible
+            WHERE id = ? AND (deleted_at IS NULL OR ?)
             """,
             (
                 1 if (_valid_origin(item.origin) == "owner" or item.trusted_at) else 0,
@@ -1598,7 +1638,7 @@ def _upsert_update_tx(
                 item.ttl_days, freshness, item.wordcount, item.content_hash,
                 item.supersedes_id, item.confidence, strength,
                 _valid_origin(item.origin), 1 if revive else 0, now,
-                existing["id"],
+                existing["id"], 1 if revive else 0,
             ),
         )
         if links is not None:
@@ -2905,7 +2945,15 @@ def recall_skills(
             # recall fails or waits: reinforce takes a write lock, so a writer
             # holding one turns this into "database is locked".
             try:
-                r = reinforce(conn, row["slug"]) if not locked_out else None
+                if locked_out:
+                    r = None
+                else:
+                    prev_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+                    conn.execute("PRAGMA busy_timeout = 150")
+                    try:
+                        r = reinforce(conn, row["slug"])
+                    finally:
+                        conn.execute(f"PRAGMA busy_timeout = {int(prev_timeout)}")
             except sqlite3.OperationalError:
                 # One busy_timeout per recall, not one per row: five rows behind a
                 # writer turned a 5 ms read into seconds of waiting in a hook.

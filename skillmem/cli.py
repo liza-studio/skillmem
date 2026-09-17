@@ -275,7 +275,14 @@ def write(
 def rm(ctx: click.Context, slug: str, reason: str) -> None:
     """Soft-delete a memory (kept in memory_history)."""
     conn = _conn(ctx.obj["db_path"])
-    if S.soft_delete(conn, slug, reason, allow_sealed=S.owner_present()):
+    try:
+        deleted = S.soft_delete(conn, slug, reason, allow_sealed=S.owner_present())
+    except S.SealedRecord:
+        raise click.ClickException(
+            f"'{slug}' was written or approved by the owner; deleting it needs a "
+            f"person at a terminal. Run this command yourself, not through an agent."
+        )
+    if deleted:
         click.echo(f"deleted: {slug}")
     else:
         click.echo(f"not found: {slug}", err=True)
@@ -1841,8 +1848,23 @@ def verify(ctx: click.Context, strict: bool) -> None:
     conn = _conn(ctx.obj["db_path"])
     checked, breaks = S.verify_history(conn)
     click.echo(f"checked {checked} history rows")
+    # The chain says nothing about a file on disk, and bodies over the threshold
+    # live in one: a single file write changed approved words with every column
+    # and every hash in the database left intact.
+    bad_bodies = S.mismatched_bodies(conn)
+    if bad_bodies:
+        click.echo(f"BODY MISMATCH: {len(bad_bodies)} record(s) whose body file no "
+                   f"longer matches the approved text", err=True)
+        for slug in bad_bodies[:10]:
+            click.echo(f"  {slug}", err=True)
+        click.echo("  (the stored excerpt is served instead; review and re-approve)",
+                   err=True)
+    if not breaks and not bad_bodies:
+        click.echo("OK: chain intact, bodies match")
+        return
     if not breaks:
-        click.echo("OK: chain intact")
+        if strict:
+            sys.exit(1)
         return
     click.echo(f"BROKEN: {len(breaks)} chain mismatches", err=True)
     for b in breaks[:10]:

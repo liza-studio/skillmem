@@ -23,9 +23,11 @@
   `origin` and `trusted_at` both move under an agent's own writes, so neither
   could carry the rule. Existing databases gain the column and its backfill on
   first open, whatever their schema version.
-- **The owner is a terminal, not a caller's word for it.** One signal,
-  `owner_present()`, shared by every surface: an agent runs `skillmem write`
-  through Bash as easily as a person types it. `skillmem trust` now prints the
+- **One owner signal instead of a caller's word for it.** `owner_present()` — a
+  TTY — is shared by every surface, because an agent runs `skillmem write`
+  through Bash as easily as a person types it. It is accident protection, not a
+  wall: a pseudo-terminal is one `pty.fork()` away, and the wall is the
+  permission deny rule `init --claude-code` installs for these commands. `skillmem trust` now prints the
   record and asks before approving, pinned to the hash it displayed — an agent
   rewrite between reading a rule and approving it used to become approved text,
   and the hooks then injected the agent's version as the owner's own.
@@ -35,9 +37,16 @@
   `remove_pack`, `soft_delete`, `set_archived` and the same-text metadata write.
   Each was a read followed by a write with a gap an approval could land in.
   Archiving and deleting a sealed record both default to refusing.
-- `mem_recall` never fails or waits on its own bookkeeping. Recording recency
-  takes a write lock, and behind a writer that turned a read the hooks run on
-  every prompt into "database is locked".
+- `mem_recall` never fails on its own bookkeeping and waits at most 150 ms for
+  it. Recording recency takes a write lock, and behind a writer that turned a
+  read the hooks run on every prompt into "database is locked" — and then, once
+  it stopped failing, into a ten-second wait on the default busy timeout.
+- An externalised body is checked against the hash of the text that was
+  approved, on every read and in `skillmem verify`. The file is
+  content-addressed and the row carries the hash, but nothing compared them: one
+  file write changed approved words with `trusted_at`, `content_hash`,
+  `updated_at` and the history chain all left intact. A body that does not match
+  is not served to a model at all; the stored excerpt is served instead.
 - `mem_learn` refuses a slug that holds a note **without writing anything**; the
   kind check used to run after the write, so a refused call still landed its
   tags. The conflict message for an existing slug names no parameter at all —
