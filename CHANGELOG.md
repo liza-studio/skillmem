@@ -41,6 +41,16 @@
   it. Recording recency takes a write lock, and behind a writer that turned a
   read the hooks run on every prompt into "database is locked" — and then, once
   it stopped failing, into a ten-second wait on the default busy timeout.
+- A `kind` the caller never named is not written. The guard deliberately exempts
+  an omitted kind, but the write applied the default anyway, which relabelled a
+  sealed record out of the briefing by another route.
+- `skillmem trust` refuses a record that is archived: the nightly sweep can retire
+  one between the owner reading it and approving it, and approving something out
+  of every read is not what they meant.
+- One imported file is all-or-nothing. A refusal partway through left the row
+  written and its lifecycle, pin and counters unapplied.
+- HTTP recall no longer answers 500 when its recency bookkeeping meets a write
+  lock, the same fix the MCP path already had.
 - An externalised body is checked against the hash of the text that was
   approved, on every read and in `skillmem verify`. The file is
   content-addressed and the row carries the hash, but nothing compared them: one

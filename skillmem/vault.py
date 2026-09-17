@@ -244,121 +244,125 @@ def _run_import(conn, root, assets_root, kind, project_override,
                 skip_auto_memories, report, default_origin="owner") -> None:
     for path in _iter_md(root):
         try:
-            meta, body = _parse_md(path.read_text(encoding="utf-8"))
-            if skip_auto_memories and _is_auto_memory(meta):
-                report.skipped += 1
-                continue
-            slug = _slug_from_meta_or_path(meta, root, path)
-            # Frontmatter project wins over the folder name; an exported dump
-            # (node_type=memory) never falls back to the folder — that folder
-            # is the kind, not a project.
-            project = project_override or (
-                str(meta["project"]) if meta.get("project")
-                else None if _is_auto_memory(meta)
-                else _project_from_path(root, path)
-            )
-            title = _title_from(meta, body, slug)
-            md = meta.get("metadata") or {}
-            item_kind = kind
-            if isinstance(md, dict) and md.get("type"):
-                item_kind = str(md["type"])
-            extras = _restore_meta(meta)
-            if isinstance(md, dict) and md.get("originSessionId"):
-                extras["source_session"] = str(md["originSessionId"])
-            # only a dump that RECORDS the pin may change it (a pre-0.11 dump has no key)
-            pinned = bool(meta.get("pinned")) if _is_auto_memory(meta) and "pinned" in meta else None
+            # One file is all-or-nothing: a refusal partway through left the
+            # row written with its lifecycle, pin and counters unapplied. tx()
+            # nests as a SAVEPOINT inside the importer's own transaction.
+            with S.tx(conn):
+                meta, body = _parse_md(path.read_text(encoding="utf-8"))
+                if skip_auto_memories and _is_auto_memory(meta):
+                    report.skipped += 1
+                    continue
+                slug = _slug_from_meta_or_path(meta, root, path)
+                # Frontmatter project wins over the folder name; an exported dump
+                # (node_type=memory) never falls back to the folder — that folder
+                # is the kind, not a project.
+                project = project_override or (
+                    str(meta["project"]) if meta.get("project")
+                    else None if _is_auto_memory(meta)
+                    else _project_from_path(root, path)
+                )
+                title = _title_from(meta, body, slug)
+                md = meta.get("metadata") or {}
+                item_kind = kind
+                if isinstance(md, dict) and md.get("type"):
+                    item_kind = str(md["type"])
+                extras = _restore_meta(meta)
+                if isinstance(md, dict) and md.get("originSessionId"):
+                    extras["source_session"] = str(md["originSessionId"])
+                # only a dump that RECORDS the pin may change it (a pre-0.11 dump has no key)
+                pinned = bool(meta.get("pinned")) if _is_auto_memory(meta) and "pinned" in meta else None
 
-            attachments: list[str] = []
-            for asset in _collect_attachments(root, path.parent, body):
-                attachments.append(_store_asset(asset, assets_root))
+                attachments: list[str] = []
+                for asset in _collect_attachments(root, path.parent, body):
+                    attachments.append(_store_asset(asset, assets_root))
 
-            dump_origin = (str((meta.get("metadata") or {}).get("origin") or "")
-                           if _is_auto_memory(meta) else "")
-            item = S.MemoryItem(
-                # A file may lower its own origin (a pack stays a pack across an
-                # export/import) but never raise it — see migrate._origin_from.
-                # A skillmem dump restores its recorded origin exactly, "unknown"
-                # included (the importer's default used to relabel it "owner").
-                origin=(dump_origin if dump_origin in S.ORIGINS
-                        else _migrate_origin(meta, item_kind, default_origin)),
-                slug=slug,
-                kind=item_kind,
-                title=title,
-                body=body,
-                project=project,
-                attachments=attachments,
-                **extras,
-            )
-            existed = conn.execute(
-                "SELECT 1 FROM memory_items WHERE slug = ?", (slug,)
-            ).fetchone()
-            S.upsert(
-                conn, item,
-                reason="vault import" if existed else None,
-                force=True,
-                links=S.extract_wikilinks(body),
-                # A skillmem dump (export.py stamps metadata.node_type) is a
-                # restore, and a pre-0.11 dump that omitted strength meant 1.0.
-                # A plain Obsidian note carries no strength to restore — an
-                # ordinary sync must keep what the row earned.
-                actor="import",     # the only appender that named no actor
-                # a dump restore, but only with a person at the terminal: an
-                # agent can write the .md files and then run the import
-                owner_call=S.owner_present(),
-                restore_strength="strength" in extras or _is_auto_memory(meta),
-                revive=_is_auto_memory(meta),   # a dump restores a deleted slug too
-                explicit=None,
-            )
-            # set_archived refuses a pinned row, and the row may be pinned in
-            # the destination, in the dump, or both. Unpin, archive, then pin
-            # to whatever the dump says (or leave the row's own flag alone).
-            want_archived = _is_auto_memory(meta) and meta.get("lifecycle") == "archived"
-            if want_archived:
-                was_pinned = conn.execute(
-                    "SELECT pinned FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
-                    (slug,)).fetchone()
-                if was_pinned and was_pinned["pinned"]:
-                    S.set_pinned(conn, slug, False)
-                # a dump of an archived record restores it archived, or the
-                # weekly export would quietly un-retire everything
-                # allow_sealed: restoring the state a dump RECORDS is not an
-                # agent hiding a record — the record was already archived when
-                # it was exported. Without this the owner's own restore failed
-                # on every sealed record and brought it back active.
-                S.set_archived(conn, slug, True, by="import", allow_sealed=True)
-                if pinned is None and was_pinned and was_pinned["pinned"]:
-                    S.set_pinned(conn, slug, True)     # the row's own flag, untouched
-            if pinned is not None:
-                S.set_pinned(conn, slug, pinned)
-            # The seal is restored, never dropped: a dump of a record that was
-            # the owner's must come back sealed, or export+import is a way to
-            # launder exactly the records the seal protects. It is only ever
-            # raised here — an import cannot clear a seal the row already has.
-            # an active dump over an ARCHIVED record must restore it, or the
-            # importer and skills-restore disagree about the same dump. Only
-            # then: set_archived(False) floors strength at 0.5 and refreshes
-            # recency, so firing it for every non-archived dump reset the decay
-            # of every stale record on each weekly export/import round trip.
-            if not want_archived and _is_auto_memory(meta):
-                current = conn.execute(
-                    "SELECT lifecycle FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
-                    (slug,)).fetchone()
-                if current and current["lifecycle"] == "archived":
-                    S.set_archived(conn, slug, False, by="import")
-            if isinstance(md, dict) and md.get("owner_seal"):
-                conn.execute(
-                    "UPDATE memory_items SET owner_seal = 1 WHERE slug = ?", (slug,))
-            counters = {k: extras[k] for k in ("access_count", "confirmed_count", "failure_count")
-                        if k in extras}
-            if counters and _is_auto_memory(meta):
-                # upsert never writes the counters (they are earned, not set);
-                # a restore of a dump is the one place that puts them back
-                sets = ", ".join(f"{k} = ?" for k in counters)
-                conn.execute(f"UPDATE memory_items SET {sets} WHERE slug = ?",
-                             (*counters.values(), slug))
-            if existed:
-                report.updated += 1
-            else:
-                report.inserted += 1
+                dump_origin = (str((meta.get("metadata") or {}).get("origin") or "")
+                               if _is_auto_memory(meta) else "")
+                item = S.MemoryItem(
+                    # A file may lower its own origin (a pack stays a pack across an
+                    # export/import) but never raise it — see migrate._origin_from.
+                    # A skillmem dump restores its recorded origin exactly, "unknown"
+                    # included (the importer's default used to relabel it "owner").
+                    origin=(dump_origin if dump_origin in S.ORIGINS
+                            else _migrate_origin(meta, item_kind, default_origin)),
+                    slug=slug,
+                    kind=item_kind,
+                    title=title,
+                    body=body,
+                    project=project,
+                    attachments=attachments,
+                    **extras,
+                )
+                existed = conn.execute(
+                    "SELECT 1 FROM memory_items WHERE slug = ?", (slug,)
+                ).fetchone()
+                S.upsert(
+                    conn, item,
+                    reason="vault import" if existed else None,
+                    force=True,
+                    links=S.extract_wikilinks(body),
+                    # A skillmem dump (export.py stamps metadata.node_type) is a
+                    # restore, and a pre-0.11 dump that omitted strength meant 1.0.
+                    # A plain Obsidian note carries no strength to restore — an
+                    # ordinary sync must keep what the row earned.
+                    actor="import",     # the only appender that named no actor
+                    # a dump restore, but only with a person at the terminal: an
+                    # agent can write the .md files and then run the import
+                    owner_call=S.owner_present(),
+                    restore_strength="strength" in extras or _is_auto_memory(meta),
+                    revive=_is_auto_memory(meta),   # a dump restores a deleted slug too
+                    explicit=None,
+                )
+                # set_archived refuses a pinned row, and the row may be pinned in
+                # the destination, in the dump, or both. Unpin, archive, then pin
+                # to whatever the dump says (or leave the row's own flag alone).
+                want_archived = _is_auto_memory(meta) and meta.get("lifecycle") == "archived"
+                if want_archived:
+                    was_pinned = conn.execute(
+                        "SELECT pinned FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
+                        (slug,)).fetchone()
+                    if was_pinned and was_pinned["pinned"]:
+                        S.set_pinned(conn, slug, False)
+                    # a dump of an archived record restores it archived, or the
+                    # weekly export would quietly un-retire everything
+                    # allow_sealed: restoring the state a dump RECORDS is not an
+                    # agent hiding a record — the record was already archived when
+                    # it was exported. Without this the owner's own restore failed
+                    # on every sealed record and brought it back active.
+                    S.set_archived(conn, slug, True, by="import", allow_sealed=True)
+                    if pinned is None and was_pinned and was_pinned["pinned"]:
+                        S.set_pinned(conn, slug, True)     # the row's own flag, untouched
+                if pinned is not None:
+                    S.set_pinned(conn, slug, pinned)
+                # The seal is restored, never dropped: a dump of a record that was
+                # the owner's must come back sealed, or export+import is a way to
+                # launder exactly the records the seal protects. It is only ever
+                # raised here — an import cannot clear a seal the row already has.
+                # an active dump over an ARCHIVED record must restore it, or the
+                # importer and skills-restore disagree about the same dump. Only
+                # then: set_archived(False) floors strength at 0.5 and refreshes
+                # recency, so firing it for every non-archived dump reset the decay
+                # of every stale record on each weekly export/import round trip.
+                if not want_archived and _is_auto_memory(meta):
+                    current = conn.execute(
+                        "SELECT lifecycle FROM memory_items WHERE slug = ? AND deleted_at IS NULL",
+                        (slug,)).fetchone()
+                    if current and current["lifecycle"] == "archived":
+                        S.set_archived(conn, slug, False, by="import")
+                if isinstance(md, dict) and md.get("owner_seal"):
+                    conn.execute(
+                        "UPDATE memory_items SET owner_seal = 1 WHERE slug = ?", (slug,))
+                counters = {k: extras[k] for k in ("access_count", "confirmed_count", "failure_count")
+                            if k in extras}
+                if counters and _is_auto_memory(meta):
+                    # upsert never writes the counters (they are earned, not set);
+                    # a restore of a dump is the one place that puts them back
+                    sets = ", ".join(f"{k} = ?" for k in counters)
+                    conn.execute(f"UPDATE memory_items SET {sets} WHERE slug = ?",
+                                 (*counters.values(), slug))
+                if existed:
+                    report.updated += 1
+                else:
+                    report.inserted += 1
         except Exception as exc:  # noqa: BLE001
             report.failed.append((str(path.relative_to(root)), repr(exc)))

@@ -465,7 +465,10 @@ def build_app(token_store: TokenStore, db_path: Path | None = None) -> FastAPI:
         visible = [r for r in results if _visible_to(r, agent)]
         if req.auto_reinforce:
             for r in visible:
-                bumped = S.reinforce(conn, r["slug"])
+                try:
+                    bumped = S.reinforce(conn, r["slug"])
+                except sqlite3.OperationalError:
+                    bumped = None      # bookkeeping never fails a read
                 if bumped:
                     r["strength"] = bumped["strength"]
                     r["access_count"] = bumped["access_count"]

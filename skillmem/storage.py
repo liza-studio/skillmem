@@ -1222,12 +1222,20 @@ def set_trust(conn: sqlite3.Connection, slug: str, *, trusted: bool,
     """
     with tx(conn):     # one step: read, check the text, write
         row = conn.execute(
-            "SELECT id, content_hash FROM memory_items "
+            "SELECT id, content_hash, lifecycle FROM memory_items "
             "WHERE slug = ? AND deleted_at IS NULL",
             (slug,),
         ).fetchone()
         if not row:
             return None
+        if trusted and row["lifecycle"] == "archived":
+            # the nightly sweep can retire a record between the owner reading it
+            # and approving it; approving something out of every read is not what
+            # they meant, and it would then sit approved and invisible
+            raise MemoryConflict(
+                f"'{slug}' is archived and out of search, recall and the briefing; "
+                f"restore it first (`skillmem skills-archive {slug} --restore`)"
+            )
         if trusted and expect_hash is not None and row["content_hash"] != expect_hash:
             raise MemoryConflict(
                 f"'{slug}' changed since you read it; review it again "
@@ -1612,7 +1620,10 @@ def _upsert_update_tx(
             UPDATE memory_items SET
                 -- the owner writing over a record seals it; nothing clears it
                 owner_seal = CASE WHEN ? THEN 1 ELSE owner_seal END,
-                kind = ?, title = ?, body = ?, body_path = ?, stemmed = ?, project = ?,
+                -- only a kind the caller actually named: the guard exempts an
+                -- omitted one, and writing the dataclass default here relabelled
+                -- the record anyway — the same disappearance by another route
+                kind = CASE WHEN ? THEN ? ELSE kind END, title = ?, body = ?, body_path = ?, stemmed = ?, project = ?,
                 tags = ?, topics = ?, visibility = ?, agent = ?, source_session = ?,
                 attachments = ?, ttl_days = ?, freshness_until = ?, wordcount = ?,
                 content_hash = ?, supersedes_id = ?, confidence = ?,
@@ -1631,7 +1642,8 @@ def _upsert_update_tx(
             """,
             (
                 1 if (_valid_origin(item.origin) == "owner" or item.trusted_at) else 0,
-                item.kind, item.title, item.body, item.body_path, stemmed, item.project,
+                1 if (explicit is None or "kind" in explicit) else 0, item.kind,
+                item.title, item.body, item.body_path, stemmed, item.project,
                 _json_list(item.tags), _json_list(item.topics),
                 item.visibility, item.agent, item.source_session,
                 _json_list(item.attachments),

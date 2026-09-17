@@ -518,6 +518,39 @@ def test_the_briefing_names_the_owner_rules_an_agent_rewrote(mcp):
     assert "gate-rule" in brief["awaiting_reapproval"]
 
 
+def test_an_unnamed_kind_is_not_written(mcp):
+    """The guard exempts a kind the caller never named — so the write must not
+    apply the dataclass default either, or the record is relabelled anyway."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="keep-kind", kind="feedback", title="rule",
+                                body="the owner's rule about the deploy gate",
+                                origin="owner"), owner_call=True)
+    S.set_trust(conn, "keep-kind", trusted=True)
+    # a write that names other fields but not the kind: the item still carries a
+    # default kind, and it must not reach the row
+    S.upsert(conn, S.MemoryItem(slug="keep-kind", kind="note", title="rule",
+                                body="the owner's rule, edited by an agent",
+                                tags=["edited"]),
+             explicit={"tags"}, reason="agent edit")
+    row = conn.execute("SELECT kind FROM memory_items WHERE slug='keep-kind'").fetchone()
+    assert row["kind"] == "feedback"
+
+
+def test_approval_refuses_an_archived_record(mcp):
+    from skillmem import storage as S
+    import pytest
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="arch-rule", kind="feedback", title="rule",
+                                body="a rule retired before approval",
+                                origin="owner"), owner_call=True)
+    S.set_archived(conn, "arch-rule", True, allow_sealed=True, by="owner-cli")
+    with pytest.raises(S.MemoryConflict, match="archived"):
+        S.set_trust(conn, "arch-rule", trusted=True)
+    assert conn.execute("SELECT trusted_at FROM memory_items WHERE slug='arch-rule'"
+                        ).fetchone()["trusted_at"] is None
+
+
 def test_hiding_and_deleting_default_to_refusing(mcp):
     """A caller that says nothing must be refused: every hole in this feature was
     a caller that said nothing."""
