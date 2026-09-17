@@ -424,7 +424,8 @@ def test_agent_cannot_archive_what_the_owner_approved(mcp):
     row = conn.execute("SELECT lifecycle FROM memory_items WHERE slug='rule-gate'").fetchone()
     assert row["lifecycle"] == "active"
     # the owner's own path still works
-    assert S.set_archived(conn, "rule-gate", True, by="owner-cli")["lifecycle"] == "archived"
+    assert S.set_archived(conn, "rule-gate", True, by="owner-cli",
+                          allow_sealed=True)["lifecycle"] == "archived"
 
 
 def test_update_does_not_open_the_way_to_archive_an_owner_record(mcp):
@@ -506,6 +507,49 @@ def test_the_briefing_names_the_owner_rules_an_agent_rewrote(mcp):
     assert not any(e["slug"] == "gate-rule"
                    for sec in brief["sections"] for e in sec["items"])
     assert "gate-rule" in brief["awaiting_reapproval"]
+
+
+def test_hiding_and_deleting_default_to_refusing(mcp):
+    """A caller that says nothing must be refused: every hole in this feature was
+    a caller that said nothing."""
+    from skillmem import storage as S
+    import pytest
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    for slug in ("def-arch", "def-del"):
+        S.upsert(conn, S.MemoryItem(slug=slug, kind="feedback", title="rule",
+                                    body=f"the owner's rule {slug} kept here",
+                                    origin="owner"), owner_call=True)
+    with pytest.raises(S.SealedRecord):
+        S.set_archived(conn, "def-arch", True)          # no allow_sealed
+    with pytest.raises(S.SealedRecord):
+        S.soft_delete(conn, "def-del", "cleanup")       # no allow_sealed
+    rows = conn.execute("SELECT slug, lifecycle, deleted_at FROM memory_items "
+                        "WHERE slug IN ('def-arch','def-del') ORDER BY slug").fetchall()
+    assert [(r["lifecycle"], r["deleted_at"]) for r in rows] == [("active", None)] * 2
+
+
+def test_recall_does_not_fail_or_stall_behind_a_writer(tmp_path):
+    """Recall is a read path the hooks run on every prompt; its recency
+    bookkeeping takes a write lock and must never be the reason it fails."""
+    import sqlite3, time
+    from skillmem import storage as S
+    conn = S.connect(tmp_path / "m.db"); S.init_schema(conn)
+    for i in range(5):
+        S.upsert(conn, S.MemoryItem(slug=f"sk{i}", kind="skill", title=f"skill {i}",
+                                    body=f"how to do the thing number {i} properly"))
+    holder = sqlite3.connect(tmp_path / "m.db", isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("UPDATE memory_items SET title = title WHERE slug = 'sk0'")
+    try:
+        conn.execute("PRAGMA busy_timeout = 300")
+        t0 = time.time()
+        out = S.recall_skills(conn, "the thing", limit=5)
+        waited = time.time() - t0
+        assert len(out) == 5                      # results, not an exception
+        assert waited < 1.0, f"waited {waited:.2f}s: one timeout per row, not per call"
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
 
 
 def test_the_owner_signal_is_the_terminal_not_the_module(mcp, monkeypatch):
@@ -677,8 +721,9 @@ def test_the_seal_is_checked_inside_the_write(mcp):
     import pytest
     with pytest.raises(S.SealedRecord):
         S.set_archived(conn, "race-rule", True, allow_sealed=False)
-    # the owner's own path is unaffected
-    assert S.set_archived(conn, "race-rule", True)["lifecycle"] == "archived"
+    # the owner's own path says so explicitly
+    assert S.set_archived(conn, "race-rule", True,
+                          allow_sealed=True)["lifecycle"] == "archived"
 
 
 def test_update_history_names_the_surface_not_the_client(mcp):

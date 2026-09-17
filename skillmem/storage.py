@@ -1492,7 +1492,7 @@ def upsert(
             conn, item=item, existing=existing, now=now, reason=reason,
             stemmed=stemmed, freshness=freshness, old_body=old_body, links=links,
             strength=item.strength if restore_strength else None,
-            revive=revive, actor=actor,
+            revive=revive, actor=actor, owner_call=owner_call, explicit=explicit,
         )
     except BaseException:
         _discard_body_file(conn, staged)
@@ -1516,7 +1516,8 @@ def _upsert_update_tx(
     conn: sqlite3.Connection, *, item: "MemoryItem", existing: Any, now: int,
     reason: str | None, stemmed: str, freshness: int | None, old_body: str,
     links: list[str] | None, strength: float | None = None, revive: bool = False,
-    actor: str | None = None,
+    actor: str | None = None, owner_call: bool = False,
+    explicit: set[str] | None = None,
 ) -> None:
     with tx(conn):
         # Re-read inside the lock for the history row only: `existing` was
@@ -1524,9 +1525,19 @@ def _upsert_update_tx(
         # the same previous text and the intermediate version vanished from
         # history while the chain still verified.
         fresh = conn.execute(
-            "SELECT title, body, body_path FROM memory_items WHERE id = ?",
+            "SELECT title, body, body_path, kind, owner_seal FROM memory_items "
+            "WHERE id = ?",
             (existing["id"],),
         ).fetchone()
+        if (fresh is not None and not owner_call and fresh["owner_seal"]
+                and _kind_is_a_change(item, fresh, explicit)):
+            # the owner approved (and sealed) the record after the caller's read:
+            # the pre-check outside this lock could not have seen it
+            raise SealedRecord(
+                f"'{item.slug}' is the owner's record; an agent cannot change its "
+                f"kind from {fresh['kind']} to {item.kind} (the session briefing "
+                f"selects by kind). Edit the text instead, or ask the owner."
+            )
         hist_title = fresh["title"] if fresh is not None else existing["title"]
         if fresh is None:
             hist_body = old_body
@@ -1654,7 +1665,8 @@ def reindex_embeddings(
     return {"updated": updated, "total": len(rows)}
 
 
-def soft_delete(conn: sqlite3.Connection, slug: str, reason: str) -> bool:
+def soft_delete(conn: sqlite3.Connection, slug: str, reason: str, *,
+                allow_sealed: bool = False) -> bool:
     row = conn.execute(
         "SELECT * FROM memory_items WHERE slug = ?", (slug,)
     ).fetchone()
@@ -1664,8 +1676,16 @@ def soft_delete(conn: sqlite3.Connection, slug: str, reason: str) -> bool:
     with tx(conn):
         # re-read under the lock: the row may have changed since the SELECT above
         fresh = conn.execute(
-            "SELECT title, body FROM memory_items WHERE id = ?", (row["id"],)
+            "SELECT title, body, owner_seal FROM memory_items WHERE id = ?", (row["id"],)
         ).fetchone() or row
+        if not allow_sealed and fresh["owner_seal"]:
+            # Deleting a record the owner wrote or approved is the owner's call,
+            # exactly as archiving it is — and this is the harder of the two to
+            # notice afterwards.
+            raise SealedRecord(
+                f"'{slug}' is the owner's record (written or approved by them); "
+                f"deleting it is the owner's call: skillmem rm {slug}"
+            )
         prev_hash = _last_chain_hash(conn)
         now = _chain_clock(conn, now)
         payload = {
@@ -2490,8 +2510,10 @@ def _reinforce_row(
         )
     fresh = conn.execute(
         "SELECT strength, access_count, confirmed_count, failure_count "
-        "FROM memory_items WHERE id = ?", (row["id"],),
+        "FROM memory_items WHERE id = ? AND deleted_at IS NULL", (row["id"],),
     ).fetchone()
+    if fresh is None:
+        return None      # deleted between the read and the write: nothing happened
     new_strength, new_count = fresh["strength"], fresh["access_count"]
     confirmed, failures = fresh["confirmed_count"], fresh["failure_count"]
     return {"slug": slug, "strength": round(new_strength, 3),
@@ -2692,7 +2714,7 @@ def _append_lifecycle_history(
 
 def set_archived(
     conn: sqlite3.Connection, slug: str, archived: bool = True, *,
-    by: str | None = None, allow_sealed: bool = True
+    by: str | None = None, allow_sealed: bool = False
 ) -> dict[str, Any] | None:
     """Archive a record (out of search, recall and inject; kept, reversible)
     or bring it back. A pinned record is refused — pin means "never archive".
@@ -2850,6 +2872,7 @@ def recall_skills(
     rows = [fetched[i] for i in ranked_ids if i in fetched]
     now = _now()
     results: list[dict[str, Any]] = []
+    locked_out = False       # a writer holds the lock: stop trying to record recency
     for row in rows:
         d = {
             "slug": row["slug"],
@@ -2877,7 +2900,16 @@ def recall_skills(
             item = MemoryItem.from_row(row)
             d["body"] = load_body(item)
         if auto_reinforce:
-            r = reinforce(conn, row["slug"])
+            # Recall is a read path that happens to record recency, and the hooks
+            # call it on every prompt. Its bookkeeping must never be the reason a
+            # recall fails or waits: reinforce takes a write lock, so a writer
+            # holding one turns this into "database is locked".
+            try:
+                r = reinforce(conn, row["slug"]) if not locked_out else None
+            except sqlite3.OperationalError:
+                # One busy_timeout per recall, not one per row: five rows behind a
+                # writer turned a 5 ms read into seconds of waiting in a hook.
+                r, locked_out = None, True
             if r:
                 d["strength"] = r["strength"]
                 d["access_count"] = r["access_count"]

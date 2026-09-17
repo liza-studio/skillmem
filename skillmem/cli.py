@@ -275,7 +275,7 @@ def write(
 def rm(ctx: click.Context, slug: str, reason: str) -> None:
     """Soft-delete a memory (kept in memory_history)."""
     conn = _conn(ctx.obj["db_path"])
-    if S.soft_delete(conn, slug, reason):
+    if S.soft_delete(conn, slug, reason, allow_sealed=S.owner_present()):
         click.echo(f"deleted: {slug}")
     else:
         click.echo(f"not found: {slug}", err=True)

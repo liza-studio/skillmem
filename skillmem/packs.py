@@ -347,6 +347,8 @@ def _remove_pack_rows(
     ).fetchall()
     removed = []
     for r in rows:
+        # the SELECT above already excludes sealed rows; the default keeps it
+        # true if that filter is ever loosened
         if S.soft_delete(conn, r["slug"], reason):
             removed.append(r["slug"])
     return removed

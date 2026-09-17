@@ -82,7 +82,17 @@
   read, and its `kind = 'skill'` filter was a read-then-write gap of its own.
 - Every write that touches lifecycle, strength, approval or pinning carries
   `deleted_at IS NULL`, so none of them can land on a record deleted since the
-  read. Three rounds running, the hole
+  read.
+- Hiding and deleting a sealed record both default to refusing. `set_archived`
+  and `soft_delete` used to serve a caller that said nothing, which is what every
+  hole in this feature has been; the owner's surfaces now say so explicitly, from
+  the terminal. Deleting one is refused the same way archiving it is.
+- The seal is re-checked inside the update transaction, not only in the same-text
+  branch: an approval landing between a caller's read and its write was ignored.
+- `mem_recall` never fails or stalls on its own bookkeeping. Recording recency
+  takes a write lock, so a writer holding one turned a read the hooks run on
+  every prompt into "database is locked"; the recency write is now best-effort
+  and gives up once per call rather than once per row. Three rounds running, the hole
   was a surface that simply did not pass the old opt-in flag — MCP, then HTTP
   `/update`, then HTTP `/write` and `/learn`.
 - Approval is pinned to the text the owner read. `skillmem trust` passes the hash
