@@ -508,6 +508,25 @@ def test_the_briefing_names_the_owner_rules_an_agent_rewrote(mcp):
     assert "gate-rule" in brief["awaiting_reapproval"]
 
 
+def test_an_owner_write_of_the_same_text_still_seals(mcp):
+    """The seal assignment sat in a branch no real caller reaches: every surface
+    passes an explicit field set, so an owner CLI write left the record unsealed."""
+    from skillmem import storage as S
+    conn = mcp._shared_conn(); S.init_schema(conn)
+    S.upsert(conn, S.MemoryItem(slug="same-rule", kind="feedback", title="rule",
+                                body="the exact text of this rule", origin="agent"))
+    assert conn.execute("SELECT owner_seal FROM memory_items WHERE slug='same-rule'"
+                        ).fetchone()["owner_seal"] == 0
+    # the owner writes the identical text, the way the CLI does
+    S.upsert(conn, S.MemoryItem(slug="same-rule", kind="feedback", title="rule",
+                                body="the exact text of this rule", origin="owner"),
+             explicit={"kind"})
+    assert conn.execute("SELECT owner_seal FROM memory_items WHERE slug='same-rule'"
+                        ).fetchone()["owner_seal"] == 1
+    err = _payload(mcp._tool_archive({"slug": "same-rule"}))
+    assert "cannot archive" in err.get("error", ""), err
+
+
 def test_the_seal_is_checked_inside_the_write(mcp):
     """A gate that reads the seal and then archives loses the race against the
     owner approving the record in between, so storage enforces it."""

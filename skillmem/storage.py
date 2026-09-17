@@ -1327,8 +1327,6 @@ def upsert(
                        if v is not None and v != existing[k]}
             if item.agent is not None and item.agent != existing["agent"]:
                 changed["agent"] = item.agent
-            if _valid_origin(item.origin) == "owner":
-                changed["owner_seal"] = 1
             if restore_strength and item.origin and _valid_origin(item.origin) != existing["origin"]:
                 # only a RESTORE (a skillmem dump) rewrites provenance on same
                 # text; an ordinary library write with the default "unknown",
@@ -1367,6 +1365,12 @@ def upsert(
             changed["strength"] = item.strength   # an explicit restore applies to same text too
         if changed:
             changed["updated_at"] = now
+        # The owner writing the same text is still the owner writing it: the seal
+        # belongs to both branches, and it used to be set only when the caller
+        # passed no explicit field set — which no real caller does.
+        if _valid_origin(item.origin) == "owner" or item.trusted_at:
+            changed["owner_seal"] = 1
+        if changed:
             sets = ", ".join(f"{k} = ?" for k in changed)
             conn.execute(f"UPDATE memory_items SET {sets} WHERE id = ?",
                          (*changed.values(), existing["id"]))
@@ -1434,11 +1438,22 @@ def _upsert_update_tx(
     actor: str | None = None,
 ) -> None:
     with tx(conn):
+        # Re-read inside the lock for the history row only: `existing` was
+        # fetched before the transaction, so two concurrent updates both recorded
+        # the same previous text and the intermediate version vanished from
+        # history while the chain still verified.
+        fresh = conn.execute(
+            "SELECT title, body, body_path FROM memory_items WHERE id = ?",
+            (existing["id"],),
+        ).fetchone()
+        hist_title = fresh["title"] if fresh is not None else existing["title"]
+        hist_body = (fresh["body"] if fresh is not None and not fresh["body_path"]
+                     else old_body)
         prev_hash = _last_chain_hash(conn)
         now = _chain_clock(conn, now)
         history_payload = {
-            "slug": existing["slug"], "old_title": existing["title"],
-            "old_body": old_body, "changed_at": now,
+            "slug": existing["slug"], "old_title": hist_title,
+            "old_body": hist_body, "changed_at": now,
             # the surface stamps itself; item.agent is caller-supplied text
             "changed_by": actor or item.agent, "reason": reason or "force overwrite",
         }
@@ -1451,7 +1466,7 @@ def _upsert_update_tx(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                existing["slug"], existing["title"], old_body,
+                existing["slug"], hist_title, hist_body,
                 now, actor or item.agent, reason or "force overwrite",
                 prev_hash, self_hash,
             ),
@@ -1559,17 +1574,21 @@ def soft_delete(conn: sqlite3.Connection, slug: str, reason: str) -> bool:
         return False
     now = _now()
     with tx(conn):
+        # re-read under the lock: the row may have changed since the SELECT above
+        fresh = conn.execute(
+            "SELECT title, body FROM memory_items WHERE id = ?", (row["id"],)
+        ).fetchone() or row
         prev_hash = _last_chain_hash(conn)
         now = _chain_clock(conn, now)
         payload = {
-            "slug": row["slug"], "old_title": row["title"], "old_body": row["body"],
+            "slug": row["slug"], "old_title": fresh["title"], "old_body": fresh["body"],
             "changed_at": now, "changed_by": None, "reason": f"deleted: {reason}",
         }
         self_hash = _chain_hash(prev_hash, payload)
         conn.execute(
             "INSERT INTO memory_history (slug, old_title, old_body, changed_at, reason,"
             " prev_hash, self_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (row["slug"], row["title"], row["body"], now,
+            (row["slug"], fresh["title"], fresh["body"], now,
              f"deleted: {reason}", prev_hash, self_hash),
         )
         conn.execute(

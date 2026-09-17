@@ -325,6 +325,17 @@ def remove_pack(conn: sqlite3.Connection, pack: str, *, reason: str) -> list[str
     rewrites it), so it is not the key.
     """
     prefix = f"pack-{pack}-"
+    # One transaction over the selection and the deletes: the seal filter picks
+    # candidates, and the owner can approve one of them in another process
+    # between the SELECT and the soft_delete — the record was then tombstoned
+    # with owner_seal = 1 on it.
+    with S.tx(conn):
+        return _remove_pack_rows(conn, pack, prefix, reason)
+
+
+def _remove_pack_rows(
+    conn: sqlite3.Connection, pack: str, prefix: str, reason: str
+) -> list[str]:
     rows = conn.execute(
         "SELECT slug FROM memory_items WHERE project = ? AND slug LIKE ? ESCAPE '\\' "
         # origin <> 'owner' is not enough: an agent may relabel origin to

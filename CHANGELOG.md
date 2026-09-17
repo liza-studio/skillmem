@@ -64,6 +64,11 @@
   restore fires only for a record that is actually archived, not for every
   non-archived dump, which defeated decay on every weekly export/import. The
   importer's own history rows name it ("import") instead of no one.
+- Pack removal and the update path both hold a transaction over the whole step.
+  Between a selection and its write, the owner can approve a record in another
+  process: a pack removal tombstoned a record that had just been approved, and
+  two concurrent updates recorded the same previous text, losing the middle
+  version from history while the chain still verified.
 - Every change that takes a record out of every read writes a row into the
   tamper-evident history, the nightly sweep's own archiving included (the
   active-to-stale step writes none: a stale record still appears in search,
