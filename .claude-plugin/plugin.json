@@ -2,7 +2,7 @@
   "name": "skillmem",
   "displayName": "skillmem",
   "version": "0.11.1",
-  "description": "Self-improving skill memory for Claude Code: learn, recall, reinforce, decay. Wires the skillmem MCP server (10 tools) and memory hooks on five events, with provenance on every memory and trust only you grant. Requires the skillmem Python package on PATH (pip install skillmem).",
+  "description": "Procedural memory for Claude Code: not facts about you, but how a task was solved — trigger, steps, outcome, lessons. Hooks recall it before a task and record it after, so skills compound instead of being retyped. Nine MCP tools, local SQLite with optional on-device embeddings, nothing leaves the machine. Every memory carries its provenance, and what an agent writes stays data until you approve it at a terminal. Requires the skillmem package (pip install skillmem).",
   "author": {
     "name": "Liza Studio",
     "url": "https://github.com/liza-studio"
