@@ -20,5 +20,13 @@ ENV SKILLMEM_HOME=/data
 VOLUME ["/data"]
 
 # stdio transport: an MCP client talks to this process over stdin/stdout.
-ENTRYPOINT ["skillmem"]
-CMD ["mcp"]
+#
+# Through a shim, because a scanner that writes its requests and closes stdin at
+# once races the SDK's own 0.4s import: the reader does not exist yet when EOF
+# lands, and the catalogue then lists zero tools for a server that has nine. The
+# shim drains stdin first and holds the pipe open while the server answers. See
+# docker/mcp-stdio-shim.py for the measurements. Ordinary clients never take
+# this path — they keep the connection open and talk to `skillmem mcp` as before.
+COPY docker/mcp-stdio-shim.py /usr/local/bin/mcp-stdio-shim.py
+ENTRYPOINT ["python", "/usr/local/bin/mcp-stdio-shim.py"]
+CMD []

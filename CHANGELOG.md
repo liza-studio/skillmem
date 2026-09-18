@@ -2,6 +2,14 @@
 
 ## 0.11.1
 
+- The container holds stdin open while the server starts. A scanner that writes
+  its requests and closes stdin at once raced the MCP SDK's own 0.4s import: the
+  reader did not exist yet when EOF landed, only the first request was answered,
+  and a catalogue listing showed zero tools for a server that has nine. Measured
+  in the image, cold start, three runs each: without the shim one run answered
+  and two did not; with it, three out of three. Image only — ordinary clients
+  keep the connection open and never take that path.
+
 - **Windows: the owner signal was fooled by the null device.** `isatty()` is true
   for any character device there, NUL included, so an agent running the CLI with
   `stdin=DEVNULL` looked like a person at a keyboard and reached every owner-only
