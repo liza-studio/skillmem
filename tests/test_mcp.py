@@ -483,7 +483,10 @@ def test_owner_writing_a_record_seals_it(mcp, at_terminal, monkeypatch):
         S.set_archived(conn, "owner-edit", True)
 
 
-def test_agent_cannot_relabel_a_sealed_record_out_of_the_briefing(mcp):
+def test_agent_cannot_relabel_a_sealed_record_out_of_the_briefing(mcp, at_terminal):
+    """`at_terminal` is what seals the owner write here — the migration used to
+    seal any origin='owner' row on the next open, so an owner_seal that only
+    the terminal path can mint is what the tests must supply explicitly."""
     from skillmem import storage as S
     conn = mcp._shared_conn(); S.init_schema(conn)
     S.upsert(conn, S.MemoryItem(slug="rule-kind", kind="feedback", title="rule",
@@ -553,11 +556,19 @@ def test_deleting_twice_reports_the_second_as_nothing(mcp):
 
 
 def test_every_owner_only_command_is_denied_by_init(mcp):
-    """The TTY check is accident protection; the deny rules are the wall."""
+    """The TTY check is accident protection; the deny rules are the wall.
+
+    The four commands are denied both as a direct prefix and anywhere in the
+    command line — the second form catches wrappers that give an agent a
+    pseudo-terminal (`script -qec 'skillmem trust x' /dev/null`, `unbuffer`,
+    `expect`) whose first token is the wrapper, not `skillmem`.
+    """
     from skillmem import cli as C
     assert set(C._OWNER_DENY_RULES) == {
         "Bash(skillmem trust*)", "Bash(skillmem skills-archive*)",
         "Bash(skillmem rm*)", "Bash(skillmem import-vault*)",
+        "Bash(*skillmem trust*)", "Bash(*skillmem skills-archive*)",
+        "Bash(*skillmem rm*)", "Bash(*skillmem import-vault*)",
     }
 
 
@@ -794,9 +805,14 @@ def test_pin_and_reinforce_refuse_a_tombstone(mcp):
     assert (row["pinned"], row["access_count"]) == (0, 0)
 
 
-def test_an_owner_write_of_the_same_text_still_seals(mcp):
+def test_an_owner_write_of_the_same_text_still_seals(mcp, at_terminal):
     """The seal assignment sat in a branch no real caller reaches: every surface
-    passes an explicit field set, so an owner CLI write left the record unsealed."""
+    passes an explicit field set, so an owner CLI write left the record unsealed.
+
+    `at_terminal` because the same-text branch, like the insert branch, mints
+    the seal only when there is a person at the terminal — a file an agent can
+    write reaches this path too.
+    """
     from skillmem import storage as S
     conn = mcp._shared_conn(); S.init_schema(conn)
     S.upsert(conn, S.MemoryItem(slug="same-rule", kind="feedback", title="rule",
@@ -810,8 +826,10 @@ def test_an_owner_write_of_the_same_text_still_seals(mcp):
     assert conn.execute("SELECT owner_seal FROM memory_items WHERE slug='same-rule'"
                         ).fetchone()["owner_seal"] == 1
     import pytest
+    # `allow_sealed=False` is the agent's call — the shape MCP takes when
+    # something reaches set_archived without a terminal signal.
     with pytest.raises(S.SealedRecord):
-        S.set_archived(conn, "same-rule", True)
+        S.set_archived(conn, "same-rule", True, allow_sealed=False)
 
 
 def test_the_seal_is_checked_inside_the_write(mcp, at_terminal):

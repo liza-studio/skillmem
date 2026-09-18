@@ -22,7 +22,13 @@
   delete, and any change of a record's `kind` (the briefing selects by kind).
   `origin` and `trusted_at` both move under an agent's own writes, so neither
   could carry the rule. Existing databases gain the column and its backfill on
-  first open, whatever their schema version.
+  first open, whatever their schema version; the backfill records completion in
+  `meta` and never repeats. Row-level presence used to be the proof, so a row an
+  agent legitimately wrote with `origin='owner'` and `owner_seal=0` (no terminal,
+  so `upsert` did not mint) was retroactively sealed on the next open. The seal
+  is minted in `upsert` alone now, in both branches — insert and same-text — and
+  each asks `owner_present()` for itself: a file an agent can write reaches both
+  paths, so `origin='owner'` alone is not enough to mint.
 - **One owner signal instead of a caller's word for it.** `owner_present()` — a
   TTY — is shared by every surface, because an agent runs `skillmem write`
   through Bash as easily as a person types it. It is accident protection, not a
@@ -61,7 +67,11 @@
   weekly backup. The importer refuses a dump marked that way.
 - `skillmem init --claude-code` denies every owner-only command, not just `trust`:
   `skills-archive`, `rm` and `import-vault` reached the same outcomes, and the TTY
-  check in each is accident protection rather than a wall.
+  check in each is accident protection rather than a wall. The four verbs are
+  denied wherever they land in the command line, not only as a starting prefix — a
+  wrap like `script -qec 'skillmem trust x' /dev/null` reads to Claude Code as
+  `script...`, not `skillmem...`, and any pty-providing helper (script, unbuffer,
+  expect, socat, a python one-liner spawning through pty) reached the same paths.
 - Deleting twice reports the second call as nothing done, instead of appending
   another history row for the same record.
 - `import-vault` restores a dump's archived state only with a person at the

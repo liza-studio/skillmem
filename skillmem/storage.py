@@ -525,18 +525,25 @@ def _migrate_owner_seal(conn: sqlite3.Connection) -> None:
     neither can carry a rule the same agent must not be able to lift. Checked on
     every open, like v10's columns: a database carrying v10 already never runs
     that migration again, and this column has to reach those databases too.
+
+    The backfill is one-shot, recorded in `meta`. Row-level presence used to be
+    the proof, so a row an agent legitimately wrote with origin='owner' and
+    owner_seal=0 (no terminal, so upsert did not mint) was retroactively sealed
+    on the next open — which made the migration itself a way to reach the seal
+    without a terminal. Once the backfill has run, later opens leave every
+    unsealed row alone; upsert is the only place that mints the seal now.
     """
     # Read first, and take no write lock when there is nothing to do: this runs
     # on EVERY open, and a BEGIN IMMEDIATE here made `inject`, `recall` and
     # mem_search fail with "database is locked" behind any writer — init_schema
     # dropped its own write-on-open for exactly that reason.
     have = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)")}
+    done = None
     if "owner_seal" in have:
-        pending = conn.execute(
-            "SELECT 1 FROM memory_items WHERE owner_seal = 0 "
-            "AND (origin = 'owner' OR trusted_at IS NOT NULL) LIMIT 1"
+        done = conn.execute(
+            "SELECT value FROM meta WHERE key = 'owner_seal_backfill_done'"
         ).fetchone()
-        if pending is None:
+        if done is not None:
             return
     try:
         with tx(conn):   # BEGIN IMMEDIATE: two processes may open the same file
@@ -546,13 +553,25 @@ def _migrate_owner_seal(conn: sqlite3.Connection) -> None:
                     "ALTER TABLE memory_items ADD COLUMN owner_seal "
                     "INTEGER NOT NULL DEFAULT 0"
                 )
-            # Run the backfill whether or not the column is new: an interrupted
-            # migration can leave the column present and unsealed, and taking
-            # presence as proof of the backfill would never repair that.
-            conn.execute(
-                "UPDATE memory_items SET owner_seal = 1 "
-                "WHERE owner_seal = 0 AND (origin = 'owner' OR trusted_at IS NOT NULL)"
-            )
+                # An interrupted migration or a rolled-back backup can leave
+                # the marker set but the column absent. The column just came
+                # back empty, so the backfill has to run again — drop the
+                # stale marker rather than trust it.
+                conn.execute(
+                    "DELETE FROM meta WHERE key = 'owner_seal_backfill_done'"
+                )
+            done = conn.execute(
+                "SELECT value FROM meta WHERE key = 'owner_seal_backfill_done'"
+            ).fetchone()
+            if done is None:
+                conn.execute(
+                    "UPDATE memory_items SET owner_seal = 1 "
+                    "WHERE owner_seal = 0 AND (origin = 'owner' OR trusted_at IS NOT NULL)"
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES "
+                    "('owner_seal_backfill_done', '1')"
+                )
     except sqlite3.OperationalError as exc:
         if "duplicate column" not in str(exc).lower():
             raise
@@ -1326,8 +1345,12 @@ def _upsert_same_text(
         changed["updated_at"] = now
     # The owner writing the same text is still the owner writing it: the seal
     # belongs to both branches, and it used to be set only when the caller
-    # passed no explicit field set — which no real caller does.
-    if _valid_origin(item.origin) == "owner" or item.trusted_at:
+    # passed no explicit field set — which no real caller does. The insert
+    # branch asks owner_present() before minting the seal on origin='owner'
+    # (a file an agent can write reaches this path too); this branch must
+    # ask the same question, or a non-TTY vault import can seal a record it
+    # then hides behind archived state.
+    if (_valid_origin(item.origin) == "owner" and owner_present()) or item.trusted_at:
         changed["owner_seal"] = 1
     if changed:
         sets = ", ".join(f"{k} = ?" for k in changed)

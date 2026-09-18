@@ -571,11 +571,21 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 # accident protection — a pseudo-terminal is one pty.openpty() away — so the deny
 # rules are what actually stop an agent. `trust` alone was listed, while
 # `skills-archive`, `rm` and `import-vault` reached the same outcomes.
+#
+# Prefix rules alone are not the wall either: `script -qec 'skillmem trust x'
+# /dev/null` used to slip past because Claude Code sees the command as
+# `script...`, not `skillmem...`. Any pty-providing wrapper (script, unbuffer,
+# expect, socat, a python one-liner spawning through pty) then reached the
+# same commands. Match the sensitive verb wherever it lands in the command line.
 _OWNER_DENY_RULES = (
     "Bash(skillmem trust*)",
     "Bash(skillmem skills-archive*)",
     "Bash(skillmem rm*)",
     "Bash(skillmem import-vault*)",
+    "Bash(*skillmem trust*)",
+    "Bash(*skillmem skills-archive*)",
+    "Bash(*skillmem rm*)",
+    "Bash(*skillmem import-vault*)",
 )
 _TRUST_DENY_RULE = _OWNER_DENY_RULES[0]   # kept: older settings carry this one
 
