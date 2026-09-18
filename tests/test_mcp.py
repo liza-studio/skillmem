@@ -566,7 +566,8 @@ def test_every_owner_only_command_is_denied_by_init(mcp):
     `expect`) whose first token is the wrapper, not `skillmem`. The `.cli`
     form is a separate wall: `python -m skillmem.cli <verb>` shows up as
     `skillmem.cli <verb>` in the command line, not `skillmem <verb>`, so the
-    bare `skillmem` globs missed it.
+    bare `skillmem` globs missed it. The `$`/backtick/`eval` rules catch the
+    round-13 shell-substitution bypass (`V=trust ... skillmem $V ...`).
     """
     from skillmem import cli as C
     assert set(C._OWNER_DENY_RULES) == {
@@ -576,6 +577,9 @@ def test_every_owner_only_command_is_denied_by_init(mcp):
         "Bash(*skillmem rm*)", "Bash(*skillmem import-vault*)",
         "Bash(*skillmem.cli trust*)", "Bash(*skillmem.cli skills-archive*)",
         "Bash(*skillmem.cli rm*)", "Bash(*skillmem.cli import-vault*)",
+        "Bash(*skillmem*$*)", "Bash(*$*skillmem*)",
+        "Bash(*skillmem*`*)", "Bash(*`*skillmem*)",
+        "Bash(*eval*skillmem*)", "Bash(*skillmem*eval*)",
     }
 
 

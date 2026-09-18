@@ -91,6 +91,21 @@
   wrap like `script -qec 'skillmem trust x' /dev/null` reads to Claude Code as
   `script...`, not `skillmem...`, and any pty-providing helper (script, unbuffer,
   expect, socat, a python one-liner spawning through pty) reached the same paths.
+  The same rules also refuse any invocation that hides the verb behind shell
+  substitution: `$V`, `${V}`, `$(…)`, backticks, or `eval` next to `skillmem`.
+  `V=trust script -qec 'skillmem $V foo' /dev/null` ran `skillmem trust foo` after
+  the shell rewrote `$V`, and Claude Code's fnmatch saw no `skillmem trust`
+  substring anywhere.
+- An owner rewriting a record through a terminal keeps the approval the CLI
+  minted. `_upsert_update_tx` used to clear `trusted_at`/`trusted_by`
+  unconditionally on a text change, so the owner's own rule filed itself under
+  `awaiting_reapproval` and dropped out of the session briefing until a separate
+  `skillmem trust` ran. The write through a terminal IS the approval, so the
+  three signals — owner origin, a TTY, and a caller-supplied stamp — carry the
+  approval onto the row. An agent overwrite (any of the three missing) still
+  resets it: approval belongs to the text that was approved. The same-text
+  branch had the mirror hole — the seal was applied but the caller's stamp was
+  silently dropped — and now applies both.
 - Deleting twice reports the second call as nothing done, instead of appending
   another history row for the same record.
 - `import-vault` restores a dump's archived state only with a person at the

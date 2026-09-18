@@ -1352,6 +1352,21 @@ def _upsert_same_text(
     # then hides behind archived state.
     if (_valid_origin(item.origin) == "owner" and owner_present()) or item.trusted_at:
         changed["owner_seal"] = 1
+    # The CLI-supplied `trusted_at`/`trusted_by` was silently dropped here on
+    # same-text writes: an agent-written row rewritten by the owner with
+    # identical words ended up sealed but unapproved. The write from a
+    # terminal is the approval; apply it to the row the way the insert branch
+    # applies it via the INSERT column list. The three-way condition mirrors
+    # `_upsert_update_tx` — origin, TTY, and a caller-supplied stamp all
+    # required, so an agent surface passing origin='owner' by mistake cannot
+    # move approval.
+    if (
+        _valid_origin(item.origin) == "owner"
+        and owner_present()
+        and item.trusted_at is not None
+    ):
+        changed["trusted_at"] = item.trusted_at
+        changed["trusted_by"] = item.trusted_by
     if changed:
         sets = ", ".join(f"{k} = ?" for k in changed)
         conn.execute(f"UPDATE memory_items SET {sets} WHERE id = ?",
@@ -1692,6 +1707,23 @@ def _upsert_update_tx(
                 prev_hash, self_hash,
             ),
         )
+        # Two related-but-distinct owner signals here:
+        #  * `should_seal` mints the seal the way the insert branch does —
+        #    origin=owner + a terminal, OR a caller-supplied trust stamp.
+        #  * `owner_writing` is the stricter three-way signal (origin, terminal,
+        #    AND stamp) that says the write itself carries approval; that's
+        #    the only combination that keeps `trusted_at` on the row instead
+        #    of clearing it, because a text change without an owner stamp
+        #    must fall back to unapproved.
+        should_seal = (
+            (_valid_origin(item.origin) == "owner" and owner_present())
+            or item.trusted_at
+        )
+        owner_writing = (
+            _valid_origin(item.origin) == "owner"
+            and owner_present()
+            and item.trusted_at is not None
+        )
         main_update = conn.execute(
             """
             UPDATE memory_items SET
@@ -1706,10 +1738,14 @@ def _upsert_update_tx(
                 content_hash = ?, supersedes_id = ?, confidence = ?,
                 strength = COALESCE(?, strength),
                 origin = ?,
-                -- We only get here when title/body actually changed (an
-                -- identical write returns early), and approval belongs to the
-                -- text that was approved, not to the slug.
-                trusted_at = NULL, trusted_by = NULL,
+                -- Approval belongs to the text that was approved. An agent
+                -- overwriting the body clears it. The owner writing new text
+                -- through a terminal IS the approval, so the CLI-minted stamp
+                -- rides in on the same UPDATE — otherwise the owner's own rule
+                -- filed itself under `awaiting_reapproval` until a separate
+                -- `skillmem trust` ran, and dropped out of the briefing.
+                trusted_at = CASE WHEN ? THEN ? ELSE NULL END,
+                trusted_by = CASE WHEN ? THEN ? ELSE NULL END,
                 deleted_at = CASE WHEN ? THEN NULL ELSE deleted_at END,
                 updated_at = ?
             -- the row may have been soft-deleted after the caller's read: the
@@ -1718,8 +1754,7 @@ def _upsert_update_tx(
             WHERE id = ? AND (deleted_at IS NULL OR ?)
             """,
             (
-                1 if ((_valid_origin(item.origin) == "owner" and owner_present())
-                      or item.trusted_at) else 0,
+                1 if should_seal else 0,
                 1 if (explicit is None or "kind" in explicit) else 0, item.kind,
                 item.title, item.body, item.body_path, stemmed, item.project,
                 _json_list(item.tags), _json_list(item.topics),
@@ -1727,7 +1762,10 @@ def _upsert_update_tx(
                 _json_list(item.attachments),
                 item.ttl_days, freshness, item.wordcount, item.content_hash,
                 item.supersedes_id, item.confidence, strength,
-                _valid_origin(item.origin), 1 if revive else 0, now,
+                _valid_origin(item.origin),
+                1 if owner_writing else 0, item.trusted_at,
+                1 if owner_writing else 0, item.trusted_by,
+                1 if revive else 0, now,
                 existing["id"], 1 if revive else 0,
             ),
         )

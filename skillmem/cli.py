@@ -605,6 +605,15 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 # verb, so `python -m skillmem.cli trust x` (a supported entry point) slipped
 # past too — the substring is "skillmem.cli trust", not "skillmem trust". The
 # `.cli` rules below catch that path.
+#
+# The verb itself can also be hidden behind shell substitution:
+# `V=trust script -qec 'skillmem $V foo' /dev/null` runs `skillmem trust foo`
+# after the shell rewrites `$V`, but Claude Code's fnmatch sees the literal
+# command line — no `skillmem trust` substring anywhere — and the round-13
+# evidence walked exactly that path. An agent calling skillmem from Bash has
+# no reason to construct the verb through `$`, `${…}`, `$(…)`, or backticks,
+# so any of those next to `skillmem` is denied outright. MCP tools remain the
+# supported surface for reads and writes; those do not go through Bash.
 _OWNER_DENY_RULES = (
     "Bash(skillmem trust*)",
     "Bash(skillmem skills-archive*)",
@@ -618,6 +627,15 @@ _OWNER_DENY_RULES = (
     "Bash(*skillmem.cli skills-archive*)",
     "Bash(*skillmem.cli rm*)",
     "Bash(*skillmem.cli import-vault*)",
+    # Shell substitution before or after `skillmem` — variable expansion
+    # (`$V`, `${V}`), command substitution (`$(…)`, backticks), and `eval`
+    # are the hooks that hide the verb from the literal-substring rules.
+    "Bash(*skillmem*$*)",
+    "Bash(*$*skillmem*)",
+    "Bash(*skillmem*`*)",
+    "Bash(*`*skillmem*)",
+    "Bash(*eval*skillmem*)",
+    "Bash(*skillmem*eval*)",
 )
 _TRUST_DENY_RULE = _OWNER_DENY_RULES[0]   # kept: older settings carry this one
 
