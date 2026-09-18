@@ -740,7 +740,7 @@ def test_every_upsert_caller_is_deliberate_about_the_guard():
     owner_surfaces = {"cli.py", "migrate.py", "vault.py"}     # ask the terminal
     agent_surfaces = {"mcp_server.py", "server.py", "packs.py"}
     for name in owner_surfaces | agent_surfaces:
-        lines = (root / name).read_text().splitlines()
+        lines = (root / name).read_text(encoding="utf-8").splitlines()
         for i, line in enumerate(lines):
             if not line.strip().endswith("upsert(") and "upsert(conn" not in line:
                 continue

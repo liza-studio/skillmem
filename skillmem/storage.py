@@ -955,8 +955,28 @@ def owner_present() -> bool:
     it is checked here so that every surface asks the same question.
     """
     try:
-        return bool(sys.stdin.isatty() or sys.stdout.isatty())
+        if not (sys.stdin.isatty() or sys.stdout.isatty()):
+            return False
     except (ValueError, AttributeError):      # closed or replaced streams
+        return False
+    if sys.platform != "win32":
+        return True
+    # Windows: isatty() is true for any character device, and that includes NUL.
+    # `stdin=DEVNULL` from an agent's subprocess therefore looked like a person
+    # at a keyboard. Ask the console itself instead: GetConsoleMode succeeds on a
+    # real console handle and fails on NUL, a pipe or a file.
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32          # type: ignore[attr-defined]
+        mode = wintypes.DWORD()
+        for std in (-10, -11):                     # STD_INPUT_HANDLE, STD_OUTPUT_HANDLE
+            handle = kernel32.GetStdHandle(std)
+            if handle and handle != -1 and kernel32.GetConsoleMode(
+                    wintypes.HANDLE(handle), ctypes.byref(mode)):
+                return True
+        return False
+    except Exception:       # no ctypes, or an unexpected Windows build
         return False
 
 

@@ -2,6 +2,12 @@
 
 ## 0.11.1
 
+- **Windows: the owner signal was fooled by the null device.** `isatty()` is true
+  for any character device there, NUL included, so an agent running the CLI with
+  `stdin=DEVNULL` looked like a person at a keyboard and reached every owner-only
+  command. The console is now asked directly (`GetConsoleMode`), which fails on
+  NUL, a pipe and a file alike. POSIX behaviour is unchanged.
+
 - Every tool description rewritten to the same shape: what it does, whether it
   writes and what the side effect is, what the parameters mean beyond the
   schema, what it returns, and which sibling tool to use instead and when.

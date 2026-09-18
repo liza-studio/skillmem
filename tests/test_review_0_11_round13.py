@@ -200,3 +200,18 @@ def test_owner_terminal_same_text_write_applies_the_supplied_approval(
     assert row["owner_seal"] == 1
     assert row["trusted_at"] == 1789700000
     assert row["trusted_by"] == "cli-tty"
+
+def test_the_owner_signal_is_not_fooled_by_a_null_device():
+    """On Windows isatty() is true for any character device, NUL included, so
+    `stdin=DEVNULL` from an agent's subprocess looked like a person at a keyboard.
+    The console itself has to be asked."""
+    import subprocess, sys, textwrap
+    probe = textwrap.dedent("""
+        import sys
+        from skillmem import storage as S
+        print("owner" if S.owner_present() else "agent")
+    """)
+    res = subprocess.run([sys.executable, "-c", probe],
+                         stdin=subprocess.DEVNULL, capture_output=True,
+                         text=True, timeout=60)
+    assert res.stdout.strip() == "agent", (res.stdout, res.stderr)
