@@ -369,7 +369,7 @@ def test_learn_same_text_returns_the_existing_skill_and_conflicts_name_notes(mcp
     assert "a-note" in err.get("error", "")          # a plain note is named, as the description says
 
 
-def test_archive_keeps_updated_at_and_restore_survives_the_sweep(mcp):
+def test_archive_keeps_updated_at_and_restore_survives_the_sweep(mcp, at_terminal):
     from skillmem import storage as S
     conn = mcp._shared_conn(); S.init_schema(conn)
     _payload(mcp._tool_learn({"slug": "skill-idle", "title": "idle", "trigger": "rarely used path",
@@ -377,7 +377,7 @@ def test_archive_keeps_updated_at_and_restore_survives_the_sweep(mcp):
     old = S._now() - 100 * 86400
     conn.execute("UPDATE memory_items SET updated_at = ?, last_accessed_at = ?, strength = 0.05 "
                  "WHERE slug = 'skill-idle'", (old, old))
-    S.set_archived(conn, "skill-idle", True, allow_sealed=True, by="owner-cli")
+    S.set_archived(conn, "skill-idle", True, by="owner-cli")
     assert S.get(conn, "skill-idle").updated_at == old      # archiving is not an edit
     S.set_archived(conn, "skill-idle", False, by="owner-cli")
     S.sweep_lifecycle(conn)
@@ -431,9 +431,11 @@ def test_agent_cannot_archive_what_the_owner_approved(mcp, at_terminal, monkeypa
     assert "skills-archive" in str(exc.value)
     row = conn.execute("SELECT lifecycle FROM memory_items WHERE slug='rule-gate'").fetchone()
     assert row["lifecycle"] == "active"
-    # the owner's own path still works
-    assert S.set_archived(conn, "rule-gate", True, by="owner-cli",
-                          allow_sealed=True)["lifecycle"] == "archived"
+    # the owner's own path still works — set_archived asks owner_present() itself,
+    # no caller-supplied override
+    monkeypatch.setattr(S, "owner_present", lambda: True)
+    assert S.set_archived(conn, "rule-gate", True,
+                          by="owner-cli")["lifecycle"] == "archived"
 
 
 def test_update_does_not_open_the_way_to_archive_an_owner_record(mcp):
@@ -561,7 +563,10 @@ def test_every_owner_only_command_is_denied_by_init(mcp):
     The four commands are denied both as a direct prefix and anywhere in the
     command line — the second form catches wrappers that give an agent a
     pseudo-terminal (`script -qec 'skillmem trust x' /dev/null`, `unbuffer`,
-    `expect`) whose first token is the wrapper, not `skillmem`.
+    `expect`) whose first token is the wrapper, not `skillmem`. The `.cli`
+    form is a separate wall: `python -m skillmem.cli <verb>` shows up as
+    `skillmem.cli <verb>` in the command line, not `skillmem <verb>`, so the
+    bare `skillmem` globs missed it.
     """
     from skillmem import cli as C
     assert set(C._OWNER_DENY_RULES) == {
@@ -569,6 +574,8 @@ def test_every_owner_only_command_is_denied_by_init(mcp):
         "Bash(skillmem rm*)", "Bash(skillmem import-vault*)",
         "Bash(*skillmem trust*)", "Bash(*skillmem skills-archive*)",
         "Bash(*skillmem rm*)", "Bash(*skillmem import-vault*)",
+        "Bash(*skillmem.cli trust*)", "Bash(*skillmem.cli skills-archive*)",
+        "Bash(*skillmem.cli rm*)", "Bash(*skillmem.cli import-vault*)",
     }
 
 
@@ -608,14 +615,14 @@ def test_an_unnamed_kind_is_not_written(mcp):
     assert row["kind"] == "feedback"
 
 
-def test_approval_refuses_an_archived_record(mcp):
+def test_approval_refuses_an_archived_record(mcp, at_terminal):
     from skillmem import storage as S
     import pytest
     conn = mcp._shared_conn(); S.init_schema(conn)
     S.upsert(conn, S.MemoryItem(slug="arch-rule", kind="feedback", title="rule",
                                 body="a rule retired before approval",
                                 origin="owner"), owner_call=True)
-    S.set_archived(conn, "arch-rule", True, allow_sealed=True, by="owner-cli")
+    S.set_archived(conn, "arch-rule", True, by="owner-cli")
     with pytest.raises(S.MemoryConflict, match="archived"):
         S.set_trust(conn, "arch-rule", trusted=True)
     assert conn.execute("SELECT trusted_at FROM memory_items WHERE slug='arch-rule'"
@@ -706,14 +713,14 @@ def test_the_guard_fires_when_the_caller_names_no_fields(mcp):
                         ).fetchone()["kind"] == "feedback"
 
 
-def test_reinforce_refuses_an_archived_record(mcp):
+def test_reinforce_refuses_an_archived_record(mcp, at_terminal):
     from skillmem import storage as S
     conn = mcp._shared_conn(); S.init_schema(conn)
     _payload(mcp._tool_learn({"slug": "skill-arch", "title": "arch", "trigger": "a trigger",
                               "steps": "the steps", "outcome": "success", "lessons": None}))
     before = conn.execute("SELECT strength FROM memory_items WHERE slug='skill-arch'"
                           ).fetchone()["strength"]
-    S.set_archived(conn, "skill-arch", True, allow_sealed=True, by="owner-cli")
+    S.set_archived(conn, "skill-arch", True, by="owner-cli")
     assert S.reinforce(conn, "skill-arch", evidence="user_confirmed") is None
     after = conn.execute("SELECT strength, access_count FROM memory_items "
                          "WHERE slug='skill-arch'").fetchone()
@@ -805,7 +812,7 @@ def test_pin_and_reinforce_refuse_a_tombstone(mcp):
     assert (row["pinned"], row["access_count"]) == (0, 0)
 
 
-def test_an_owner_write_of_the_same_text_still_seals(mcp, at_terminal):
+def test_an_owner_write_of_the_same_text_still_seals(mcp, at_terminal, monkeypatch):
     """The seal assignment sat in a branch no real caller reaches: every surface
     passes an explicit field set, so an owner CLI write left the record unsealed.
 
@@ -826,13 +833,14 @@ def test_an_owner_write_of_the_same_text_still_seals(mcp, at_terminal):
     assert conn.execute("SELECT owner_seal FROM memory_items WHERE slug='same-rule'"
                         ).fetchone()["owner_seal"] == 1
     import pytest
-    # `allow_sealed=False` is the agent's call — the shape MCP takes when
-    # something reaches set_archived without a terminal signal.
+    # Agent's side: no terminal, no override. set_archived asks owner_present()
+    # inside its own transaction — the caller cannot vote around it.
+    monkeypatch.setattr(S, "owner_present", lambda: False)
     with pytest.raises(S.SealedRecord):
-        S.set_archived(conn, "same-rule", True, allow_sealed=False)
+        S.set_archived(conn, "same-rule", True)
 
 
-def test_the_seal_is_checked_inside_the_write(mcp, at_terminal):
+def test_the_seal_is_checked_inside_the_write(mcp, at_terminal, monkeypatch):
     """A gate that reads the seal and then archives loses the race against the
     owner approving the record in between, so storage enforces it."""
     from skillmem import storage as S
@@ -841,11 +849,12 @@ def test_the_seal_is_checked_inside_the_write(mcp, at_terminal):
                                 body="a rule approved between check and write",
                                 origin="owner"))
     import pytest
+    monkeypatch.setattr(S, "owner_present", lambda: False)
     with pytest.raises(S.SealedRecord):
-        S.set_archived(conn, "race-rule", True, allow_sealed=False)
-    # the owner's own path says so explicitly
-    assert S.set_archived(conn, "race-rule", True,
-                          allow_sealed=True)["lifecycle"] == "archived"
+        S.set_archived(conn, "race-rule", True)
+    # the owner's own path — set_archived reads owner_present() itself
+    monkeypatch.setattr(S, "owner_present", lambda: True)
+    assert S.set_archived(conn, "race-rule", True)["lifecycle"] == "archived"
 
 
 def test_update_history_names_the_surface_not_the_client(mcp):
@@ -906,7 +915,7 @@ def test_nightly_sweep_never_hides_an_owner_record(mcp, at_terminal):
     assert broken == []
 
 
-def test_history_actor_cannot_be_spoofed_by_the_client(mcp, monkeypatch):
+def test_history_actor_cannot_be_spoofed_by_the_client(mcp, monkeypatch, at_terminal):
     """_agent() falls back to clientInfo.name, which the agent supplies."""
     from skillmem import storage as S
     conn = mcp._shared_conn(); S.init_schema(conn)
@@ -914,7 +923,7 @@ def test_history_actor_cannot_be_spoofed_by_the_client(mcp, monkeypatch):
     monkeypatch.setattr(mcp, "_client_agent", "owner-cli", raising=False)
     _payload(mcp._tool_learn({"slug": "skill-spoof", "title": "spoof", "trigger": "a trigger",
                               "steps": "the steps", "outcome": "success", "lessons": None}))
-    S.set_archived(conn, "skill-spoof", True, allow_sealed=True, by="owner-cli")
+    S.set_archived(conn, "skill-spoof", True, by="owner-cli")
     actor = conn.execute("SELECT changed_by FROM memory_history WHERE slug='skill-spoof' "
                          "ORDER BY id DESC LIMIT 1").fetchone()["changed_by"]
     # an agent write stamps the surface; the archive above is the owner's own path
@@ -935,14 +944,14 @@ def test_restoring_an_active_record_writes_no_history(mcp):
     assert after == before                   # no transition, no row
 
 
-def test_archiving_leaves_a_history_row(mcp):
+def test_archiving_leaves_a_history_row(mcp, at_terminal):
     """The owner's only trace of a record leaving every read."""
     from skillmem import storage as S
     conn = mcp._shared_conn(); S.init_schema(conn)
     _payload(mcp._tool_learn({"slug": "skill-temp", "title": "temp", "trigger": "a trigger here",
                               "steps": "the steps taken", "outcome": "success", "lessons": None}))
     before = conn.execute("SELECT COUNT(*) c FROM memory_history WHERE slug='skill-temp'").fetchone()["c"]
-    S.set_archived(conn, "skill-temp", True, allow_sealed=True, by="owner-cli")
+    S.set_archived(conn, "skill-temp", True, by="owner-cli")
     S.set_archived(conn, "skill-temp", False, by="owner-cli")
     rows = conn.execute("SELECT reason FROM memory_history WHERE slug='skill-temp' "
                         "ORDER BY id").fetchall()
@@ -953,14 +962,14 @@ def test_archiving_leaves_a_history_row(mcp):
     assert broken == []                           # the hash chain still verifies
 
 
-def test_pinning_writes_the_flag_and_nothing_else(mcp):
+def test_pinning_writes_the_flag_and_nothing_else(mcp, at_terminal):
     """mem_pin's description says the flag only; no lifecycle, no free strength."""
     from skillmem import storage as S
     conn = mcp._shared_conn(); S.init_schema(conn)
     _payload(mcp._tool_learn({"slug": "skill-gate", "title": "gate", "trigger": "deploy gate rule",
                               "steps": "always through the gate", "outcome": "success", "lessons": "none"}))
     conn.execute("UPDATE memory_items SET strength = 0.05 WHERE slug = 'skill-gate'")
-    S.set_archived(conn, "skill-gate", True, allow_sealed=True, by="owner-cli")
+    S.set_archived(conn, "skill-gate", True, by="owner-cli")
     before = conn.execute("SELECT lifecycle, strength, last_accessed_at, updated_at "
                           "FROM memory_items WHERE slug='skill-gate'").fetchone()
     _payload(mcp._tool_pin({"slug": "skill-gate"}))

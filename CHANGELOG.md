@@ -55,7 +55,26 @@
   of every read is not what they meant.
 - The owner check lives inside `set_archived` and `soft_delete`, which ask the
   owner signal themselves. Eleven callers had to remember to pass a flag and the
-  eleventh did not, which is why the finding curve went up rather than down.
+  eleventh did not, which is why the finding curve went up rather than down. The
+  `allow_sealed` parameter is gone from both — a caller-supplied "trust me, this
+  is the owner" was one round-12 P1, and the mutation asks `owner_present()`
+  directly now.
+- Reviving a soft-deleted sealed record needs a person at the terminal.
+  `import-vault` used to set `revive=_is_auto_memory(meta)` unconditionally, so a
+  forged `.md` file with `metadata.node_type: memory` matching an owner-deleted
+  slug brought the record back with agent-supplied title and body — the seal
+  survives delete, so the resurrected row read as an owner-approved rule to
+  every caller. The refusal is inside `upsert`, where every revive path passes.
+- `skillmem rm` and `skillmem import-vault` refuse without a terminal at the
+  CLI layer too. Storage refuses a sealed record on its own; the CLI-level gate
+  matches the accident protection `skillmem trust` and `skills-archive` already
+  had, so an agent invoking these verbs through Bash gets the same "no TTY"
+  answer as the other two owner commands.
+- The deny rules `init --claude-code` installs also match `python -m skillmem.cli
+  <verb>` — a supported entry point that shows up as `skillmem.cli <verb>` on the
+  command line, not `skillmem <verb>`, so the bare `*skillmem <verb>*` globs
+  missed it. Four new `*skillmem.cli <verb>*` rules cover the four owner
+  commands.
 - `import-vault` archives nothing without a person at the terminal, and cannot
   mint a seal. Checking the seal was not enough: an import can CREATE the row, so
   a forged `.md` landed a new record already hidden from every read, and a forged

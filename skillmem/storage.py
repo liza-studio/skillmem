@@ -1437,6 +1437,19 @@ def upsert(
             f"(revive) or pick another slug"
         )
 
+    if (existing is not None and existing["deleted_at"] is not None
+            and revive and existing["owner_seal"] and not owner_call):
+        # Reviving a sealed tombstone with agent-supplied title and body was the
+        # import-vault hole from round 12: `_is_auto_memory(meta)` set revive=True
+        # unconditionally, and a forged .md file brought an owner-deleted rule
+        # back with replacement text. The seal survives delete, so the resurrected
+        # row would appear as an owner-approved rule to every reader. Refuse the
+        # revive; the CLI's own terminal gate makes owner_call=True the norm.
+        raise SealedRecord(
+            f"'{item.slug}' is a deleted owner record; reviving it needs a "
+            f"person at a terminal (skillmem import-vault, run it yourself)"
+        )
+
     if existing is None:
         # Conflict check runs BEFORE the transaction so we hold no write lock
         # while we're scanning FTS5 — keeps concurrent searchers responsive.
@@ -1790,8 +1803,10 @@ def reindex_embeddings(
     return {"updated": updated, "total": len(rows)}
 
 
-def soft_delete(conn: sqlite3.Connection, slug: str, reason: str, *,
-                allow_sealed: bool | None = None) -> bool:
+def soft_delete(conn: sqlite3.Connection, slug: str, reason: str) -> bool:
+    # No `allow_sealed` override: a caller that says "trust me, this is the
+    # owner" is exactly the shape that gave round 12 its P1. The mutation asks
+    # `owner_present()` itself; callers cannot vote around it.
     row = conn.execute(
         "SELECT * FROM memory_items WHERE slug = ?", (slug,)
     ).fetchone()
@@ -1808,8 +1823,7 @@ def soft_delete(conn: sqlite3.Connection, slug: str, reason: str, *,
             # already a tombstone: `rm` used to succeed again and again, each time
             # appending another history row for one record
             return False
-        if not (owner_present() if allow_sealed is None else allow_sealed) \
-                and fresh["owner_seal"]:
+        if not owner_present() and fresh["owner_seal"]:
             # Deleting a record the owner wrote or approved is the owner's call,
             # exactly as archiving it is — and this is the harder of the two to
             # notice afterwards.
@@ -2850,16 +2864,15 @@ def _append_lifecycle_history(
 
 def set_archived(
     conn: sqlite3.Connection, slug: str, archived: bool = True, *,
-    by: str | None = None, allow_sealed: bool | None = None
+    by: str | None = None
 ) -> dict[str, Any] | None:
     """Archive a record (out of search, recall and inject; kept, reversible)
     or bring it back. A pinned record is refused — pin means "never archive".
 
     Deletion stays with the owner at the CLI; an agent gets to say "this no
-    longer applies" without erasing anything. `allow_sealed=False` is the agent's
-    call: it refuses a record the owner ever wrote or approved. The check lives
-    here, inside the write transaction, because a caller that reads the seal and
-    then archives can be overtaken by an owner approving the record in between.
+    longer applies" without erasing anything. The seal check lives here, inside
+    the write transaction, and reads `owner_present()` directly: a caller
+    supplying its own "I am the owner" flag was the shape round 12 broke on.
     """
     with tx(conn):    # BEGIN IMMEDIATE: the seal check, the history row and the
         # lifecycle write are one step, and two processes cannot append history
@@ -2871,8 +2884,7 @@ def set_archived(
         ).fetchone()
         if not row:
             return None
-        may_seal = owner_present() if allow_sealed is None else allow_sealed
-        if archived and not may_seal and row["owner_seal"]:
+        if archived and not owner_present() and row["owner_seal"]:
             raise SealedRecord(
                 f"'{slug}' is the owner's record (written or approved by them); "
                 f"an agent cannot archive it. The owner can: skillmem skills-archive {slug}"

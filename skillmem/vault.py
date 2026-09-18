@@ -342,19 +342,11 @@ def _run_import(conn, root, assets_root, kind, project_override,
                     if was_pinned and was_pinned["pinned"]:
                         S.set_pinned(conn, slug, False)
                     # a dump of an archived record restores it archived, or the
-                    # weekly export would quietly un-retire everything
-                    # allow_sealed only with a person at the terminal. Restoring
-                    # the state a dump RECORDS is not an agent hiding a record —
-                    # but an agent can WRITE a .md file with `lifecycle: archived`
-                    # and run the import, which is hiding a record by another
-                    # route. Without a terminal the record stays visible and the
-                    # report says so: visible-but-unretired is the safe failure.
-                    # Only with a person at the terminal, and regardless of the
-                    # seal: checking the seal is not enough here, because an
-                    # import can CREATE the row — a forged .md would otherwise
-                    # land a brand new record already hidden from every read.
-                    # Without a terminal nothing is archived and the report names
-                    # what stayed visible.
+                    # weekly export would quietly un-retire everything.
+                    # Storage's set_archived asks owner_present() itself; the
+                    # CLI's import-vault gate makes it True. This branch is only
+                    # reachable through the CLI, and it still calls the guarded
+                    # mutation — no allow_sealed override to pass through.
                     if S.owner_present():
                         S.set_archived(conn, slug, True, by="import")
                     else:

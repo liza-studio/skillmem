@@ -274,9 +274,20 @@ def write(
 @click.pass_context
 def rm(ctx: click.Context, slug: str, reason: str) -> None:
     """Soft-delete a memory (kept in memory_history)."""
+    if not S.owner_present():
+        # `rm` is one of the four owner-only verbs the deny rules list. Storage
+        # already refuses a sealed record without a terminal, but that leaves
+        # every unsealed row deletable through Bash — an agent's own notes and
+        # skills disappear silently. The wall is `init --claude-code`; this
+        # gate is the same accident-protection `skills-archive` and `trust`
+        # already carry.
+        raise SystemExit(
+            "refusing: `rm` needs a person at a terminal (no TTY). "
+            "Run it yourself, not through an agent."
+        )
     conn = _conn(ctx.obj["db_path"])
     try:
-        deleted = S.soft_delete(conn, slug, reason, allow_sealed=S.owner_present())
+        deleted = S.soft_delete(conn, slug, reason)
     except S.SealedRecord:
         raise click.ClickException(
             f"'{slug}' was written or approved by the owner; deleting it needs a "
@@ -544,6 +555,18 @@ def import_vault_cmd(
     skip_frontmatter_memories: bool,
 ) -> None:
     """Import an Obsidian vault (recursive)."""
+    if not S.owner_present():
+        # `import-vault` is one of the four owner-only verbs. Without a terminal
+        # a forged .md file with `metadata.node_type: memory` can revive an
+        # owner-deleted sealed slug with replacement text — the seal survives,
+        # so search and briefing pick up the agent's version as an approved
+        # rule. `_run_import` calls `upsert(..., revive=True, owner_call=...)`
+        # and the storage guard alone did not cover the tombstoned-then-revived
+        # path. Wall stays `init --claude-code`; this is accident-protection.
+        raise SystemExit(
+            "refusing: `import-vault` needs a person at a terminal (no TTY). "
+            "Run it yourself, not through an agent."
+        )
     conn = _conn(ctx.obj["db_path"])
     report = import_vault(
         conn, path,
@@ -577,6 +600,11 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 # `script...`, not `skillmem...`. Any pty-providing wrapper (script, unbuffer,
 # expect, socat, a python one-liner spawning through pty) then reached the
 # same commands. Match the sensitive verb wherever it lands in the command line.
+#
+# The `*skillmem trust*` glob needs a literal space between "skillmem" and the
+# verb, so `python -m skillmem.cli trust x` (a supported entry point) slipped
+# past too — the substring is "skillmem.cli trust", not "skillmem trust". The
+# `.cli` rules below catch that path.
 _OWNER_DENY_RULES = (
     "Bash(skillmem trust*)",
     "Bash(skillmem skills-archive*)",
@@ -586,6 +614,10 @@ _OWNER_DENY_RULES = (
     "Bash(*skillmem skills-archive*)",
     "Bash(*skillmem rm*)",
     "Bash(*skillmem import-vault*)",
+    "Bash(*skillmem.cli trust*)",
+    "Bash(*skillmem.cli skills-archive*)",
+    "Bash(*skillmem.cli rm*)",
+    "Bash(*skillmem.cli import-vault*)",
 )
 _TRUST_DENY_RULE = _OWNER_DENY_RULES[0]   # kept: older settings carry this one
 
@@ -2280,8 +2312,7 @@ def skills_archive(ctx: click.Context, slug: str, restore: bool) -> None:
     conn = _conn(ctx.obj["db_path"])
     try:
         res = S.set_archived(conn, slug, not restore,
-                             by="owner-cli" if at_terminal else "cli-no-tty",
-                             allow_sealed=at_terminal)
+                             by="owner-cli" if at_terminal else "cli-no-tty")
     except (S.SealedRecord, ValueError) as exc:
         raise SystemExit(str(exc))
     if not res:

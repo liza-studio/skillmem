@@ -361,7 +361,10 @@ def test_the_owners_dump_restores_a_sealed_archived_record(tmp_path, monkeypatch
                                body="a retired rule of the owner's own",
                                origin="owner"), owner_call=True)
     S.set_trust(src, "sealed-arch", trusted=True)
-    S.set_archived(src, "sealed-arch", True, allow_sealed=True, by="owner-cli")
+    # set_archived asks owner_present() itself now, so this branch of the test
+    # (the owner archiving their own record) has to raise the flag first.
+    monkeypatch.setattr(S, "owner_present", lambda: True)
+    S.set_archived(src, "sealed-arch", True, by="owner-cli")
     dump = tmp_path / "dump"
     E.export_all(src, dump)
     dst = S.connect(tmp_path / "dst.db"); S.init_schema(dst)
