@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.11.2
+
+- Recall could hand back the rules and throw away the answer. The hook composer
+  filled its character budget section by section in order: three feedback rows
+  at 400 body chars fill a 1500-char budget, so the skills section no longer fit
+  and was dropped WHOLE — header, rows and all. Measured on a four-month corpus,
+  this was the default, not an edge case: 63% of everything injected over six
+  days was feedback, and skills reached the prompt only when the feedback rows
+  happened to be short. Asked what must be set before running pytest in a second
+  checkout, the hook returned two generic rules and no skill — while `skillmem
+  recall` ranks the skill that answers it first. Retrieval was never the
+  problem; the composer discarded what retrieval found. Each non-empty section
+  now reserves an equal share of the budget before the sections compete for the
+  remainder, so a lone section still gets all of it and neither can starve the
+  other.
+
 ## 0.11.1
 
 - The container holds stdin open while the server starts. A scanner that writes
