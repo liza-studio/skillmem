@@ -342,9 +342,28 @@ def _recall_sections(
         used += len(text) + 2
         return True
 
-    # sections in priority order; a section that does not fit is dropped
-    # whole, and a row inside it is dropped whole — never cut mid-line
-    for header, rows in ((fb_header, trusted_fb), (skills_header, trusted_skills)):
+    # Each section gets a reserved share first, and only then competes for what
+    # is left. Handing the budget out in order let feedback take all of it:
+    # three rules at 400 body chars fill 1500, the skills section no longer
+    # fits and is dropped WHOLE. Measured on the owner's corpus, that is not an
+    # edge case — it is the default. 63% of everything injected was feedback,
+    # and a question whose answer was the top-ranked skill came back as generic
+    # rules with the skill absent.
+    sections = [(fb_header, trusted_fb), (skills_header, trusted_skills)]
+    live = [s for s in sections if s[1]]
+    share = limit // len(live) if live else limit
+    spare: list[tuple[str, list[dict[str, Any]]]] = []
+    for header, rows in live:
+        kept = list(rows)
+        while kept and len(header) + len(_lines(kept)) + 2 > share:
+            kept = kept[:-1]
+        if kept:
+            _take(header + "\n" + _lines(kept))
+        if len(kept) < len(rows):
+            spare.append((header, rows))
+    # Second pass: whatever share the other section did not use is offered back,
+    # so a lone section still gets the whole budget when the other is empty.
+    for header, rows in spare:
         while rows and not _take(header + "\n" + _lines(rows)):
             rows = rows[:-1]
     # Truncate first, frame second — a frame added before truncation gets its
