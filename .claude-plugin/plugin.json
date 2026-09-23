@@ -1,7 +1,7 @@
 {
   "name": "skillmem",
   "displayName": "skillmem",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "description": "Procedural memory for Claude Code: not facts about you, but how a task was solved — trigger, steps, outcome, lessons. Hooks recall it before a task and record it after, so skills compound instead of being retyped. Nine MCP tools, local SQLite with optional on-device embeddings, nothing leaves the machine. Every memory carries its provenance, and what an agent writes stays data until you approve it at a terminal. Requires the skillmem package (pip install skillmem).",
   "author": {
     "name": "Liza Studio",

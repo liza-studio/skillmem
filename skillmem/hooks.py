@@ -28,7 +28,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import click
 
@@ -284,6 +284,63 @@ def _connect(ctx: click.Context):
     return conn
 
 
+def plan_budget(
+    sections: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    limit: int,
+    render: Callable[[str, list[dict[str, Any]]], str],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Choose what each section carries, within ``limit`` characters.
+
+    Two candidate plans are built and the one carrying more records wins:
+
+      A — every section reserves an equal share first, so one bulky section
+          cannot starve another, then the unspent remainder is handed back.
+      B — the plain in-order fill this split replaced.
+
+    Reserving an equal share of CHARACTERS silently trades several short
+    records for one long one, and when a section's first row costs more than
+    its share that section keeps nothing at all — 8% of recalls at the
+    production parameters. Picking the better of the two plans makes "never
+    fewer records than the old algorithm" true by construction rather than by
+    assertion. Ties go to A: a balanced mix is the point of splitting at all.
+    """
+    live = [(h, list(r)) for h, r in sections if r]
+    if not live:
+        return []
+
+    def cost(header: str, rows: list[dict[str, Any]]) -> int:
+        return len(render(header, rows)) + 2   # must match _take's arithmetic
+
+    def grow(plan: list[list[Any]], spent: int) -> list[list[Any]]:
+        for entry in plan:
+            header, kept, rows = entry
+            while len(kept) < len(rows):
+                wider = rows[:len(kept) + 1]
+                delta = cost(header, wider) - (cost(header, kept) if kept else 0)
+                if spent + delta > limit:
+                    break
+                kept, spent = wider, spent + delta
+            entry[1] = kept
+        return plan
+
+    share = limit // len(live)
+    plan_a: list[list[Any]] = []
+    for header, rows in live:
+        kept = list(rows)
+        while kept and cost(header, kept) > share:
+            kept = kept[:-1]
+        plan_a.append([header, kept, rows])
+    plan_a = grow(plan_a, sum(cost(h, k) for h, k, _ in plan_a if k))
+    plan_b = grow([[h, [], list(r)] for h, r in live], 0)
+
+    def count(plan: list[list[Any]]) -> int:
+        return sum(len(k) for _h, k, _r in plan)
+
+    best = plan_a if count(plan_a) >= count(plan_b) else plan_b
+    return [(h, k) for h, k, _r in best if k]
+
+
 def _recall_sections(
     conn,
     query: str,
@@ -342,30 +399,15 @@ def _recall_sections(
         used += len(text) + 2
         return True
 
-    # Each section gets a reserved share first, and only then competes for what
-    # is left. Handing the budget out in order let feedback take all of it:
-    # three rules at 400 body chars fill 1500, the skills section no longer
-    # fits and is dropped WHOLE. Measured on the owner's corpus, that is not an
-    # edge case — it is the default. 63% of everything injected was feedback,
-    # and a question whose answer was the top-ranked skill came back as generic
-    # rules with the skill absent.
-    sections = [(fb_header, trusted_fb), (skills_header, trusted_skills)]
-    live = [s for s in sections if s[1]]
-    share = limit // len(live) if live else limit
-    spare: list[tuple[str, list[dict[str, Any]]]] = []
-    for header, rows in live:
-        kept = list(rows)
-        while kept and len(header) + len(_lines(kept)) + 2 > share:
-            kept = kept[:-1]
-        if kept:
-            _take(header + "\n" + _lines(kept))
-        if len(kept) < len(rows):
-            spare.append((header, rows))
-    # Second pass: whatever share the other section did not use is offered back,
-    # so a lone section still gets the whole budget when the other is empty.
-    for header, rows in spare:
-        while rows and not _take(header + "\n" + _lines(rows)):
-            rows = rows[:-1]
+    # Plan each section in full before emitting it once. Re-emitting a whole
+    # section to spend its leftover share duplicated rows in 0.11.2.
+    def _block(header: str, rows: list[dict[str, Any]]) -> str:
+        return header + "\n" + _lines(rows)
+
+    for header, kept in plan_budget(
+            [(fb_header, trusted_fb), (skills_header, trusted_skills)],
+            limit=limit, render=_block):
+        _take(_block(header, kept))
     # Truncate first, frame second — a frame added before truncation gets its
     # closing marker cut off. The title goes inside the frame too: it is text
     # from the same untrusted source.

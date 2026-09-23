@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.3
+
+- Fix recall budget composition emitting the same record twice and dropping
+  another. Plan sections before emitting them, account for separators, and keep
+  the plan with at least as many records as a plain in-order fill.
+- Remove the Docker stdin shim: it waited for EOF before starting the MCP server,
+  so clients keeping stdin open never received an initialization response.
+
 ## 0.11.2
 
 - Recall could hand back the rules and throw away the answer. The hook composer
