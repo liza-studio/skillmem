@@ -60,6 +60,15 @@ _SECRET_ASSIGN = _re.compile(
     r"""(\s*[:=]\s*)(["']?)(?!\[[a-z\-]+ redacted\])([^\s"',;]{6,})(["']?)""",
 )
 _WIKILINK = _re.compile(r"\[\[([^\]\n]+?)\]\]")
+_TEMPORAL_EARLIEST_RE = _re.compile(
+    r"\b(?:first|earliest|initially|initial|originally|перв\w+|раньш\w+|сначал\w+)\b",
+    _re.IGNORECASE,
+)
+_TEMPORAL_LATEST_RE = _re.compile(
+    r"\b(?:last|latest|recently|recent|most\s+recent|newest|yesterday|последн\w+|недавн\w+|свеж\w+)\b",
+    _re.IGNORECASE,
+)
+
 
 
 def _absolute(path: str) -> Path:
@@ -2167,6 +2176,41 @@ def _rrf_scores(*ranked_lists: list[int]) -> dict[int, float]:
     return scores
 
 
+def _temporal_rank_ids(
+    conn: sqlite3.Connection,
+    candidate_ids: list[int],
+    direction: str,
+) -> list[int]:
+    """Rank candidate ids by timestamp (created_at / updated_at)."""
+    if not candidate_ids:
+        return []
+
+    time_map: dict[int, tuple[int, int]] = {}
+    for start in range(0, len(candidate_ids), 500):
+        chunk = candidate_ids[start:start + 500]
+        rows = conn.execute(
+            f"SELECT id, created_at, updated_at FROM memory_items "
+            f"WHERE id IN ({','.join('?' * len(chunk))})",
+            chunk,
+        ).fetchall()
+        for r in rows:
+            time_map[r["id"]] = (r["created_at"], r["updated_at"])
+
+    valid = [cid for cid in candidate_ids if cid in time_map]
+
+    if direction == "earliest":
+        def sort_key(cid: int) -> int:
+            created, updated = time_map[cid]
+            return created if created != 0 else updated
+        return sorted(valid, key=sort_key)
+    elif direction == "latest":
+        def sort_key(cid: int) -> int:
+            created, updated = time_map[cid]
+            return updated if updated != 0 else created
+        return sorted(valid, key=sort_key, reverse=True)
+    return valid
+
+
 def hybrid_rank_ids(
     conn: sqlite3.Connection,
     query: str,
@@ -2190,6 +2234,22 @@ def hybrid_rank_ids(
                    exclude_kinds=exclude_kinds, pool=pool)
     vec = _vector_ids(conn, query, kind=kind, project=project,
                       exclude_kinds=exclude_kinds, pool=pool)
+
+    direction: str | None = None
+    if _TEMPORAL_EARLIEST_RE.search(query):
+        direction = "earliest"
+    elif _TEMPORAL_LATEST_RE.search(query):
+        direction = "latest"
+
+    if direction is not None:
+        candidates = list(dict.fromkeys(bm + vec))
+        temporal_ids = _temporal_rank_ids(conn, candidates, direction)
+        active = [bm, vec, temporal_ids] if vec else [bm, temporal_ids]
+        scores = _rrf_scores(*active)
+        temporal_pos = {id_: idx for idx, id_ in enumerate(temporal_ids)}
+        ordered = sorted(scores, key=lambda i: (-scores[i], temporal_pos.get(i, 0)))
+        return _keep_visible(conn, ordered, visible, limit)
+
     if not vec:
         return _keep_visible(conn, bm, visible, limit)
     scores = _rrf_scores(bm, vec)
