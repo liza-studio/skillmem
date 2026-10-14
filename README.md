@@ -2,7 +2,7 @@
 
 <!-- mcp-name: io.github.liza-studio/skillmem -->
 
-[![CI](https://github.com/liza-studio/skillmem/actions/workflows/ci.yml/badge.svg)](https://github.com/liza-studio/skillmem/actions/workflows/ci.yml)
+[![CI](https://github.com/liza-studio/skillmem/actions/workflows/ci.yml/badge.svg)](https://github.com/liza-studio/skillmem/actions/workflows/ci.yml) [![Glama score](https://glama.ai/mcp/servers/liza-studio/skillmem/badge)](https://glama.ai/mcp/servers/liza-studio/skillmem)
 
 **Self-improving skills for Claude Code and Codex — your agents learn, recall, reinforce, and forget.**
 
