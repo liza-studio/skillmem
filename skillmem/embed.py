@@ -1,6 +1,6 @@
 """Local sentence-embedding layer for semantic recall.
 
-Sovereign by design: runs a small multilingual ONNX model on CPU via
+Sovereign by design: runs a multilingual ONNX model on CPU via
 ``fastembed`` — no external API, no key, $0. Used to add a vector-similarity
 signal alongside the existing BM25/FTS5 lexical search (fused via RRF in
 storage.search_hybrid). Cross-lingual: a Russian query matches an English
@@ -19,15 +19,10 @@ from functools import lru_cache
 
 log = logging.getLogger("skillmem.embed")
 
-# 384-dim multilingual model, ~220 MB, mean-pooled. Chosen over e5-large
-# (1024-dim/2.24 GB) for footprint; validated on an internal cross-lingual
-# retrieval bench (RU query -> EN doc) before adoption.
-MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# Multilingual Granite, CLS-pooled, official IBM INT8 ONNX weights.
+MODEL_NAME = "ibm-granite/granite-embedding-97m-multilingual-r2"
+EMBED_CONTEXT = 512  # Including special tokens.
 DIM = 384
-
-# Cap embedded text — these models truncate ~512 tokens anyway, and our bodies
-# can be multi-KB. Title+lead carries the semantic signal.
-_MAX_CHARS = 1600
 
 
 def semantic_enabled() -> bool:
@@ -54,7 +49,7 @@ def model_cache_dir() -> str:
     fastembed defaults to ``tempfile.gettempdir()`` — on macOS that is a
     per-boot ``/var/folders/...`` path the OS purges, which silently drops
     recall back to BM25 once the weights disappear. Pin it to the user cache
-    dir instead so the ~220 MB download survives reboots.
+    dir instead so the model download survives reboots.
     """
     override = os.environ.get("SKILLMEM_MODEL_CACHE")
     if override:
@@ -65,7 +60,7 @@ def model_cache_dir() -> str:
 
 
 # Hooks and the MCP server load the model from the cache only. A cold cache
-# used to download ~220 MB inside a 10 s hook: every prompt hung for the full
+# used to download weights inside a 10 s hook: every prompt hung for the full
 # timeout and recalled nothing, and each kill left a partial blob behind.
 # `skillmem doctor`, `reindex-embeddings` and the installer fetch it.
 _DOWNLOAD = False
@@ -91,12 +86,20 @@ def _model():
         log.info("fastembed unavailable, semantic recall off: %s", exc)
         return None
     try:
-        # The mean-pooling notice for this model is expected (it's the correct
-        # pooling) — silence it so it doesn't spam the MCP/CLI on every load.
+        from fastembed.common.model_description import ModelSource, PoolingType
+
+        if not any(m["model"] == MODEL_NAME for m in TextEmbedding.list_supported_models()):
+            TextEmbedding.add_custom_model(
+                model=MODEL_NAME, pooling=PoolingType.CLS, normalization=True,
+                sources=ModelSource(hf=MODEL_NAME), dim=DIM,
+                model_file="onnx/model_quint8_avx2.onnx",
+            )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            return TextEmbedding(MODEL_NAME, cache_dir=model_cache_dir(),
-                                 local_files_only=not _DOWNLOAD)
+            model = TextEmbedding(MODEL_NAME, cache_dir=model_cache_dir(),
+                                  local_files_only=not _DOWNLOAD)
+            model.model.tokenizer.enable_truncation(max_length=EMBED_CONTEXT)
+            return model
     except Exception as exc:  # model download/load failure
         log.warning("could not load embedding model %s: %s%s", MODEL_NAME, exc,
                     "" if _DOWNLOAD else " — `skillmem doctor` downloads it")
@@ -120,7 +123,7 @@ def embed_text(text: str) -> bytes | None:
     try:
         import numpy as np
 
-        vec = np.asarray(next(iter(model.embed([text[:_MAX_CHARS]]))), dtype="float32")
+        vec = np.asarray(next(iter(model.embed([text]))), dtype="float32")
         norm = float(np.linalg.norm(vec))
         if norm > 0:
             vec = vec / norm
