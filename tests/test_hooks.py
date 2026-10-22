@@ -82,6 +82,20 @@ def test_tool_recall_dedups_against_auto_recall(db: Path):
     assert "feedback-deploy-rules" not in out
 
 
+def test_tool_recall_skips_the_embedding_model(db: Path, monkeypatch: pytest.MonkeyPatch):
+    import skillmem.embed as E
+    monkeypatch.delenv("MEM_SEMANTIC", raising=False)
+    loaded = []
+    monkeypatch.setattr(E, "_model", lambda: loaded.append(1) if E.semantic_enabled() else None)
+    _hook(db, "tool-recall", {
+        "tool_name": "Bash", "session_id": "sess-lexical",
+        "tool_input": {"command": "bash scripts/restart_bot.sh деплой прод"},
+    })
+    assert not loaded
+    import os
+    assert "MEM_SEMANTIC" not in os.environ  # the switch must not leak out of the hook
+
+
 def test_tool_recall_ignores_unknown_tools(db: Path):
     out = _hook(db, "tool-recall", {
         "tool_name": "WebSearch", "session_id": "s3",

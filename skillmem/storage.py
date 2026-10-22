@@ -2167,6 +2167,26 @@ def _rrf_scores(*ranked_lists: list[int]) -> dict[int, float]:
     return scores
 
 
+# Session recaps are ~90% of a long-lived database and retell every topic, so
+# on raw RRF they filled the page and the one curated note that answered sat at
+# #28. Halving their score (own 30-question set, 2026-10-21): hit@3 18 → 26/30;
+# 0.3 scored the same. Only matters when recaps and curated notes compete.
+RECAP_WEIGHT = 0.5
+_RECAP_KINDS = ("note", "session")
+
+
+def _demote_recaps(conn: sqlite3.Connection, scores: dict[int, float]) -> None:
+    ids = list(scores)
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        for (id_,) in conn.execute(
+            f"SELECT id FROM memory_items WHERE id IN ({','.join('?' * len(chunk))}) "
+            f"AND kind IN ({','.join('?' * len(_RECAP_KINDS))})",
+            [*chunk, *_RECAP_KINDS],
+        ):
+            scores[id_] *= RECAP_WEIGHT
+
+
 def hybrid_rank_ids(
     conn: sqlite3.Connection,
     query: str,
@@ -2191,8 +2211,12 @@ def hybrid_rank_ids(
     vec = _vector_ids(conn, query, kind=kind, project=project,
                       exclude_kinds=exclude_kinds, pool=pool)
     if not vec:
-        return _keep_visible(conn, bm, visible, limit)
+        scores = _rrf_scores(bm)
+        _demote_recaps(conn, scores)
+        return _keep_visible(conn, sorted(scores, key=lambda i: -scores[i]),
+                             visible, limit)
     scores = _rrf_scores(bm, vec)
+    _demote_recaps(conn, scores)
     ordered = sorted(scores, key=lambda i: -scores[i])
     return _keep_visible(conn, ordered, visible, limit)
 
