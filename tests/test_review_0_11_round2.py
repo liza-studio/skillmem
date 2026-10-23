@@ -451,9 +451,9 @@ def test_export_preserves_unproved_pre_release_manifest(home):
     assert (dest / "note" / "a.md").exists()
 
 
-def test_version_is_0_12():
+def test_version_is_0_13():
     from skillmem import __version__
-    assert __version__.startswith("0.12.")
+    assert __version__.startswith("0.13.")
 
 
 # --- round 5: hash width, merged index, restore, tx, namespaces, init env -----

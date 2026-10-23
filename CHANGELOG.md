@@ -1,19 +1,31 @@
 # Changelog
 
-## Unreleased
+## 0.13.0
 
-- **Approve in chat.** A new Stop hook, `pending-rules`, shows the person (as a
-  `systemMessage`) every `user`/`feedback` rule the session saved unapproved,
-  in full, read from the database. If their very next message is just
-  `одобряю` / `approve`, the UserPromptSubmit hook approves exactly that text
-  (`trusted_by='owner-prompt'`) and keeps the word from the agent. Any other
-  reply withdraws the offer. Rules over 1500 characters are left for
-  `skillmem trust`. Second owner signal, documented in INVARIANTS §0.
-- `pending-rules` also imports the session's auto-memory `.md` files changed
-  since it started, so a rule written in the session reaches the database (and
-  recall) before the session ends instead of on a manual `skillmem migrate`.
-- `init --claude-code` adds the Stop hook and deny rules for
-  `skillmem hook …` and `owner_prompt`.
+Rules an agent saves for you now get approved, instead of sitting unapproved
+for weeks — and recall finds your curated notes under a pile of session recaps.
+
+- **Approve in chat.** A new Stop hook, `pending-rules`, asks the person (as a
+  `systemMessage`, in Russian and English) about every `user`/`feedback` rule
+  the last turn saved, at most three, in full, read from the database. If their
+  very next message is just `одобряю` / `approve`, the UserPromptSubmit hook
+  approves exactly that text (`trusted_by='owner-prompt'`) and keeps the word
+  from the agent. Any other reply withdraws the offer. Longer rules are left for
+  `review`. A second owner signal, documented with its limits in INVARIANTS §0.
+- `pending-rules` imports the auto-memory `.md` files the turn changed, so a
+  rule reaches the database (and recall) before the session ends instead of on
+  a manual `skillmem migrate`.
+- **`skillmem review`** walks every unapproved `user`/`feedback` memory
+  (`--types` for more), shows it in full like `trust`, and asks y / n / q.
+  Owner-only. The session briefing now asks the agent to tell the user about it.
+- **Recall ranking.** Session recaps (`note`/`session`, ~90% of a long-lived
+  database) get half their RRF score: they retell every topic and pushed the one
+  curated note that answered to #28. Own 30-question set hit@3 18 → 26/30;
+  LongMemEval hit@5 unchanged (0.889).
+- **tool-recall** runs lexical-only: loading the embedder cost ~1.2 s on every
+  Bash/Edit/Write call (1.45 s → 0.2 s).
+- `init --claude-code` adds the Stop hook and deny rules for `review`, running
+  hooks from Bash, and `owner_prompt`.
 
 ## 0.12.1
 
