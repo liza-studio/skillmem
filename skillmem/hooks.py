@@ -695,7 +695,10 @@ def pending_rules(ctx: click.Context) -> None:
         from .migrate import import_file
         for path in memdir.glob("*.md"):
             try:
-                if path.name.upper() != "MEMORY.MD" and path.stat().st_mtime >= since:
+                # 2 s slack: Windows stamps files from a coarse clock, so a file
+                # written right after `since` can read as older. Re-importing an
+                # unchanged file is a no-op, and what is offered goes by updated_at.
+                if path.name.upper() != "MEMORY.MD" and path.stat().st_mtime >= since - 2:
                     import_file(conn, path)
             except Exception:
                 pass
