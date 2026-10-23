@@ -721,14 +721,24 @@ def pending_rules(ctx: click.Context) -> None:
     _write_pending(session_id, {"offered": sorted(offered), "pending": pending})
     if not blocks and not too_long:
         return
+    # A question, in both languages, with the answer spelled out: a person who
+    # never read the docs must know what to type. Not "yes"/"да": people say
+    # that to the agent's own questions, and the hook would swallow the reply.
     lines = []
     if blocks:
-        lines.append(f"🧠 skillmem: {len(blocks)} new rule(s) saved, not approved yet:\n")
+        lines.append(f"🧠 skillmem — агент запомнил {len(blocks)} правил(о). "
+                     f"Сделать вашим правилом? / The agent saved {len(blocks)} "
+                     f"rule(s). Make it your rule?\n")
         lines += [b + "\n" for b in blocks]
-        lines.append('Reply with just "одобряю" (or "approve") to make them your rules.')
+        lines.append("👉 Да — ответьте одним словом: одобряю  "
+                     "(Yes — reply with one word: approve)")
+        lines.append("Любой другой ответ — оставить как справку, агент не будет "
+                     "считать это правилом. / Any other reply keeps it as a note "
+                     "the agent will not treat as a rule.")
     if too_long:
-        lines.append(f"Too long to show here, approve with `skillmem review`: "
-                     f"{', '.join(too_long)}")
+        lines.append(f"Слишком длинное, чтобы показать здесь — одобрить в терминале "
+                     f"`skillmem review` / Too long to show here, approve with "
+                     f"`skillmem review`: {', '.join(too_long)}")
     print(json.dumps({"systemMessage": "\n".join(lines)}, ensure_ascii=False))
 
 
