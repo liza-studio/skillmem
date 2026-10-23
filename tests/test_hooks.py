@@ -68,6 +68,12 @@ def test_rule_saved_in_session_is_shown_to_owner_and_approved_by_reply(db: Path,
     assert "Проверять Booking на даты Сергея." in shown       # the full text, from the db
     assert "feedback-deploy-rules" not in shown and "Никаких" not in shown  # older rows stay out
 
+    # a rule saved in an earlier turn is not offered again in a later one
+    conn = S.connect(db)
+    S.upsert(conn, S.MemoryItem(slug="feedback-earlier-turn", kind="feedback",
+                                title="earlier", body="from an earlier turn"))
+    conn.commit()
+    time.sleep(1.1)     # updated_at has one-second resolution
     # anything else first withdraws the offer
     _hook(db, "auto-recall", {"session_id": "s-approve", "prompt": "ок, а что дальше?"})
     assert _hook(db, "auto-recall", {"session_id": "s-approve", "prompt": "одобряю"}) == ""
@@ -77,7 +83,8 @@ def test_rule_saved_in_session_is_shown_to_owner_and_approved_by_reply(db: Path,
     (project / "memory" / "feedback_widths.md").write_text(
         "---\nname: feedback-widths\ndescription: Ширина Мака\nmetadata:\n  type: feedback\n"
         "---\n\nПроверять на 1440.\n", encoding="utf-8")
-    assert "Проверять на 1440." in json.loads(_hook(db, "pending-rules", stop))["systemMessage"]
+    offer = json.loads(_hook(db, "pending-rules", stop))["systemMessage"]
+    assert "Проверять на 1440." in offer and "from an earlier turn" not in offer
     out = json.loads(_hook(db, "auto-recall", {"session_id": "s-approve", "prompt": " Одобряю! "}))
     assert out["decision"] == "block" and "feedback-widths" in out["reason"]
     assert S.get(S.connect(db), "feedback-widths").trusted_by == "owner-prompt"

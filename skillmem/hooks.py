@@ -618,6 +618,7 @@ _PENDING_KINDS = ("user", "feedback")
 # A rule longer than this is not shown whole in a status line, and approving
 # text the owner did not see is what INV-01 forbids: those go to `skillmem review`.
 _PENDING_MAX_CHARS = 1500
+_PENDING_MAX_RULES = 3       # more than this in one reply is a wall; the rest → review
 
 
 def _pending_file(session_id: str) -> Path:
@@ -677,8 +678,11 @@ def pending_rules(ctx: click.Context) -> None:
     data = _read_input()
     session_id = str(data.get("session_id") or "unknown")
     transcript = Path(str(data.get("transcript_path") or ""))
-    since = _session_started(transcript)
-    if since is None:
+    ledger = _read_pending(session_id)
+    # This turn only. From the session start, a session left open for days
+    # offered every rule any session had touched since — a wall of old text.
+    since = ledger.get("turn_at") or _session_started(transcript)
+    if not isinstance(since, (int, float)):
         return
     try:
         conn = _connect(ctx)
@@ -697,7 +701,6 @@ def pending_rules(ctx: click.Context) -> None:
                 pass
         conn.commit()
 
-    ledger = _read_pending(session_id)
     offered = {tuple(x) for x in ledger.get("offered", [])}
     rows = conn.execute(
         "SELECT slug, content_hash FROM memory_items WHERE trusted_at IS NULL "
@@ -713,12 +716,15 @@ def pending_rules(ctx: click.Context) -> None:
         offered.add((slug, content_hash))
         item = S.get(conn, slug)
         body = S.load_body(item) if item else ""
-        if item is None or S.is_excerpt(item, body) or len(body) > _PENDING_MAX_CHARS:
+        if (item is None or S.is_excerpt(item, body) or len(body) > _PENDING_MAX_CHARS
+                or len(pending) >= _PENDING_MAX_RULES):
             too_long.append(slug)
             continue
         pending.append([slug, content_hash])
-        blocks.append(f"[{len(pending)}] {_shown(item.title)}\n{_shown(body)}")
-    _write_pending(session_id, {"offered": sorted(offered), "pending": pending})
+        compact = re.sub(r"\n\s*\n+", "\n", body.strip())    # the words, not the spacing
+        blocks.append(f"[{len(pending)}] {_shown(item.title)}\n{_shown(compact)}")
+    ledger.update(offered=sorted(offered), pending=pending)
+    _write_pending(session_id, ledger)
     if not blocks and not too_long:
         return
     # A question, in both languages, with the answer spelled out: a person who
@@ -736,9 +742,9 @@ def pending_rules(ctx: click.Context) -> None:
                      "считать это правилом. / Any other reply keeps it as a note "
                      "the agent will not treat as a rule.")
     if too_long:
-        lines.append(f"Слишком длинное, чтобы показать здесь — одобрить в терминале "
-                     f"`skillmem review` / Too long to show here, approve with "
-                     f"`skillmem review`: {', '.join(too_long)}")
+        lines.append(f"Ещё {len(too_long)} (длинные или сверх {_PENDING_MAX_RULES}) — "
+                     f"одобрить в терминале `skillmem review` / {len(too_long)} more "
+                     f"(long, or over {_PENDING_MAX_RULES}): `skillmem review`")
     print(json.dumps({"systemMessage": "\n".join(lines)}, ensure_ascii=False))
 
 
@@ -747,8 +753,9 @@ def _owner_approval(ctx: click.Context, session_id: str, prompt: str) -> bool:
     saying so. Any other message withdraws the offer: approval is the reply."""
     ledger = _read_pending(session_id)
     pending = ledger.pop("pending", None)
-    if pending:
-        _write_pending(session_id, ledger)
+    # the turn starts here: pending-rules offers only what this turn saved
+    ledger["turn_at"] = time.time()
+    _write_pending(session_id, ledger)
     if not pending or prompt.strip().strip(".!").lower() not in APPROVE_WORDS:
         return False
     try:
