@@ -1306,15 +1306,21 @@ def _valid_visibility(visibility: str | None) -> str:
 
 def set_trust(conn: sqlite3.Connection, slug: str, *, trusted: bool,
               by: str = "owner", expect_hash: str | None = None,
-              expect_kind: str | None = None) -> MemoryItem | None:
+              expect_kind: str | None = None,
+              owner_prompt: bool = False) -> MemoryItem | None:
     """Grant or withdraw the owner's approval, the owner's act either way.
 
     Approval is pinned to what the owner just read (INV-01): `expect_hash` and
     `expect_kind` are compared under the lock, so a rewrite or a relabel that
     lands between the read and the approval fails instead of being approved.
     An archived record is refused: it would sit approved and out of every read.
+
+    ``owner_prompt`` is the second owner signal: the UserPromptSubmit hook saw
+    the owner's own message say "approve" right after the Stop hook showed them
+    this text. Claude Code runs hooks, not the agent; the deny rules keep the
+    agent from running `skillmem hook` itself (accident protection, as the TTY is).
     """
-    if not owner_present():
+    if not (owner_prompt or owner_present()):
         raise SealedRecord(f"approving '{slug}' or withdrawing its approval is the "
                            f"owner's act; it needs a person at a terminal")
     with tx(conn):     # one step: read, check the text, write

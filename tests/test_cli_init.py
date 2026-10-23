@@ -46,10 +46,10 @@ def test_init_idempotent(fakehome: Path):
     assert len(cfg["mcpServers"]) == 1
     settings2 = json.loads((fakehome / ".claude" / "settings.json").read_text())
     assert settings1["hooks"] == settings2["hooks"]
-    # full mode: Stop = session-recap only. The Stop→migrate hook is gone: it
-    # imported the alphabetically-first project's memory dir, not this one's.
+    # full mode: Stop = session-recap + pending-rules. The Stop→migrate hook is
+    # gone: it imported the alphabetically-first project's memory dir, not this one's.
     hook_count = sum(len(grp["hooks"]) for grp in settings2["hooks"]["Stop"])
-    assert hook_count == 1
+    assert hook_count == 2
     # the deny rule for `skillmem trust` is installed once, not per run
     assert settings2["permissions"]["deny"].count("Bash(skillmem trust*)") == 1
 

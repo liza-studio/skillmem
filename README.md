@@ -261,6 +261,11 @@ The frame makes the boundary legible; it is not a guarantee that a model ignores
 sitting inside data. That guarantee comes from the reader having no tools — which is why the
 summariser has none.
 
+**Approve in chat.** When a session saves a new rule, the Stop hook `pending-rules` shows it to you
+in full at the end of the reply (read from the database, not from the agent's text). Reply with just
+`одобряю` (or `approve`) and that exact text becomes your rule; any other reply leaves it unapproved.
+Rules too long to show there are left for `skillmem trust`.
+
 **Who can approve.** `skillmem trust <slug>` (and `--untrust`) refuses to run without a terminal,
 so an agent calling it from Bash gets an error, not an approval. So do the other owner-only
 commands: `rm`, `skills-archive` (and `--restore`), `skills-restore`, `skills rm`, `import-vault`

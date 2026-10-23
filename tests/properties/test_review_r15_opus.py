@@ -44,13 +44,13 @@ def test_every_hook_opens_the_database_the_mcp_server_opens(runs):
         settings = json.loads((root / ".claude" / "settings.json").read_text())
         commands = [h["command"] for groups in settings["hooks"].values()
                     for g in groups for h in g["hooks"]]
-        assert len(commands) == 8
+        assert len(commands) == 9
         for command in commands:
             assert _database_of(_argv(command), ambient) == mcp_db, command
         # a second init repoints, never doubles
         result = CliRunner().invoke(cli.main, ["init", "--claude-code"])
         settings = json.loads((root / ".claude" / "settings.json").read_text())
-        assert sum(len(g["hooks"]) for gs in settings["hooks"].values() for g in gs) == 8
+        assert sum(len(g["hooks"]) for gs in settings["hooks"].values() for g in gs) == 9
         result = CliRunner().invoke(cli.main, ["uninstall"], input="y\n")
         settings = json.loads((root / ".claude" / "settings.json").read_text())
         assert not settings.get("hooks"), settings

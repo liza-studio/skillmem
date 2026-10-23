@@ -591,6 +591,7 @@ def test_every_owner_only_command_is_denied_by_init(mcp):
         "Bash(*skillmem*trust*)", "Bash(*skillmem*skills-archive*)",
         "Bash(*skillmem*import-vault*)", "Bash(*skillmem* rm *)",
         "Bash(*skillmem*--db*)", "Bash(*skillmem*skills-restore*)",
+        "Bash(*skillmem hook *)", "Bash(*skillmem.cli hook *)", "Bash(*owner_prompt*)",
         "Bash(*skillmem*--purge-db*)",
     }
 

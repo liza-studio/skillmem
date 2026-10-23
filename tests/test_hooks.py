@@ -49,6 +49,42 @@ def db(memhome: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return path
 
 
+def test_rule_saved_in_session_is_shown_to_owner_and_approved_by_reply(db: Path, tmp_path: Path):
+    conn = S.connect(db)
+    conn.execute("UPDATE memory_items SET updated_at = updated_at - 100")  # before the session
+    conn.commit()
+    project = tmp_path / "proj"
+    (project / "memory").mkdir(parents=True)
+    transcript = project / "sess.jsonl"
+    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 5))
+    transcript.write_text(json.dumps({"timestamp": started}) + "\n", encoding="utf-8")
+    (project / "memory" / "feedback_hotels.md").write_text(
+        "---\nname: feedback-hotels\ndescription: Отели только свободные на даты\n"
+        "metadata:\n  type: feedback\n---\n\nПроверять Booking на даты Сергея.\n",
+        encoding="utf-8")
+    stop = {"session_id": "s-approve", "transcript_path": str(transcript)}
+
+    shown = json.loads(_hook(db, "pending-rules", stop))["systemMessage"]
+    assert "Проверять Booking на даты Сергея." in shown       # the full text, from the db
+    assert "feedback-deploy-rules" not in shown and "Никаких" not in shown  # older rows stay out
+
+    # anything else first withdraws the offer
+    _hook(db, "auto-recall", {"session_id": "s-approve", "prompt": "ок, а что дальше?"})
+    assert _hook(db, "auto-recall", {"session_id": "s-approve", "prompt": "одобряю"}) == ""
+    assert S.get(S.connect(db), "feedback-hotels").trusted_at is None
+
+    # the next new rule, offered and answered with the word alone
+    (project / "memory" / "feedback_widths.md").write_text(
+        "---\nname: feedback-widths\ndescription: Ширина Мака\nmetadata:\n  type: feedback\n"
+        "---\n\nПроверять на 1440.\n", encoding="utf-8")
+    assert "Проверять на 1440." in json.loads(_hook(db, "pending-rules", stop))["systemMessage"]
+    out = json.loads(_hook(db, "auto-recall", {"session_id": "s-approve", "prompt": " Одобряю! "}))
+    assert out["decision"] == "block" and "feedback-widths" in out["reason"]
+    assert S.get(S.connect(db), "feedback-widths").trusted_by == "owner-prompt"
+    assert S.get(S.connect(db), "feedback-hotels").trusted_at is None     # offered once
+    assert _hook(db, "pending-rules", stop) == ""                         # nothing new
+
+
 def test_auto_recall_injects_feedback_and_skills(db: Path):
     out = _hook(db, "auto-recall", {
         "prompt": "как правильно задеплоить хотфикс и рестартовать бота на проде",
