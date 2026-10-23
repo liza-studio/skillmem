@@ -716,6 +716,10 @@ _OWNER_DENY_RULES = (
     "Bash(*`*skillmem*)",
     "Bash(*eval*skillmem*)",
     "Bash(*skillmem*eval*)",
+    # a hook fed a forged prompt would be the owner saying "approve"
+    "Bash(*skillmem hook *)",
+    "Bash(*skillmem.cli hook *)",
+    "Bash(*owner_prompt*)",
 )
 
 
@@ -1461,6 +1465,8 @@ def init(
                       matcher="Bash|Edit|Write|NotebookEdit"),
                 # recap invokes `claude -p` — the timeout must cover the LLM call
                 _hook("Stop", ["hook", "session-recap"], timeout=95),
+                # shows the owner new unapproved rules; "одобряю" approves them
+                _hook("Stop", ["hook", "pending-rules"], timeout=30),
                 # once, not rate-limited; Claude Code caps SessionEnd at 60s
                 _hook("SessionEnd", ["hook", "session-recap"], timeout=60),
             ]

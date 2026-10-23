@@ -28,6 +28,16 @@ reading the code.
   command line before the shell rewrites it (`skillmem tr''ust x` matches
   none). Neither is a wall against an agent with a shell, and nothing here
   claims one; the invariants hold relative to this signal.
+  *Approve-in-chat:* `set_trust(owner_prompt=True)` is a second signal with
+  one caller, the UserPromptSubmit hook, and only for the exact text the Stop
+  hook `pending-rules` just showed the person (`systemMessage`, read from the
+  database), when their very next message is just "approve" / "одобряю".
+  Claude Code runs hooks, not the agent; the deny rules
+  `Bash(*skillmem hook *)` keep the agent from feeding a hook a forged prompt.
+  Same strength as the TTY: accident protection, not a wall. The pending list
+  lives in the state dir, which an agent with a shell can write; the Stop
+  hook rewrites it before every offer, so a forgery has to land after the
+  turn ends and before the owner replies.
 - **Write lock**: the SQLite write lock that `storage.tx()` takes with
   `BEGIN IMMEDIATE` (storage.py:124). A nested `tx()` is a SAVEPOINT inside
   the same lock.

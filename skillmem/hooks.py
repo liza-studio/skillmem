@@ -609,6 +609,180 @@ def hook_group() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Stop: pending-rules → UserPromptSubmit: approval by the owner's own message
+# --------------------------------------------------------------------------- #
+
+# The whole message, nothing else: a pasted page or mail never is just this word.
+APPROVE_WORDS = frozenset({"approve", "одобряю"})
+_PENDING_KINDS = ("user", "feedback")
+# A rule longer than this is not shown whole in a status line, and approving
+# text the owner did not see is what INV-01 forbids: those go to `skillmem review`.
+_PENDING_MAX_CHARS = 1500
+_PENDING_MAX_RULES = 3       # more than this in one reply is a wall; the rest → review
+
+
+def _pending_file(session_id: str) -> Path:
+    d = _state_dir() / "pending"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return d / f"{_safe_session(session_id)}.json"
+
+
+def _read_pending(session_id: str) -> dict[str, Any]:
+    try:
+        data = json.loads(_pending_file(session_id).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_pending(session_id: str, data: dict[str, Any]) -> None:
+    try:
+        _pending_file(session_id).write_text(json.dumps(data), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _session_started(transcript: Path) -> float | None:
+    """The first timestamp in the transcript: the session's own start."""
+    try:
+        with transcript.open(encoding="utf-8") as fh:
+            for _, line in zip(range(50), fh):
+                ts = json.loads(line).get("timestamp")
+                if ts:
+                    return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        pass
+    return None
+
+
+def _shown(text: str) -> str:
+    """Text for the owner's screen: controls and invisible characters escaped."""
+    return "".join(
+        ch if ch in "\n\t" or not (unicodedata.category(ch) in ("Cc", "Zl", "Zp")
+                                   or renders_as_nothing(ch))
+        else ch.encode("unicode_escape").decode("ascii") for ch in text)
+
+
+@hook_group.command("pending-rules")
+@click.pass_context
+def pending_rules(ctx: click.Context) -> None:
+    """Stop: show the owner every rule this session saved unapproved, in full.
+
+    The text goes to the person (systemMessage), read from the database, not
+    from anything the agent wrote in its reply. Replying with just "approve"
+    approves exactly that text (see _owner_approval).
+    """
+    data = _read_input()
+    session_id = str(data.get("session_id") or "unknown")
+    transcript = Path(str(data.get("transcript_path") or ""))
+    ledger = _read_pending(session_id)
+    # This turn only. From the session start, a session left open for days
+    # offered every rule any session had touched since — a wall of old text.
+    since = ledger.get("turn_at") or _session_started(transcript)
+    if not isinstance(since, (int, float)):
+        return
+    try:
+        conn = _connect(ctx)
+    except Exception:
+        return
+    # Claude Code's auto-memory writes .md files; without this they reached the
+    # database only on a manual `skillmem migrate`.
+    memdir = transcript.parent / "memory"
+    if memdir.is_dir():
+        from .migrate import import_file
+        for path in memdir.glob("*.md"):
+            try:
+                # 2 s slack: Windows stamps files from a coarse clock, so a file
+                # written right after `since` can read as older. Re-importing an
+                # unchanged file is a no-op, and what is offered goes by updated_at.
+                if path.name.upper() != "MEMORY.MD" and path.stat().st_mtime >= since - 2:
+                    import_file(conn, path)
+            except Exception:
+                pass
+        conn.commit()
+
+    offered = {tuple(x) for x in ledger.get("offered", [])}
+    rows = conn.execute(
+        "SELECT slug, content_hash FROM memory_items WHERE trusted_at IS NULL "
+        "AND deleted_at IS NULL AND lifecycle != 'archived' "
+        f"AND kind IN ({','.join('?' * len(_PENDING_KINDS))}) AND updated_at >= ? "
+        "ORDER BY updated_at", (*_PENDING_KINDS, int(since))).fetchall()
+    pending: list[list[str]] = []
+    blocks: list[str] = []
+    too_long: list[str] = []
+    for slug, content_hash in rows:
+        if (slug, content_hash) in offered:      # each text is offered once
+            continue
+        offered.add((slug, content_hash))
+        item = S.get(conn, slug)
+        body = S.load_body(item) if item else ""
+        if (item is None or S.is_excerpt(item, body) or len(body) > _PENDING_MAX_CHARS
+                or len(pending) >= _PENDING_MAX_RULES):
+            too_long.append(slug)
+            continue
+        pending.append([slug, content_hash])
+        compact = re.sub(r"\n\s*\n+", "\n", body.strip())    # the words, not the spacing
+        blocks.append(f"[{len(pending)}] {_shown(item.title)}\n{_shown(compact)}")
+    ledger.update(offered=sorted(offered), pending=pending)
+    _write_pending(session_id, ledger)
+    if not blocks and not too_long:
+        return
+    # A question, in both languages, with the answer spelled out: a person who
+    # never read the docs must know what to type. Not "yes"/"да": people say
+    # that to the agent's own questions, and the hook would swallow the reply.
+    lines = []
+    if blocks:
+        lines.append(f"🧠 skillmem — агент запомнил {len(blocks)} правил(о). "
+                     f"Сделать вашим правилом? / The agent saved {len(blocks)} "
+                     f"rule(s). Make it your rule?\n")
+        lines += [b + "\n" for b in blocks]
+        lines.append("👉 Да — ответьте одним словом: одобряю  "
+                     "(Yes — reply with one word: approve)")
+        lines.append("Любой другой ответ — оставить как справку, агент не будет "
+                     "считать это правилом. / Any other reply keeps it as a note "
+                     "the agent will not treat as a rule.")
+    if too_long:
+        lines.append(f"Ещё {len(too_long)} (длинные или сверх {_PENDING_MAX_RULES}) — "
+                     f"одобрить в терминале `skillmem review` / {len(too_long)} more "
+                     f"(long, or over {_PENDING_MAX_RULES}): `skillmem review`")
+    print(json.dumps({"systemMessage": "\n".join(lines)}, ensure_ascii=False))
+
+
+def _owner_approval(ctx: click.Context, session_id: str, prompt: str) -> bool:
+    """Approve what pending-rules just showed, if this message is the owner
+    saying so. Any other message withdraws the offer: approval is the reply."""
+    ledger = _read_pending(session_id)
+    pending = ledger.pop("pending", None)
+    # the turn starts here: pending-rules offers only what this turn saved
+    ledger["turn_at"] = time.time()
+    _write_pending(session_id, ledger)
+    if not pending or prompt.strip().strip(".!").lower() not in APPROVE_WORDS:
+        return False
+    try:
+        conn = _connect(ctx)
+    except Exception:
+        return False
+    done, failed = [], []
+    for slug, content_hash in pending:
+        try:
+            S.set_trust(conn, slug, trusted=True, by="owner-prompt",
+                        expect_hash=content_hash, owner_prompt=True)
+            conn.commit()
+            done.append(slug)
+        except (S.MemoryConflict, S.SealedRecord):
+            failed.append(slug)       # changed since shown: not the text approved
+    reason = f"✅ skillmem: approved {len(done)}: {', '.join(done)}" if done else ""
+    if failed:
+        reason += f"\nchanged since shown, not approved: {', '.join(failed)}"
+    # block: the word was for skillmem, the agent has nothing to answer
+    print(json.dumps({"decision": "block", "reason": reason.strip()}, ensure_ascii=False))
+    return True
+
+
+# --------------------------------------------------------------------------- #
 # UserPromptSubmit: auto-recall
 # --------------------------------------------------------------------------- #
 
@@ -626,6 +800,8 @@ def auto_recall(ctx: click.Context) -> None:
     except Exception:
         pass
 
+    if _owner_approval(ctx, session_id, prompt):
+        return
     if len(prompt) < 10:
         return
     prompt = prompt[:2000]    # the head says what it is about; a pasted log outlived the timeout

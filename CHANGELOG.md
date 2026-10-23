@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Approve in chat.** A new Stop hook, `pending-rules`, shows the person (as a
+  `systemMessage`) every `user`/`feedback` rule the session saved unapproved,
+  in full, read from the database. If their very next message is just
+  `одобряю` / `approve`, the UserPromptSubmit hook approves exactly that text
+  (`trusted_by='owner-prompt'`) and keeps the word from the agent. Any other
+  reply withdraws the offer. Rules over 1500 characters are left for
+  `skillmem trust`. Second owner signal, documented in INVARIANTS §0.
+- `pending-rules` also imports the session's auto-memory `.md` files changed
+  since it started, so a rule written in the session reaches the database (and
+  recall) before the session ends instead of on a manual `skillmem migrate`.
+- `init --claude-code` adds the Stop hook and deny rules for
+  `skillmem hook …` and `owner_prompt`.
+
 ## 0.12.1
 
 Packaging only; no change in behaviour.

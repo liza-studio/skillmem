@@ -30,6 +30,11 @@
         "hooks": [
           { "type": "command", "command": "skillmem hook session-recap", "timeout": 95 }
         ]
+      },
+      {
+        "hooks": [
+          { "type": "command", "command": "skillmem hook pending-rules", "timeout": 30 }
+        ]
       }
     ],
     "SessionEnd": [
