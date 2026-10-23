@@ -580,6 +580,8 @@ def test_every_owner_only_command_is_denied_by_init(mcp):
     from skillmem import cli as C
     assert set(C._OWNER_DENY_RULES) == {
         "Bash(skillmem trust*)", "Bash(skillmem skills-archive*)",
+        "Bash(skillmem review*)", "Bash(*skillmem review*)",
+        "Bash(*skillmem.cli review*)", "Bash(*skillmem*review*)",
         "Bash(skillmem rm*)", "Bash(skillmem import-vault*)",
         "Bash(*skillmem trust*)", "Bash(*skillmem skills-archive*)",
         "Bash(*skillmem rm*)", "Bash(*skillmem import-vault*)",

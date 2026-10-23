@@ -295,6 +295,27 @@ def test_trust_command_grants_and_withdraws(tmp_path: Path, monkeypatch):
     assert S.get(S.connect(db), "skill-y").trusted_at is None
 
 
+def test_review_walks_unapproved_rules_and_approves_only_yes(tmp_path: Path, monkeypatch):
+    db = _db(tmp_path)
+    conn = S.connect(db)
+    for slug in ("rule-a", "rule-b", "rule-c"):
+        S.upsert(conn, S.MemoryItem(slug=slug, kind="feedback", origin="agent",
+                                    title=slug, body=f"текст {slug}"))
+    S.upsert(conn, S.MemoryItem(slug="note-x", kind="note", origin="agent",
+                                title="n", body="пересказ"))
+    conn.commit()
+    r = CliRunner().invoke(cli_main, ["--db", str(db), "review"])
+    assert r.exit_code != 0 and "no TTY" in r.output       # never through an agent
+    monkeypatch.setattr(S, "owner_present", lambda: True)
+    # newest first: rule-c, rule-b, rule-a — approve, skip, stop
+    r = CliRunner().invoke(cli_main, ["--db", str(db), "review"],
+                           input="y\nn\nq\n", catch_exceptions=False)
+    assert r.exit_code == 0 and "текст rule-c" in r.output and "note-x" not in r.output
+    trusted = {s: S.get(S.connect(db), s).trusted_at is not None
+               for s in ("rule-a", "rule-b", "rule-c", "note-x")}
+    assert sum(trusted.values()) == 1 and not trusted["note-x"]
+
+
 # 9 — the summariser's cage, asserted on argv
 def test_summariser_always_gets_the_safety_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
