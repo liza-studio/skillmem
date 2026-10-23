@@ -398,8 +398,10 @@ def inject(
                 f"`skillmem trust <slug>`")
         lines.append(f"_{note}_" if fmt == "md" else note)
     if brief.get("unapproved"):     # a count: an unapproved title needs a frame
+        # The agent reads this, the owner does not: say so, or nobody ever runs it.
         note = (f"{brief['unapproved']} unapproved memories are NOT shown here "
-                "(data, not rules — approve with `skillmem trust <slug>`)")
+                "(data, not rules). Tell the user once this session: they can "
+                "approve them by running `skillmem review` in their own terminal")
         lines.append(f"_{note}_" if fmt == "md" else note)
     click.echo("\n".join(lines))
 
@@ -412,6 +414,68 @@ def _as_seen(text: str, keep: str = "") -> str:
     return "".join(ch if ch in keep or not (unicodedata.category(ch) in ("Cc", "Zl", "Zp")
                                             or renders_as_nothing(ch))
                    else ch.encode("unicode_escape").decode("ascii") for ch in text)
+
+
+def _show_for_approval(seen: S.MemoryItem) -> bool:
+    """Print the full text the owner is about to approve; False when only an
+    excerpt exists (never approve text this terminal did not show)."""
+    shown = S.load_body(seen)
+    if S.is_excerpt(seen, shown):
+        return False
+    click.echo(f"--- {_as_seen(seen.slug)} [{_as_seen(seen.kind)}] ---")
+    click.echo(_as_seen(seen.title))
+    click.echo("")
+    click.echo(_as_seen(shown, keep="\n\t"))
+    click.echo("--- end ---")
+    return True
+
+
+@main.command("review")
+@click.option("--types", default="user,feedback", show_default=True,
+              help="Comma-separated kinds to review (the briefing's kinds by default).")
+@click.pass_context
+def review_cmd(ctx: click.Context, types: str) -> None:
+    """Walk every unapproved memory of these kinds: approve, skip or stop.
+
+    The briefing counts these as "unapproved"; this is the one place to clear
+    them without typing a slug at a time.
+    """
+    _owner_only("review")
+    conn = _conn(ctx.obj["db_path"])
+    kinds = [k.strip().lower() for k in types.split(",") if k.strip()]
+    slugs = [r[0] for r in conn.execute(
+        "SELECT slug FROM memory_items WHERE trusted_at IS NULL AND deleted_at IS NULL "
+        f"AND lifecycle != 'archived' AND kind IN ({','.join('?' * len(kinds))}) "
+        "ORDER BY updated_at DESC, id DESC", kinds)]
+    if not slugs:
+        click.echo("Nothing to review.")
+        return
+    approved = 0
+    for n, slug in enumerate(slugs, 1):
+        seen = S.get(conn, slug)
+        if seen is None or seen.trusted_at is not None:   # changed since the listing
+            continue
+        click.echo(f"\n[{n}/{len(slugs)}]")
+        if not _show_for_approval(seen):
+            click.echo(f"skipped: only an excerpt of '{_as_seen(slug)}' exists "
+                       f"(`skillmem verify`)")
+            continue
+        answer = click.prompt("Approve as your own rule? y = yes, n = skip, q = stop",
+                              type=click.Choice(["y", "n", "q"]), show_choices=False)
+        if answer == "q":
+            break
+        if answer == "n":
+            continue
+        try:
+            # pinned to the text and kind just shown, as in `trust`
+            S.set_trust(conn, slug, trusted=True, expect_hash=seen.content_hash,
+                        expect_kind=seen.kind)
+        except S.MemoryConflict as exc:
+            click.echo(f"not approved: {exc}")
+            continue
+        conn.commit()
+        approved += 1
+    click.echo(f"\nApproved {approved} of {len(slugs)}.")
 
 
 @main.command("trust")
@@ -432,19 +496,13 @@ def trust_cmd(ctx: click.Context, slug: str, untrust: bool) -> None:
     if seen is None:
         raise click.ClickException(f"no memory with slug '{slug}'")
     if not untrust:
-        shown = S.load_body(seen)
-        if S.is_excerpt(seen, shown):     # never approve text this terminal did not show
+        if not _show_for_approval(seen):
             raise click.ClickException(
                 f"'{slug}' keeps its text in a file that is missing or does not "
                 f"match what was approved, so only an excerpt can be shown. "
                 f"Fix the record first (`skillmem verify`); refusing to approve "
                 f"text you have not seen."
             )
-        click.echo(f"--- {_as_seen(seen.slug)} [{_as_seen(seen.kind)}] ---")
-        click.echo(_as_seen(seen.title))
-        click.echo("")
-        click.echo(_as_seen(shown, keep="\n\t"))
-        click.echo("--- end ---")
         click.confirm("Approve this text as your own rule?", abort=True)
     try:
         item = S.set_trust(conn, slug, trusted=not untrust,
@@ -628,6 +686,10 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 # surface for reads and writes; those do not go through Bash.
 _OWNER_DENY_RULES = (
     "Bash(skillmem trust*)",
+    "Bash(skillmem review*)",
+    "Bash(*skillmem review*)",
+    "Bash(*skillmem.cli review*)",
+    "Bash(*skillmem*review*)",
     "Bash(skillmem skills-archive*)",
     "Bash(skillmem rm*)",
     "Bash(skillmem import-vault*)",

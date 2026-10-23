@@ -262,8 +262,11 @@ sitting inside data. That guarantee comes from the reader having no tools — wh
 summariser has none.
 
 **Who can approve.** `skillmem trust <slug>` (and `--untrust`) refuses to run without a terminal,
-so an agent calling it from Bash gets an error, not an approval. So do the other owner-only
-commands: `rm`, `skills-archive` (and `--restore`), `skills-restore`, `skills rm`, `import-vault`
+so an agent calling it from Bash gets an error, not an approval. To clear the backlog in one go,
+run `skillmem review`: it shows every unapproved `user`/`feedback` memory in full (`--types` for
+other kinds) and asks y / n / q for each. The session briefing counts them and asks the agent to
+point you here. The other owner-only commands refuse without a terminal
+the same way: `review`, `rm`, `skills-archive` (and `--restore`), `skills-restore`, `skills rm`, `import-vault`
 and `uninstall --purge-db`. The MCP and HTTP servers never count as you, even when they run in
 your terminal. A TTY check is accident protection, not a wall — `script -q /dev/null skillmem trust x` forges one — so
 `init --claude-code` also adds deny rules for those commands to `permissions.deny` in
