@@ -1131,6 +1131,16 @@ def test_migrate_on_identical_text_keeps_provenance(home, tmp_path):
     assert row["origin"] == "owner" and row["trusted_at"] is not None
 
 
+def test_session_recaps_do_not_bury_the_curated_answer(home: Path):
+    conn = _conn(home)
+    for i in range(3):
+        S.upsert(conn, S.MemoryItem(slug=f"recap-{i}", kind="note", title=f"recap {i}",
+                                    body="prod server prod server prod server talk"))
+    S.upsert(conn, S.MemoryItem(slug="prod-host", kind="reference", title="prod host",
+                                body="the prod server is spb-179, nothing else"))
+    assert S.search(conn, "prod server", limit=3)[0]["slug"] == "prod-host"
+
+
 def test_same_text_write_with_new_ttl_moves_the_deadline(home: Path):
     conn = _conn(home)
     S.upsert(conn, S.MemoryItem(slug="ttl-probe", kind="note", title="t", body="same words here"))

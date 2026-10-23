@@ -677,18 +677,26 @@ def tool_recall(ctx: click.Context) -> None:
         return
     query = _clean_query(query)
 
-    conn = _connect(ctx)
-    seen = _read_seen(session_id)
-    slugs: list[str] = []
-    context = _recall_sections(
-        conn, query, seen=seen,
-        skills_limit=2, fb_limit=2, body_chars=250,
-        fb_header="### Rules/warnings from feedback:",
-        skills_header="### Similar past tasks (skills):",
-        min_strength=0.3,
-        budget=1000,
-        emitted_slugs=slugs,
-    )
+    # Lexical only: loading the embedding model costs ~1.2 s on EVERY tool call,
+    # and a shell command or a path is a lexical query anyway. MEM_SEMANTIC=1 restores it.
+    prev = os.environ.get("MEM_SEMANTIC")
+    os.environ.setdefault("MEM_SEMANTIC", "0")
+    try:
+        conn = _connect(ctx)
+        seen = _read_seen(session_id)
+        slugs: list[str] = []
+        context = _recall_sections(
+            conn, query, seen=seen,
+            skills_limit=2, fb_limit=2, body_chars=250,
+            fb_header="### Rules/warnings from feedback:",
+            skills_header="### Similar past tasks (skills):",
+            min_strength=0.3,
+            budget=1000,
+            emitted_slugs=slugs,
+        )
+    finally:
+        if prev is None:
+            os.environ.pop("MEM_SEMANTIC", None)
     _append_seen(session_id, slugs)
     _log_line("tool-recall", session_id[:8], tool_name, len(slugs),
               ",".join(slugs), len(context))
