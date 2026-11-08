@@ -377,4 +377,4 @@ Apache-2.0 — see [LICENSE](LICENSE).
 
 ---
 
-Built by **Liza Studio**.
+Built by **Sergey Petrukovich** (Сергей Петрукович), [Liza Studio](https://lizastudio.ru).
