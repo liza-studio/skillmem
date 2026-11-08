@@ -21,7 +21,7 @@ skillmem gives Claude Code and the Codex CLI a local, persistent skill & memory 
 - **Ebbinghaus strength model, earned not claimed** — strength rises only on evidence from outside the agent's own judgement, falls after a failure, and fades on a schedule when unused; dead skills are swept to a backed-up archive (never deleted). Rules that are rare by nature can be pinned out of decay.
 - **Provenance, and trust the owner grants** — every memory records where it came from (`owner` / `agent` / `imported` / `derived`), and only the owner approves one as a rule (`skillmem trust <slug>`). Anything unapproved — an imported pack, a summary of a transcript that quoted a web page, a rule an agent was talked into saving — is injected inside a marked block that says it is data, not instructions. An agent cannot change a memory the owner wrote or approved: it writes a proposal under a new slug.
 - **Tamper-evident history** — every edit is appended to a SHA256 hash-chain; `skillmem verify` detects any after-the-fact tampering.
-- **Deep Claude Code integration** — hooks on five events + 9 MCP tools installed with one command.
+- **Deep Claude Code integration** — hooks on six events + 9 MCP tools installed with one command.
 - **One memory, several agents** — Claude Code and Codex share a single database, and every
   record carries the agent that wrote it, taken from the MCP handshake, so authorship stays
   readable when they learn side by side.
@@ -64,10 +64,10 @@ a hosted tier. skillmem is narrower on purpose and different on four axes:
 |---|---|
 | **What it stores** | procedures — trigger, steps, outcome, lessons — not facts about a user |
 | **What it forgets** | actively: unused skills decay on an Ebbinghaus schedule and are archived; rare-but-critical rules are pinned out of it |
-| **Where strength comes from** | outside evidence only — a passing test, an accepted diff, your confirmation. An agent saying "that helped" moves recency, never strength, so it cannot promote its own mistake. `reinforce` is not idempotent: a retried confirmation counts again (evidence ids are a later release) |
+| **Where strength comes from** | an agent saying "that helped" moves recency, never strength. Over MCP, `test_passed` raises strength only if the `test-witness` hook saw a test runner, run alone, succeed in the last 10 minutes; without that it is recorded as `self_report` and the response says so. It proves a test passed, not that this skill helped, and an agent with a shell can fake one. `diff_accepted` and `user_confirmed` are still the agent's unchecked claim, and CLI and HTTP callers are not checked. `reinforce` is not idempotent: a retried confirmation counts again (evidence ids are a later release) |
 | **Who is trusted** | you. Provenance is recorded, approval is yours to give, and unapproved memory arrives framed as data |
 | **Where it runs** | your disk. SQLite + FTS5 + a local ONNX embedding model. No API key, no cloud, no Docker, no graph database |
-| **How it reaches the agent** | hooks on five events (SessionStart, UserPromptSubmit, PreToolUse, Stop, SessionEnd) — recall happens whether or not the agent thinks to ask, plus 9 MCP tools when it does |
+| **How it reaches the agent** | hooks on six events (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, SessionEnd) — recall happens whether or not the agent thinks to ask, plus 9 MCP tools when it does |
 
 Retrieval quality is measured, not asserted: **hit@5 0.871 / MRR 0.622** on the full LongMemEval
 oracle set, hybrid retrieval, k=5, CPU only, reproducible from this repo — see
@@ -248,6 +248,7 @@ rules you wrote yourself.
 | UserPromptSubmit | `verify-gate` | "Search before you claim" reminder on time-sensitive prompts (bilingual EN/RU triggers) |
 | UserPromptSubmit | `auto-recall` | Relevant feedback + skills matched against the prompt |
 | PreToolUse | `tool-recall` | Skills/warnings matched against the Bash command or edited file (including notebooks) |
+| PostToolUse | `test-witness` | Records that a test runner, run alone in Bash, succeeded; `mem_reinforce` needs this for `test_passed` |
 | Stop | `session-recap` | Distills the session into a markdown note via `claude -p` — rate-limited (one call per session per `SKILLMEM_RECAP_MIN_INTERVAL`, default 600s), one note per session per day, and the child runs with no tools |
 | SessionEnd | `session-recap` | The session's last word, not rate-limited, so the closing turns still reach memory |
 

@@ -2509,6 +2509,26 @@ EVIDENCE_WEIGHTS: dict[str, float] = {
 }
 #: A skill followed by a failure loses ground faster than idleness takes it.
 FAILURE_FACTOR = 0.7
+#: How long a test run the harness saw backs ``test_passed`` over MCP.
+WITNESS_TTL_SECONDS = 600
+
+
+def witness_path(db_path: Path | str | None = None) -> Path:
+    """The file whose mtime says the PostToolUse hook saw a test pass. Beside
+    the database, so a witness backs that database only (INV-12); no MCP tool
+    takes a path, and it holds no text a tool could reach."""
+    db = Path(db_path).expanduser() if db_path else default_db_path()
+    return db.with_name(db.name + ".test-witness")
+
+
+def witnessed_pass(db_path: Path | str | None = None) -> bool:
+    """Did the hook see a test pass within the window? A date ahead of the
+    clock is no witness; a second's grace is for the file system's own clock."""
+    try:
+        age = time.time() - witness_path(db_path).stat().st_mtime
+    except OSError:
+        return False
+    return -1 <= age <= WITNESS_TTL_SECONDS
 
 
 def reinforce(

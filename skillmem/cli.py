@@ -1463,6 +1463,8 @@ def init(
                 _hook("UserPromptSubmit", ["hook", "auto-recall"]),
                 _hook("PreToolUse", ["hook", "tool-recall"],
                       matcher="Bash|Edit|Write|NotebookEdit"),
+                # `mem_reinforce evidence=test_passed` counts only after this saw a pass
+                _hook("PostToolUse", ["hook", "test-witness"], matcher="Bash"),
                 # recap invokes `claude -p` — the timeout must cover the LLM call
                 _hook("Stop", ["hook", "session-recap"], timeout=95),
                 # shows the owner new unapproved rules; "одобряю" approves them

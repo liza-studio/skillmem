@@ -209,6 +209,7 @@ def test_learn_recall_reinforce_cycle(mcp):
     assert noted["strength"] == 1.0 and noted["access_count"] == 1
 
     # An outside signal is what actually moves it.
+    S.witness_path().touch()
     boosted = _payload(mcp.TOOL_HANDLERS["mem_reinforce"](
         {"slug": "skill-nginx-reload", "evidence": "test_passed"}))
     assert boosted["strength"] > 1.0 and boosted["confirmed_count"] == 1

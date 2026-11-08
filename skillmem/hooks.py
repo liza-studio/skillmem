@@ -9,6 +9,7 @@ Events:
     SessionStart      -> mcp-guard, session-history
     UserPromptSubmit  -> verify-gate, auto-recall
     PreToolUse        -> tool-recall   (Bash|Edit|Write|NotebookEdit)
+    PostToolUse       -> test-witness  (Bash)
     Stop              -> session-recap (rate-limited; indexes its own note)
     SessionEnd        -> session-recap (once per session, not rate-limited)
 
@@ -879,6 +880,55 @@ def tool_recall(ctx: click.Context) -> None:
     if not context.strip():
         return
     _emit("PreToolUse", f"🔧 Tool-recall (context for {tool_name}):\n{context}")
+
+
+# --------------------------------------------------------------------------- #
+# PostToolUse: test-witness
+# --------------------------------------------------------------------------- #
+
+# A test runner alone on the line. The payload has no exit code: Claude Code
+# fires PostToolUse when the command as a whole succeeded, so after a pipe, `;`
+# or `||` that says nothing about the runner. `cd x && ` keeps its status.
+_ARG_CHARS = r"[^|&;<>$`\\\r\n]"
+_TEST_RUNNER = re.compile(
+    r"(?:cd [^\s|&;<>$`\\]+ && )?(?:[\w.-]*/)*(?:"
+    r"py\.?test|tox|nox|mocha|ctest|rspec|phpunit"
+    r"|python[\d.]* -m (?:pytest|unittest)"
+    r"|(?:uv|poetry|pipenv|hatch) run (?:(?:[\w.-]*/)*pytest|python[\d.]* -m pytest)"
+    r"|(?:npm|pnpm|yarn|bun) (?:run )?test|(?:npx )?vitest run|(?:npx )?jest"
+    r"|(?:go|cargo|deno|make|mvn|gradle|gradlew|dotnet) test|cargo nextest run"
+    r")(?: " + _ARG_CHARS + r"*)?"
+)
+# A shape check, not proof that tests ran: an agent with a shell can still fake
+# a runner. The same strength as the owner signal (INVARIANTS, Terms).
+_NOT_A_RUN = frozenset({
+    "-h", "--help", "-V", "--version", "--co", "--collect-only", "--no-run", "--dry-run",
+    "--list", "-list", "--list-tests", "--listTests", "--fixtures", "--markers",
+    "--setup-plan", "--setup-only",
+})
+
+
+@hook_group.command("test-witness")
+@click.pass_context
+def test_witness(ctx: click.Context) -> None:
+    """Note that the harness saw a test runner succeed (`mem_reinforce` asks)."""
+    data = _read_input()
+    tool_input, response = data.get("tool_input"), data.get("tool_response")
+    if (data.get("hook_event_name") != "PostToolUse" or data.get("tool_name") != "Bash"
+            or not isinstance(tool_input, dict) or not isinstance(response, dict)
+            or tool_input.get("run_in_background")
+            # interrupted, moved to the background, or a tolerated non-zero exit
+            or any(response.get(k) for k in ("interrupted", "backgroundTaskId",
+                                             "timedOutAfterMs", "returnCodeInterpretation"))):
+        return
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        return
+    command = command.replace("2>&1", "").strip()
+    if not _TEST_RUNNER.fullmatch(command) or _NOT_A_RUN & set(command.split()):
+        return
+    S.witness_path((ctx.obj or {}).get("db_path")).touch()
+    _log_line("test-witness", str(data.get("session_id") or "unknown")[:8])
 
 
 # --------------------------------------------------------------------------- #
