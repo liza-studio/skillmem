@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **`test_passed` over MCP has to be witnessed.** `mem_reinforce` took it on the
+  agent's word. A new PostToolUse hook on Bash, `test-witness`, records when a
+  test runner run alone succeeded; without one in the last 10 minutes the call
+  is recorded as `self_report`, strength stays put and the response has a
+  `warning`. Run `skillmem init --claude-code` again to get the hook: without
+  it (and on other MCP clients) `test_passed` never raises strength. CLI,
+  library and HTTP callers are unchanged. `diff_accepted` and `user_confirmed`
+  remain unwitnessed claims.
+
 ## 0.13.0
 
 Rules an agent saves for you now get approved, instead of sitting unapproved

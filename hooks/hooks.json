@@ -25,6 +25,14 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "skillmem hook test-witness", "timeout": 10 }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

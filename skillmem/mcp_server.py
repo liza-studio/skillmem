@@ -300,10 +300,20 @@ def _tool_reinforce(args: dict[str, Any]) -> list[TextContent]:
     if evidence not in S.EVIDENCE_WEIGHTS:
         return _err(f"unknown evidence: {evidence}; expected one of "
                     f"{', '.join(sorted(S.EVIDENCE_WEIGHTS))}")
+    # the agent's word is not a test run: the harness has to have seen one
+    unwitnessed = evidence == "test_passed" and not S.witnessed_pass()
     conn = _shared_conn()
-    result = S.reinforce(conn, slug, evidence=evidence, surface="mcp")
+    result = S.reinforce(conn, slug, evidence="self_report" if unwitnessed else evidence,
+                         surface="mcp")
     if not result:
         return _err(f"not found, or not a skill: {slug}")
+    if unwitnessed:
+        result["warning"] = (
+            "Recorded as self_report, strength unchanged: the test-witness hook saw no "
+            f"test pass in the last {S.WITNESS_TTL_SECONDS // 60} minutes. It only sees a "
+            "test runner run alone (not piped, chained or in the background) under "
+            "Claude Code with `skillmem init --claude-code` hooks."
+        )
     return _ok(result)
 
 
@@ -530,7 +540,9 @@ TOOLS: list[Tool] = [
             "WRITES the skill's counters. `evidence`: test_passed / diff_accepted / "
             "user_confirmed raise strength; failure lowers it; the default "
             "self_report only refreshes recency — your own judgement that it helped "
-            "is not evidence. Each call counts; calling twice for one outcome "
+            "is not evidence. test_passed counts only if the harness saw a test "
+            "runner exit 0 in the last 10 minutes (run it alone, not piped); "
+            "otherwise it is recorded as self_report and `warning` says so. Each call counts; calling twice for one outcome "
             "double-counts. Fails for an unknown slug or a record that is not a "
             "skill. Returns slug, strength, access_count and the evidence recorded. "
             "Use mem_update to correct a skill's text instead; use mem_pin for a rule "
